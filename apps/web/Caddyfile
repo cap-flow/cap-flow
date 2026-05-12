@@ -1,0 +1,12 @@
+# Internal Caddy that serves the SPA.
+# The edge Caddy in infra/ proxies to this on port 80.
+:80 {
+	root * /srv
+	encode zstd gzip
+	try_files {path} /index.html
+	file_server
+
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	header Cache-Control "no-cache"
+}

@@ -1,0 +1,448 @@
+/**
+ * EVM chain classifier — server port of
+ * `apps/web/src/lib/portfolio/classifier.ts` (P5.3).
+ *
+ * Pure function: takes raw DeBank history items + context, returns
+ * `ClassifiedOp[]` with financial categories (deposit_fiat / swap /
+ * lend_supply / borrow / lp_add / …). Junk-detection runs as a second
+ * pass, tags are appended to `op.notes`.
+ *
+ * Sorting: input is "newest → oldest" (DeBank order); output is
+ * "oldest → newest" so the cost-basis reducer can move forward in time.
+ */
+
+import { classifyJunk } from "./junk_filter.js";
+import {
+  classifyProtocol,
+  isProtocolToken,
+  isStableSymbol,
+} from "./protocols.js";
+import { isDebtReceiptOfProtocol, isReceiptOfProtocol } from "./token_roles.js";
+import type {
+  DeBankHistoryItem,
+  DeBankProject,
+  DeBankToken,
+} from "./debank_types.js";
+import type { ClassifiedOp, OpType, TokenMovement } from "./types.js";
+
+export interface ClassifyContext {
+  readonly ownAddresses: Set<string>;
+  readonly selfAddress: string;
+  readonly tokens: Record<string, DeBankToken>;
+  readonly projects: Record<string, DeBankProject>;
+  readonly cex: Record<string, { id: string; name: string }>;
+}
+
+export function classifyHistory(
+  raw: DeBankHistoryItem[],
+  ctx: ClassifyContext
+): ClassifiedOp[] {
+  const seen = new Set<string>();
+  const unique: DeBankHistoryItem[] = [];
+  for (const it of raw) {
+    const k = `${it.chain}:${it.id}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    unique.push(it);
+  }
+  unique.sort((a, b) => a.time_at - b.time_at);
+
+  const classified = unique.map((it, i) => classifyOne(it, i + 1, ctx));
+  for (const op of classified) {
+    try {
+      const junkTags = classifyJunk(op);
+      if (junkTags.length > 0) {
+        op.notes = [...(op.notes ?? []), ...junkTags];
+      }
+    } catch (e) {
+      // Junk-detection failure must not break the whole history.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[junk_filter] failed for op ${op.hash.slice(0, 10)}:`,
+        (e as Error).message
+      );
+    }
+  }
+  return classified;
+}
+
+function classifyOne(
+  it: DeBankHistoryItem,
+  seq: number,
+  ctx: ClassifyContext
+): ClassifiedOp {
+  const r = doClassify(it, seq, ctx);
+  if (it.tx?.from_addr && it.tx?.to_addr) {
+    const from = it.tx.from_addr.toLowerCase();
+    const to = it.tx.to_addr.toLowerCase();
+    r.counterparty = from === ctx.selfAddress ? it.tx.to_addr : it.tx.from_addr;
+    if (from !== ctx.selfAddress && to !== ctx.selfAddress) {
+      r.counterparty = it.tx.to_addr;
+    }
+  }
+  return r;
+}
+
+function doClassify(
+  it: DeBankHistoryItem,
+  seq: number,
+  ctx: ClassifyContext
+): ClassifiedOp {
+  const movement = buildMovements(it, ctx);
+  const project = (it.project_id && ctx.projects[it.project_id]) || null;
+  const protocol = classifyProtocol(it.project_id, project?.name ?? null);
+
+  const status: "ok" | "failed" = it.tx?.status === 0 ? "failed" : "ok";
+
+  if (status === "failed") {
+    return base(it, seq, "failed", protocol, movement, status);
+  }
+
+  const hasRealOut = movement.some(
+    (m) => m.direction === "out" && m.amount > 1e-6
+  );
+  const hasRealIn = movement.some(
+    (m) => m.direction === "in" && m.amount > 1e-6
+  );
+  const hasMeaningfulMovement = movement.some(
+    (m) => m.amount > 1e-6 && (m.usd ?? 0) > 1
+  );
+  if (
+    (it.cate_id === "approve" || it.token_approve) &&
+    !(hasRealOut && hasRealIn) &&
+    !hasMeaningfulMovement
+  ) {
+    return base(it, seq, "approve", protocol, movement, status);
+  }
+
+  const sends = movement.filter((m) => m.direction === "out");
+  const receives = movement.filter((m) => m.direction === "in");
+
+  // 2. CEX deposit/withdraw.
+  if (it.cex_id && ctx.cex[it.cex_id]) {
+    const cex = ctx.cex[it.cex_id]!;
+    if (sends.length === 0 && receives.length > 0) {
+      return base(it, seq, "deposit_fiat", protocol, movement, status, [
+        `from CEX: ${cex.name}`,
+      ]);
+    }
+    if (sends.length > 0 && receives.length === 0) {
+      return base(it, seq, "withdraw_fiat", protocol, movement, status, [
+        `to CEX: ${cex.name}`,
+      ]);
+    }
+  }
+
+  // 3. Internal transfer between own wallets.
+  const from = it.tx?.from_addr?.toLowerCase();
+  const to = it.tx?.to_addr?.toLowerCase();
+  const ownsFrom = from && ctx.ownAddresses.has(from);
+  const ownsTo = to && ctx.ownAddresses.has(to);
+  if (
+    ownsFrom &&
+    ownsTo &&
+    from !== to &&
+    !protocol &&
+    (sends.length || receives.length)
+  ) {
+    if (sends.length && !receives.length) {
+      return base(it, seq, "transfer_out", protocol, movement, status);
+    }
+    if (receives.length && !sends.length) {
+      return base(it, seq, "transfer_in", protocol, movement, status);
+    }
+  }
+
+  // 4. Bridge.
+  if (protocol?.category === "bridge") {
+    if (sends.length && !receives.length) {
+      return base(it, seq, "bridge_out", protocol, movement, status);
+    }
+    if (receives.length && !sends.length) {
+      return base(it, seq, "bridge_in", protocol, movement, status);
+    }
+  }
+
+  // 5. Lending / CDP.
+  if (
+    protocol &&
+    (protocol.category === "lending" || protocol.category === "cdp")
+  ) {
+    return classifyLending(it, seq, protocol, sends, receives, status, movement);
+  }
+
+  // 6. Staking / restaking.
+  if (
+    protocol &&
+    (protocol.category === "staking" || protocol.category === "restaking")
+  ) {
+    if (receives.some((r) => isProtocolToken(r.symbol))) {
+      return base(it, seq, "stake", protocol, movement, status);
+    }
+    if (sends.some((s) => isProtocolToken(s.symbol))) {
+      return base(it, seq, "unstake", protocol, movement, status);
+    }
+    if (receives.length && !sends.length) {
+      return base(it, seq, "claim_rewards", protocol, movement, status);
+    }
+  }
+
+  // 7. Yield / Perp pool deposits — async-deposit aware semantics.
+  if (protocol?.category === "yield" || protocol?.category === "perp") {
+    const sentProto = sends.some((s) => s.isProtocolToken);
+    const recvProto = receives.some((r) => r.isProtocolToken);
+
+    if (recvProto && !sentProto) {
+      return base(it, seq, "lp_add", protocol, movement, status, [
+        protocol.category === "perp"
+          ? "perp-deposit-fill"
+          : "yield-deposit-fill",
+      ]);
+    }
+    if (sentProto && !recvProto) {
+      return base(it, seq, "lp_remove", protocol, movement, status);
+    }
+    if (sends.length && !receives.length) {
+      return base(it, seq, "lp_add", protocol, movement, status, [
+        protocol.category === "perp" ? "perp-deposit" : "yield-deposit",
+      ]);
+    }
+    if (receives.length && !sends.length) {
+      return base(it, seq, "lp_remove", protocol, movement, status);
+    }
+    if (sends.length && receives.length) {
+      return base(it, seq, "swap", protocol, movement, status);
+    }
+  }
+
+  // 8. DEX / LP.
+  if (protocol && (protocol.category === "dex" || protocol.category === "lp")) {
+    return classifyDex(it, seq, protocol, sends, receives, status, movement);
+  }
+
+  // 9. Plain swap without recognized project (aggregators / direct routers).
+  if (
+    sends.length === 1 &&
+    receives.length === 1 &&
+    sends[0]!.tokenId !== receives[0]!.tokenId
+  ) {
+    return base(it, seq, "swap", protocol, movement, status);
+  }
+
+  // 10. Simple in/out transfers.
+  if (sends.length && !receives.length) {
+    return base(it, seq, "transfer_out", protocol, movement, status);
+  }
+  if (receives.length && !sends.length) {
+    return base(it, seq, "transfer_in", protocol, movement, status);
+  }
+
+  return base(it, seq, "unknown", protocol, movement, status);
+}
+
+function classifyLending(
+  it: DeBankHistoryItem,
+  seq: number,
+  protocol: ReturnType<typeof classifyProtocol>,
+  sends: TokenMovement[],
+  receives: TokenMovement[],
+  status: "ok" | "failed",
+  movement: TokenMovement[]
+): ClassifiedOp {
+  const protoId = protocol?.id ?? "";
+  const sentDebt = sends.some((s) =>
+    isDebtReceiptOfProtocol(s.symbol, protoId)
+  );
+  const recvDebt = receives.some((r) =>
+    isDebtReceiptOfProtocol(r.symbol, protoId)
+  );
+  const isSupplyReceipt = (sym: string): boolean =>
+    isReceiptOfProtocol(sym, protoId) &&
+    !isDebtReceiptOfProtocol(sym, protoId);
+  const sentSupply = sends.some((s) => isSupplyReceipt(s.symbol));
+  const recvSupply = receives.some((r) => isSupplyReceipt(r.symbol));
+
+  if (recvDebt && !sentDebt) {
+    return base(it, seq, "borrow", protocol, movement, status);
+  }
+  if (sentDebt && !recvDebt) {
+    return base(it, seq, "repay", protocol, movement, status);
+  }
+  if (!sentSupply && recvSupply) {
+    const sentSyms = new Set(sends.map((s) => s.symbol.toUpperCase()));
+    const hasBorrowComponent = receives.some(
+      (r) =>
+        !isSupplyReceipt(r.symbol) &&
+        !isDebtReceiptOfProtocol(r.symbol, protoId) &&
+        !sentSyms.has(r.symbol.toUpperCase()) &&
+        r.amount > 0
+    );
+    return base(
+      it,
+      seq,
+      "lend_supply",
+      protocol,
+      movement,
+      status,
+      hasBorrowComponent ? ["combined-supply-borrow"] : []
+    );
+  }
+  if (sentSupply && !recvSupply) {
+    const recvSyms = new Set(receives.map((r) => r.symbol.toUpperCase()));
+    const hasRepayComponent = sends.some(
+      (s) =>
+        !isSupplyReceipt(s.symbol) &&
+        !isDebtReceiptOfProtocol(s.symbol, protoId) &&
+        !recvSyms.has(s.symbol.toUpperCase()) &&
+        s.amount > 0
+    );
+    return base(
+      it,
+      seq,
+      "lend_withdraw",
+      protocol,
+      movement,
+      status,
+      hasRepayComponent ? ["combined-withdraw-repay"] : []
+    );
+  }
+
+  // Receipt-less protocols (Morpho Blue, …): no receipt in wallet, use
+  // direction + asset-type heuristics on underlyings.
+  if (!sends.length && receives.length) {
+    return base(it, seq, "borrow", protocol, movement, status);
+  }
+  if (sends.length && !receives.length) {
+    const allStables = sends.every((s) => s.isStable);
+    if (allStables) {
+      return base(it, seq, "repay", protocol, movement, status);
+    }
+    return base(it, seq, "lend_supply", protocol, movement, status);
+  }
+  if (sends.length && receives.length) {
+    return base(it, seq, "lend_supply", protocol, movement, status, [
+      "compound-supply-borrow",
+    ]);
+  }
+  return base(it, seq, "lend_supply", protocol, movement, status, [
+    "ambiguous-lending",
+  ]);
+}
+
+function classifyDex(
+  it: DeBankHistoryItem,
+  seq: number,
+  protocol: ReturnType<typeof classifyProtocol>,
+  sends: TokenMovement[],
+  receives: TokenMovement[],
+  status: "ok" | "failed",
+  movement: TokenMovement[]
+): ClassifiedOp {
+  const sendsLp = sends.some((s) => s.isProtocolToken);
+  const recvLp = receives.some((r) => r.isProtocolToken);
+
+  if (recvLp && !sendsLp) {
+    return base(it, seq, "lp_add", protocol, movement, status);
+  }
+  if (sendsLp && !recvLp) {
+    return base(it, seq, "lp_remove", protocol, movement, status);
+  }
+  if (sends.length && receives.length) {
+    return base(it, seq, "swap", protocol, movement, status);
+  }
+  if (sends.length && !receives.length) {
+    return base(it, seq, "lp_add", protocol, movement, status, [
+      "v3-increase-liquidity",
+    ]);
+  }
+  if (receives.length && !sends.length) {
+    // V3 receives-only: default to claim_rewards (collect fees). Skipping a
+    // fee-claim is worse than mis-labeling a withdraw; closed positions
+    // disappear from live state regardless.
+    return base(it, seq, "claim_rewards", protocol, movement, status, [
+      "v3-collect-fees",
+    ]);
+  }
+  return base(it, seq, "unknown", protocol, movement, status);
+}
+
+function buildMovements(
+  it: DeBankHistoryItem,
+  ctx: ClassifyContext
+): TokenMovement[] {
+  const move: TokenMovement[] = [];
+  for (const s of it.sends) {
+    move.push(toMovement("out", s.token_id, s.amount, ctx.tokens));
+  }
+  for (const r of it.receives) {
+    move.push(toMovement("in", r.token_id, r.amount, ctx.tokens));
+  }
+  return move;
+}
+
+function toMovement(
+  direction: "in" | "out",
+  tokenId: string,
+  amount: number,
+  tokens: Record<string, DeBankToken>
+): TokenMovement {
+  const t = tokens[tokenId];
+  const symbol = t?.symbol ?? tokenId.slice(0, 6).toUpperCase();
+  const usd = t?.price ? t.price * amount : null;
+  return {
+    direction,
+    symbol,
+    tokenId,
+    amount,
+    usd,
+    isStable: isStableSymbol(symbol),
+    isProtocolToken: isProtocolToken(symbol),
+  };
+}
+
+function base(
+  it: DeBankHistoryItem,
+  seq: number,
+  type: OpType,
+  protocol: ReturnType<typeof classifyProtocol>,
+  movement: TokenMovement[],
+  status: "ok" | "failed",
+  notes?: string[]
+): ClassifiedOp {
+  const netUsd =
+    movement
+      .filter((m) => m.direction === "in")
+      .reduce((s, m) => s + (m.usd ?? 0), 0) -
+    movement
+      .filter((m) => m.direction === "out")
+      .reduce((s, m) => s + (m.usd ?? 0), 0);
+  const fromLc = it.tx?.from_addr?.toLowerCase();
+  const counterparty =
+    it.tx?.from_addr && it.tx?.to_addr
+      ? fromLc && it.tx.from_addr.toLowerCase() === fromLc
+        ? it.tx.to_addr
+        : it.tx.from_addr
+      : null;
+
+  const op: ClassifiedOp = {
+    seq,
+    hash: it.id,
+    chain: it.chain,
+    time: it.time_at,
+    status,
+    type,
+    protocol,
+    movement,
+    netUsd,
+    gasUsd: it.tx?.usd_gas_fee ?? null,
+    counterparty,
+    feePayer: it.tx?.from_addr ?? null,
+    fnName: it.tx?.name ?? null,
+    approveSpender: it.token_approve?.spender ?? null,
+    approveSymbol: it.token_approve
+      ? toMovement("out", it.token_approve.token_id, 0, {}).symbol
+      : null,
+  };
+  if (notes && notes.length) op.notes = notes;
+  return op;
+}

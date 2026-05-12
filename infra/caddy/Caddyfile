@@ -1,0 +1,54 @@
+# Edge reverse proxy for cap-flow.ru.
+# Caddy auto-provisions HTTPS via Let's Encrypt when CADDY_DOMAIN is a real hostname
+# and ports 80 + 443 are reachable from the public internet.
+{
+	email {$CADDY_ACME_EMAIL}
+}
+
+# www → apex redirect (preserves path + query, 308 permanent).
+www.{$CADDY_DOMAIN} {
+	redir https://{$CADDY_DOMAIN}{uri} permanent
+}
+
+{$CADDY_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		# HSTS once HTTPS is confirmed working. Pin = 1 year. Add
+		# `preload` after submitting to hstspreload.org.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+
+		# CSP for the SPA. Loose-ish because legacy LoadedWalletsProvider
+		# still loads images from many chain RPCs / token logos. Tighten
+		# after the SaaS-dashboard refactor (post-beta).
+		#   default-src 'self'     — no cross-origin script/iframe by default
+		#   script-src 'self'      — only our bundle
+		#   style-src includes 'unsafe-inline' for runtime CSS injection
+		#   img-src '*'            — token logos from DeBank / CoinGecko CDNs
+		#   connect-src 'self'     — XHR/fetch goes back to our origin only
+		#                             (everything else is proxied via /api/*)
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+		-Server
+	}
+
+	# API + upstream-proxy routes. Preserve credentials/cookies on
+	# WebSocket-less plain HTTP; Caddy does this by default but we make
+	# it explicit by NOT setting `header_up` overrides that would strip
+	# Authorization or Cookie.
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

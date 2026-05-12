@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Drizzle
+packages/db/drizzle/meta/_journal.json.bak
+
+# Docker volumes (local dev)
+infra/.volumes/
+
+# Caddy data (local)
+infra/caddy/data/
+infra/caddy/config/
+
+# Obsidian vault (notes content коммитится, конфиги — нет)
+.obsidian/
+notes/.trash/

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.18.1
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build @cap-flow/db
+        run: pnpm --filter @cap-flow/db run build
+
+      - name: Typecheck
+        run: pnpm -r run typecheck
+
+      - name: Build apps
+        run: pnpm -r --filter "./apps/*" run build

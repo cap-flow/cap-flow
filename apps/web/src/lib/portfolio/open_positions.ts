@@ -1,0 +1,3097 @@
+/**
+ * Открытые позиции в DeFi-протоколах.
+ *
+ * **Источник правды — live-state протокола** (DeBank для EVM, Helius/Vybe/
+ * Sonar для Solana). Каждая `LiveProtocolPosition` = одна запись в листе.
+ *  - Fluid с двумя сабпозициями (ETH-залог и WBTC-залог) даст два ряда.
+ *  - GMX V2 LP WETH/USDC и WBTC/USDC — два ряда.
+ *  - Закрытые on-chain позиции просто не появятся (как и должно быть).
+ *
+ * **Стартовая стоимость** считается так:
+ *  - Для каждого supply-токена позиции — currentAmount × runningAvg.
+ *  - runningAvg = Σ всех заплаченных стейблов за этот токен / Σ всех
+ *    купленных amount, кумулятивно за всю историю кошелька. Это и есть
+ *    «средневзвешенная цена покупки актива» по методике пользователя.
+ *  - Если по токену не было swap-покупок за стейблы — fallback на
+ *    `m.usd` из открывающего lp_add/lend_supply (DeBank current price).
+ *
+ * **Дата открытия** — самая ранняя `lp_add`/`lend_supply`/`stake`/
+ * `perp_open` в истории кошелька, у которой
+ *   `op.protocol.id === position.protocolId`
+ *   и `op.movement` содержит OUT с символом из `position.supply`.
+ *
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * ⚠️  COST BASIS МЕТОДОЛОГИЯ — ОБЯЗАТЕЛЬНЫЙ ЧЕК-ЛИСТ
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ *
+ * Прежде чем менять что-то связанное со startUsd / cost basis — прочти
+ * `notes/decisions/receipt-token-cost-basis.md`. Этот баг рецидивировал
+ * 3 раза (2026-05-08, 2026-05-09 утро, 2026-05-09 вечер).
+ *
+ * КРАТКО:
+ *   1. Cost basis = OUT-side USD (что пользователь потратил из кошелька)
+ *   2. DeBank `m.usd` для входящих **receipt-токенов** (GM/GLV/aToken/
+ *      fVLT/BPT/PT/YT) = current_spot × amount, **НЕ** historical.
+ *      НИКОГДА не использовать для cost basis.
+ *   3. `supplyTokens` от DeBank это live-redemption decomposition, для
+ *      single-aggregated-receipt позиций (GMX V2 GM, GLV, Balancer BPT,
+ *      Fluid Vault) per-asset cost basis синтетический → нельзя суммировать
+ *   4. Различай single-receipt vs multi-receipt через `distinctReceipts.size`
+ *      (см. строки ~1497-1517 ниже).
+ *
+ * Иерархия источников USD для cost basis:
+ *   1. LotTracker WAC at op.time × out-amount         ← наиболее точный
+ *   2. DefiLlama hist price × out-amount              ← swap-style ops
+ *   3. Stable check (USDC/USDT/DAI/...) → $1
+ *   4. DeBank `m.usd` для NON-protocol token         ← fallback
+ *   5. DeBank `m.usd` для PROTOCOL token              ← НИКОГДА
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ */
+
+import { defillamaCoinKey, priceFromMap } from "@/lib/defillama";
+import { isJunkOp } from "./junk_filter";
+import { isStableSymbol } from "./protocols";
+import { isReceiptLessProtocol, isReceiptOfProtocol } from "./token_roles";
+import { supplyAmountsHash } from "./position_overrides";
+import { buildCostBasisTracker, CostBasisTracker } from "./cost_basis_tracker";
+import { readPipelineSettings } from "./pipeline_settings";
+import type { LiveSnapshot, LiveProtocolPosition } from "./live";
+import type { ClassifiedOp, ProtocolInfo, TokenMovement } from "./types";
+import type { SavedWallet } from "@/lib/wallets";
+
+const OPEN_TYPES = new Set<ClassifiedOp["type"]>([
+  "lend_supply",
+  "lp_add",
+  "stake",
+  "perp_open",
+]);
+
+const CLOSE_TYPES = new Set<ClassifiedOp["type"]>([
+  "lend_withdraw",
+  "lp_remove",
+  "unstake",
+  "perp_close",
+]);
+
+export type PositionKind = "lending" | "lp" | "staking" | "perp" | "other";
+
+function kindFromCategory(cat: string): PositionKind {
+  const c = cat.toLowerCase();
+  if (c.includes("lend") || c.includes("cdp") || c.includes("borrow"))
+    return "lending";
+  if (
+    c.includes("lp") ||
+    c.includes("liquidity") ||
+    c.includes("yield") ||
+    c.includes("vault") ||
+    c.includes("farm") ||
+    c.includes("deposit") // Pendle V2 itemName="Deposit"
+  )
+    return "lp";
+  if (c.includes("stak") || c.includes("restak")) return "staking";
+  if (c.includes("perp")) return "perp";
+  return "other";
+}
+
+function normalizeSymbol(s: string): string {
+  const u = s.toUpperCase();
+  if (u === "WETH") return "ETH";
+  return u;
+}
+
+export interface OpenPositionToken {
+  symbol: string;
+  /** Кол-во в позиции сейчас (live). */
+  amount: number;
+  /** Текущая стоимость в $ (live: amount × current_price). */
+  currentUsd: number;
+  /** Средневзвешенная покупочная цена ($ за единицу) или null. */
+  avgBuyPrice: number | null;
+  /** Стоимость по cost basis: amount × avgBuyPrice (или fallback m.usd). */
+  startUsd: number;
+  /** Откуда взяли цену: 'cost_basis' (running avg) или 'fallback'. */
+  priceSource: "cost_basis" | "fallback";
+  /**
+   * Адрес underlying токена (без chain prefix). Нужен для on-chain
+   * lookup'ов: Aave LT/LTV per asset, oracle price, и т.д.
+   */
+  tokenId?: string;
+}
+
+/**
+ * Детали для V3-style concentrated liquidity позиций (Uniswap V3/V4,
+ * PancakeSwap V3, Algebra, SushiSwap V3, Maverick, …).
+ *
+ * В V3 LP пользователь указывает диапазон [P_lower, P_upper] и вносит
+ * пару токенов в пропорции, требуемой формулой пула. По мере движения
+ * цены токены ребалансируются: при росте цены пул продаёт token0 (волатильный)
+ * за token1, при падении — наоборот. Отсюда **impermanent loss** относительно
+ * стратегии HODL (просто держать токены при себе).
+ *
+ *   IL = HODL_value − Current_LP_value
+ *   где HODL_value = Σ deposit_amount_i × current_price_i
+ *
+ * Если `IL > 0` — пул отстаёт от HODL (плохо). Если `IL < 0` — пул обогнал
+ * HODL (редко, но бывает на nicely-priced ranges с большим объёмом fees).
+ */
+export interface V3Details {
+  /** Что и сколько было внесено в позицию (Σ по lp_add). */
+  depositTokens: { symbol: string; amount: number; usdAtDeposit: number }[];
+  /** Σ usdAtDeposit — реальная USD-стоимость на момент депозита. */
+  depositUsd: number;
+  /** Σ deposit_amount × current_price — стоимость, если бы держал HODL. */
+  hodlUsd: number;
+  /** HODL − Current = impermanent loss (>0 = LP проиграл HODL). */
+  impermanentLossUsd: number;
+  /** Текущая стоимость LP-позиции (live.assetUsd). */
+  currentLpUsd: number;
+  /** PnL = currentLp − depositUsd. */
+  pnlUsd: number;
+  /** PnL% от depositUsd. */
+  pnlPct: number;
+  /** Откуда брали цены при депозите: 'historical' (DefiLlama) | 'fallback' (m.usd). */
+  pricesSource: "historical" | "fallback" | "mixed";
+}
+
+export interface OpenPosition {
+  /** Сквозной id POS-NNN. */
+  id: string;
+  walletId: string;
+  walletName: string;
+  walletChain: SavedWallet["chain"];
+  chain: string;
+  protocol: ProtocolInfo;
+  kind: PositionKind;
+  /** Имя сабпозиции (Lending / Liquidity Pool / Smart Vault / …). */
+  itemName: string;
+  /** unix sec — первое открытие в истории, либо null если открытия не нашли. */
+  openedAt: number | null;
+  /** Хэш tx, открывшей позицию (если найдена). */
+  openHash: string | null;
+  /** Срок в днях (now − openedAt), или null. */
+  ageDays: number | null;
+
+  /** Токены в supply-стороне позиции. */
+  supplyTokens: OpenPositionToken[];
+  /** Токены в borrow (для lending). */
+  debtTokens: { symbol: string; amount: number; usd: number }[];
+
+  /** Σ usd по supplyTokens.startUsd — сумма входа. */
+  startUsd: number;
+  /** Σ usd по supplyTokens.currentUsd — текущая стоимость залога. */
+  currentUsd: number;
+  /** Σ usd по debtTokens — текущий долг. */
+  currentDebtUsd: number;
+  /** Health rate (для lending). */
+  healthRate: number | null;
+  /** V3-style concentrated-liquidity детали (Uniswap V3, PancakeSwap V3, ...). */
+  v3?: V3Details;
+
+  /**
+   * Накопленные **в данный момент** fees / yield внутри позиции (pending).
+   *  - Для V3 LP — Σ uncollected fees из `lp.rewards` (DeBank).
+   *  - Для lending — `(current_supply_amount − Σ deposited) × current_price`,
+   *    т.е. начисленные процентные доходы от supply (не зависит от движения цены).
+   *  - Для прочих — null.
+   */
+  feesUsd: number | null;
+  /** Источник fees — "v3_rewards" или "supply_yield". */
+  feesSource: "v3_rewards" | "supply_yield" | null;
+  /**
+   * Уже **снятые** fees: Σ всех `claim_rewards` ops по этому
+   * (protocolId × chain × wallet). USD считается по hist-ценам в момент claim
+   * с fallback на m.usd.
+   */
+  feesClaimedUsd: number;
+  /**
+   * Σ `feesUsd` (pending) + `feesClaimedUsd` (claimed) — полная история
+   * fee-генерации за всё время жизни позиции.
+   */
+  feesLifetimeUsd: number;
+  /**
+   * Annualized доходность fees: только pending (как раньше).
+   *   feeApr = (feesUsd / startUsd) × (365 / ageDays) × 100
+   */
+  feeApr: number | null;
+  /**
+   * Annualized доходность fees по lifetime (pending + claimed).
+   *   feeAprLifetime = (feesLifetimeUsd / startUsd) × (365 / ageDays) × 100
+   */
+  feeAprLifetime: number | null;
+  /**
+   * История снятий fee'ев по этой позиции: каждый `claim_rewards` op в
+   * (protocolId × chain × pair). Для V3 используется per-pair фильтр и
+   * pro-rata по `currentUsd` группы (с учётом нескольких NFT в одном пуле).
+   *
+   * Для popup'а — позволяет показать таблицу: дата | токены | USD | APR
+   * за период (от предыдущего claim до текущего).
+   *
+   * Each event:
+   *  - `time` — unix seconds
+   *  - `usd` — USD value of received tokens at hist-prices (× pro-rata share)
+   *  - `tokensReceived` — символы и amount'ы (× pro-rata share для multi-NFT)
+   *  - `positionUsdAtClaim` — текущая стоимость позиции **на момент claim**
+   *    (приближённо: `liveAssetUsd × usd_прирост_за_период / total_pnl_period`,
+   *    или просто текущая live, если нет данных)
+   *  - `aprPeriod` — annualized APR за период от предыдущего claim (или
+   *    open) до этого: `(usd / positionUsdAtClaim) × (365 / period_days) × 100`
+   *  - `pnlSincePrev` — изменение currentUsd от предыдущего claim (или open).
+   */
+  feesClaimedHistory: {
+    time: number;
+    hash: string;
+    usd: number;
+    tokensReceived: { symbol: string; amount: number; usd: number }[];
+    positionUsdAtClaim: number | null;
+    aprPeriod: number | null;
+    daysSincePrev: number | null;
+    pnlSincePrev: number | null;
+    pnlSincePrevPct: number | null;
+  }[];
+  /**
+   * Накопленный yield в самих токенах + native APR.
+   * Для лендинга: `current_supply − Σ deposited` (для каждого supply-токена).
+   * Для V3: каждый rewards-токен с amount.
+   */
+  feesByToken: {
+    symbol: string;
+    amount: number;
+    usd: number;
+    /** Native APR = (amount / deposited) × (365 / age_days) × 100 — только если deposited > 0 и age > 0. */
+    nativeApr: number | null;
+  }[];
+  /**
+   * Сколько USD текущей стоимости позиции профинансировано из кредитных
+   * средств. По умолчанию `0` (свои); выставляется в `currentUsd` через
+   * ручную метку в UI (см. `credit_overrides.ts`).
+   */
+  creditFundedUsd: number;
+  /**
+   * Позиция реконструирована из истории ops (нет live-источника). У такой
+   * позиции `currentUsd` = сумма депозитов из истории, fees неизвестны;
+   * пользователь обычно проставляет их вручную через `position_overrides`.
+   * Применяется к Solana-протоколам, не покрытым Vybe / Jupiter Portfolio
+   * (Flash Trade и т.п.).
+   */
+  inferred?: boolean;
+  /**
+   * Стабильный дискриминатор позиции — используется в `positionOverrideKey`
+   * для уникальной идентификации этой строки. Без него позиции в одном пуле
+   * с одинаковым `(walletId, chain, protocolId, symbols)` шарят override
+   * (например, пометил POS-001 как credit → POS-002 тоже стал credit).
+   *
+   * Источник:
+   *   - Inferred-позиции: openHash (стабилен между перезагрузками).
+   *   - Live-позиции с одним маркетом: undefined (один на ключ).
+   *   - **V3 LP NFT'ы / multi-position pools**: `supplyAmountsHash(supplyTokens)` —
+   *     hash округлённых amount'ов уникален per-NFT даже если pool совпадает.
+   */
+  instanceId?: string;
+  /**
+   * NFT tokenId ИМЕННО этой OpenPosition, заматченной в
+   * `applyV3CostBasisOverride` через openHash или amount-proximity.
+   * Если задан — UI показывает `#{matchedV3TokenId}` в столбце TokenId
+   * вместо "N NFTs" (group fallback). Не задан если override не нашёл match.
+   */
+  matchedV3TokenId?: string;
+}
+
+/**
+ * Total assets позиции — currentUsd + lifetime fees, с **корректным учётом
+ * по типу fees**:
+ *
+ * - **`feesSource === "supply_yield"`** (Aave aTokens, Compound cTokens,
+ *   Fluid fTokens, etc.): rebase-style — supply amount растёт со временем,
+ *   `currentUsd` УЖЕ включает накопленный yield. Pending fees здесь
+ *   informational/derived view (`(current - Σdeposited) × price`),
+ *   НЕ добавляем — иначе double-count (POS-006 Aave WETH: $35,604 current
+ *   уже содержит 0.648 WETH yield, не складываем ещё $1,508).
+ * - **`feesSource === "v3_rewards"`** (Uniswap V3 / PancakeSwap V3 /
+ *   Aerodrome V3 etc.): fees — отдельный balance `tokensOwed0/1` ВНЕ
+ *   ликвидности пула. `currentUsd` их НЕ включает. Складываем pending.
+ * - **Прочие (`null`)**: feesUsd обычно null, ничего не складываем.
+ *
+ * `feesClaimedUsd` (уже снятые fee'и) ВСЕГДА добавляются — они переместились
+ * на кошелёк и больше не входят в `currentUsd` позиции.
+ */
+export function totalAssetsOf(p: OpenPosition): number {
+  const pendingFees = p.feesSource === "supply_yield" ? 0 : (p.feesUsd ?? 0);
+  return p.currentUsd + pendingFees + p.feesClaimedUsd;
+}
+
+/** PnL = totalAssets - startUsd. Учитывает supply_yield rebase-style. */
+export function totalPnlOf(p: OpenPosition): number {
+  return totalAssetsOf(p) - p.startUsd;
+}
+
+/** Это пул concentrated-liquidity с диапазонами (V3-style)? */
+export function isV3LpProtocol(name: string): boolean {
+  // Исключаем lending-протоколы где "v3" не означает concentrated liquidity
+  // (Aave V3, Compound V3 — это lending markets, не DEX'и).
+  if (/\b(aave|compound|comet|morpho|fluid|spark|radiant|euler)\b/i.test(name)) {
+    return false;
+  }
+  return /\b(v3|v4)\b|concentrat|maverick|trader\s*joe|liquidity\s*book|algebra|kim/i.test(
+    name,
+  );
+}
+
+interface BuildInput {
+  wallet: SavedWallet;
+  ops: ClassifiedOp[];
+  live?: LiveSnapshot;
+}
+
+interface BuildOptions {
+  /** Карта исторических цен от DefiLlama: ключ "{coin}|{tsHour}" → цена. */
+  histPrices?: Map<string, number>;
+  /**
+   * Точные V3 pool prices на mint-блоке (через slot0). Приоритетный источник
+   * USD-цен для V3 LP startUsd: совпадает с Revert Finance / Uniswap UI.
+   * Ключ: `${chain}|${txHash}`.
+   */
+  v3MintPoolPrices?: Map<
+    string,
+    {
+      price1Per0: number;
+      token0: string;
+      token1: string;
+      decimals0: number;
+      decimals1: number;
+      anchorTokenAddress?: string;
+      anchorTokenUsd?: number;
+      exactAmount0?: string;
+      exactAmount1?: string;
+    }
+  >;
+  /**
+   * CoinGecko USD цены на timestamp mint'а — **наивысший** приоритет для
+   * V3 startUsd. Совпадает с методологией Revert Finance (CoinGecko
+   * aggregator multi-venue, USDC ≠ exactly $1, byte-precise match).
+   * Ключ: `${chain}|${txHash}`.
+   */
+  v3MintCgPrices?: Map<
+    string,
+    {
+      byAddress: Map<string, number>;
+      timestamp: number;
+    }
+  >;
+}
+
+/**
+ * Текущие spot-цены токенов из live-state (для расчёта HODL value в V3).
+ * Берём `usd / amount` для всех токенов на балансах и в позициях.
+ */
+function buildCurrentPriceMap(loaded: BuildInput[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const l of loaded) {
+    if (!l.live) continue;
+    for (const t of l.live.tokens) {
+      if (t.amount > 0 && t.usd > 0) {
+        m.set(normalizeSymbol(t.symbol), t.usd / t.amount);
+      }
+    }
+    for (const p of l.live.positions) {
+      for (const s of p.supply) {
+        if (s.amount > 0 && s.usd > 0) {
+          m.set(normalizeSymbol(s.symbol), s.usd / s.amount);
+        }
+      }
+    }
+  }
+  return m;
+}
+
+/**
+ * Найти момент открытия ТЕКУЩЕЙ позиции (учитывает re-open после полного
+ * закрытия).
+ *
+ * Раньше функция возвращала **самый ранний** open в истории — но если
+ * пользователь открывал позицию N раз с полным закрытием между, срок
+ * показывался от первого открытия 2 года назад вместо последнего вчера.
+ *
+ * Алгоритм: trail running balance per-symbol. Когда после close все
+ * балансы ≤ 0 → это cycle reset. Текущая позиция = первый OPEN-event
+ * ПОСЛЕ последнего cycle reset.
+ */
+function findFirstOpen(
+  ops: ClassifiedOp[],
+  protocolId: string,
+  chain: string,
+  targetSyms: Set<string>,
+  /**
+   * mint LP-receipt'а конкретного маркета (GMX V2: GM[BTC] vs GM[ETH] vs
+   * GLV[WETH-USDC]). Если задан — фильтруем ops по `linkedLpTokenId` и/или
+   * прямому protocol-token в movement, чтобы НЕ смешивать историю разных
+   * маркетов одного протокола. Без этого все депозиты в GMX V2 (USDC →
+   * любой GM market) сливаются в один цикл, и findFirstOpen возвращает
+   * самую раннюю дату вместо открытия конкретно этого маркета.
+   */
+  lpTokenId?: string,
+  /**
+   * Расслабленный режим для receipt-less протоколов (Morpho Blue) и
+   * случаев, когда live supply symbols != historical collateral symbols
+   * (Morpho: live показывает WETH+USDC через unwrap GLV-vault, но в истории
+   * был GLV out). При relax=true игнорируется фильтр `targetSyms.has(sym)`
+   * — берётся любое meaningful out-движение (USD > $1, не газ).
+   */
+  relax: boolean = false,
+): { time: number; hash: string } | null {
+  // Сортируем хронологически.
+  const sorted = ops
+    .filter(
+      (op) =>
+        op.status !== "failed" &&
+        op.protocol?.id === protocolId &&
+        op.chain === chain &&
+        (OPEN_TYPES.has(op.type) || CLOSE_TYPES.has(op.type)) &&
+        opMatchesLpMarket(op, lpTokenId),
+    )
+    .sort((a, b) => a.time - b.time);
+
+  if (sorted.length === 0) return null;
+
+  // Helper: значимое out-движение для текущего режима.
+  function isRelevantOut(m: TokenMovement): boolean {
+    if (m.direction !== "out" || m.amount <= 0) return false;
+    if (relax) {
+      // Газ ETH (микро-amounts) исключаем.
+      if (
+        (m.symbol === "ETH" || m.symbol === "WETH") &&
+        m.amount < 0.01 &&
+        (m.usd ?? 0) < 100
+      )
+        return false;
+      return (m.usd ?? 0) > 1; // > $1 = не trivial
+    }
+    return targetSyms.has(normalizeSymbol(m.symbol));
+  }
+  function isRelevantIn(m: TokenMovement): boolean {
+    if (m.direction !== "in" || m.amount <= 0) return false;
+    if (relax) return (m.usd ?? 0) > 1;
+    return targetSyms.has(normalizeSymbol(m.symbol));
+  }
+
+  // Per-symbol running balance.
+  const balanceBySym = new Map<string, number>();
+  let lastCycleResetTime = 0;
+  for (const op of sorted) {
+    if (OPEN_TYPES.has(op.type)) {
+      for (const m of op.movement) {
+        if (!isRelevantOut(m)) continue;
+        const sym = normalizeSymbol(m.symbol);
+        balanceBySym.set(sym, (balanceBySym.get(sym) ?? 0) + m.amount);
+      }
+    } else if (CLOSE_TYPES.has(op.type)) {
+      for (const m of op.movement) {
+        if (!isRelevantIn(m)) continue;
+        const sym = normalizeSymbol(m.symbol);
+        balanceBySym.set(sym, (balanceBySym.get(sym) ?? 0) - m.amount);
+      }
+      // Cycle reset: после CLOSE все символы ушли в ≤ 0 → позиция была
+      // полностью закрыта в этот момент. Запоминаем время сброса; следующий
+      // OPEN запишется как «новое открытие».
+      if (balanceBySym.size > 0) {
+        let allClosed = true;
+        for (const v of balanceBySym.values()) {
+          if (v > 1e-6) {
+            allClosed = false;
+            break;
+          }
+        }
+        if (allClosed) {
+          lastCycleResetTime = op.time;
+          balanceBySym.clear();
+        }
+      }
+    }
+  }
+
+  // Первый OPEN-event ПОСЛЕ последнего cycle reset с релевантным OUT.
+  for (const op of sorted) {
+    if (op.time <= lastCycleResetTime) continue;
+    if (!OPEN_TYPES.has(op.type)) continue;
+    const hasOut = op.movement.some(isRelevantOut);
+    if (!hasOut) continue;
+    return { time: op.time, hash: op.hash };
+  }
+  return null;
+}
+
+/**
+ * Σ deposit USD в текущем (открытом) цикле для конкретного supply-токена.
+ *
+ * Учитывает **любые** out-движения этого символа в ops с этим protocolId
+ * и chain — даже если classifier не пометил их как `lp_add`/`lend_supply`/
+ * `stake`. Это критично для нестандартных протоколов (Jupiter Perps,
+ * нишевые SPL stakers), где Helius не возвращает чёткий type, и
+ * classifier помечает депозит как `swap`/`unknown` — но out-движение
+ * с правильным protocolId всё равно есть.
+ *
+ * `openedAt` — время первого OPEN события (от findFirstOpen). Если null,
+ * берём всю историю. Withdraw-ы (in-движения) НЕ вычитаются — мы хотим
+ * полную сумму инвестированного, не нетто.
+ */
+/**
+ * Возвращает **cost basis по weighted-average на текущий момент** для
+ * позиции в ребалансирующем пуле (GMX V2, GMSOL, Pendle, …). Это
+ * семантически верное «Стартовая $»: «сколько USD реально вложено в то,
+ * что СЕЙЧАС осталось в позиции», с учётом partial withdraw'ов.
+ *
+ * Алгоритм (WAC по receipt-токену):
+ *   - Идём по ops хронологически, отфильтрованным по `lpTokenId`.
+ *   - Для каждой op считаем: receiptIn (incoming GM/GLV match), receiptOut
+ *     (outgoing того же mint'а), depositUsd (outgoing non-protocol non-gas
+ *     USD — это что пользователь реально оплатил в этой tx).
+ *   - Если op = «fill» (receiptIn > 0):
+ *       costForFill = own depositUsd (для одно-tx-вход-Uni-V3) ИЛИ
+ *                     depositUsd из связанной Tx A через `linkedHash`
+ *                     (для async-deposit GMX V2 / GMSOL).
+ *       state.amount += receiptIn; state.cost += costForFill.
+ *   - Если op = «withdraw start» (receiptOut > 0):
+ *       avg = state.cost / state.amount;
+ *       state.cost -= receiptOut × avg;
+ *       state.amount -= receiptOut.
+ *   - Op'ы Tx A («deposit creator», только sends USD, no protocol-token movement)
+ *     не обрабатываются здесь — их вклад подбирается через linkedHash от Tx B.
+ *
+ * В итоге `state.cost` = current cost basis оставшейся receipt-amount.
+ * Если позиция полностью закрыта — вернётся 0.
+ */
+function currentCostBasisForPosition(
+  ops: ClassifiedOp[],
+  protocolId: string,
+  chain: string,
+  openedAt: number | null,
+  lpTokenId?: string,
+  /**
+   * LotTracker (cost basis WAC по символам) — если передан, USD-стоимость
+   * каждого outgoing depositа вычисляется как `amount × tracker.avgAt(sym, time)`,
+   * а не `m.usd` (которое = `amount × current_spot_price`, искажает старые
+   * операции где цена сильно изменилась). Это **универсальная asset-centric
+   * методика**: каждый депозит атрибутируется к WAC актива на момент депозита.
+   */
+  lotTracker?: import("./cost_basis_tracker").CostBasisTracker,
+  /**
+   * Исторические цены DefiLlama — для случаев когда у tracker нет WAC
+   * по конкретному символу (transfer_in без предыдущей покупки). Использует
+   * historical price на момент tx вместо `m.usd` (current spot).
+   */
+  histPrices?: Map<string, number>,
+): { costUsd: number; receiptAmount: number } {
+  // Индекс ops по hash для O(1) lookup linkedHash → linked op.
+  const opByHash = new Map<string, ClassifiedOp>();
+  for (const o of ops) opByHash.set(o.hash, o);
+
+  // Receipt-less детект: только для протоколов из явного whitelist'а
+  // (Morpho Blue, Drift Spot, Adrena). Для них пропускаем
+  // opMatchesLpMarket-фильтр и считаем cost basis по out-движениям
+  // underlying'ов через depositUsdFromOp.
+  //
+  // ВАЖНО: НЕ авто-детектить receipt-less по отсутствию matching receipt'а
+  // в ops — Fluid использует fVLT NFT (per-position уникальный), но DeBank
+  // отдаёт `pool.id` proxy-vault'а как `lpTokenId`. Без явного whitelist'а
+  // авто-детект ошибочно классифицирует Fluid как receipt-less и складывает
+  // все depositы из ВСЕХ Fluid-позиций в одну.
+  const receiptLessMode = isReceiptLessProtocol(protocolId);
+
+  const allProtoOps = ops.filter(
+    (op) =>
+      op.status !== "failed" &&
+      op.protocol?.id === protocolId &&
+      op.chain === chain &&
+      (openedAt == null || op.time >= openedAt) &&
+      op.type !== "claim_rewards",
+  );
+
+  // Сортируем ops по времени. Для receipt-less пропускаем opMatchesLpMarket.
+  const sorted = allProtoOps
+    .filter((op) => receiptLessMode || opMatchesLpMarket(op, lpTokenId))
+    .sort((a, b) => a.time - b.time);
+
+  const target = lpTokenId
+    ? stripChainPrefix(lpTokenId).toLowerCase()
+    : null;
+
+  function isMatchingReceipt(m: { isProtocolToken: boolean; tokenId: string }): boolean {
+    if (!m.isProtocolToken) return false;
+    if (!target) return true; // если фильтра нет — любой protocol-token
+    return stripChainPrefix(m.tokenId).toLowerCase() === target;
+  }
+
+  /**
+   * USD-стоимость outgoing-движений op'а (что пользователь "вложил" в этот шаг).
+   *
+   * Приоритет источников:
+   *   1. **Стейблы (USDC/USDT/DAI/...) → $1 ВСЕГДА**. lotTracker.avgAt может
+   *      вернуть искажённое значение для стейблов из-за lp_remove attribution
+   *      (когда LP закрылся в убыток, returned USDC получает inflated WAC > $1).
+   *      Это создавало баг 2026-05-09 v4: POS-001 GMX V2 показывал startUsd
+   *      $10,768 при депозите 9000 USDC потому что USDC WAC = $1.196.
+   *   2. **LotTracker WAC at op.time × amount** — историчски точная стоимость
+   *      для **non-stable** активов (ETH, WBTC, ARB).
+   *   3. **DefiLlama hist price × amount** — fallback для non-stable если
+   *      tracker не имеет WAC.
+   *   4. m.usd (DeBank) — last-resort. Может искажать старые ops (current spot).
+   *
+   * Газ ETH (micro-amounts < 0.01 ETH) исключаем — это transaction fees, не вклад.
+   * Protocol-receipt (GM/GLV/aTokens) исключаем — отдача receipt'а ≠ депозит.
+   */
+  function depositUsdFromOp(op: ClassifiedOp): number {
+    let usd = 0;
+    const opProtoId = op.protocol?.id ?? protocolId;
+    for (const m of op.movement) {
+      if (m.direction !== "out" || m.amount <= 0) continue;
+      // Контекстная проверка: токен — receipt ДАННОГО протокола?
+      // GLV в Morpho — НЕ receipt (это collateral). GM в GMX V2 — receipt.
+      // Без этого 22.11 GLV-supply в Morpho терялся (GLV.isProtocolToken=true
+      // глобально).
+      if (isReceiptOfProtocol(m.symbol, opProtoId, m.tokenId)) continue;
+      if (
+        (m.symbol === "ETH" || m.symbol === "WETH") &&
+        m.amount < 0.01 &&
+        (m.usd ?? 0) < 100
+      )
+        continue;
+      // Приоритет 1: Стейблы → $1 ВСЕГДА (обходим LotTracker).
+      if (isStableSymbol(m.symbol)) {
+        usd += m.amount * 1;
+        continue;
+      }
+      // Приоритет 2: WAC из LotTracker (для non-stable).
+      if (lotTracker) {
+        const wac = lotTracker.avgAt(m.symbol, op.time);
+        if (wac != null && wac > 0) {
+          usd += m.amount * wac;
+          continue;
+        }
+      }
+      // Приоритет 2: historical price из DefiLlama (если передан).
+      // Стейблы → $1.
+      if (histPrices && histPrices.size > 0) {
+        if (isStableSymbol(m.symbol)) {
+          usd += m.amount * 1;
+          continue;
+        }
+        const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
+        if (coin) {
+          const hp = priceFromMap(histPrices, coin, op.time);
+          if (hp != null && hp > 0) {
+            usd += m.amount * hp;
+            continue;
+          }
+        }
+      }
+      // Приоритет 3: m.usd (DeBank current spot) как last-resort fallback.
+      if (m.usd != null && m.usd > 0) usd += m.usd;
+    }
+    return usd;
+  }
+
+  let amount = 0;
+  let cost = 0;
+  // Для receipt-less протоколов (Morpho Blue) трекаем accumulated cost
+  // через out-движения collateral asset'а с его LotTracker WAC.
+  let receiptlessCost = 0;
+  let sawAnyReceipt = false;
+
+  // Receipt-less collateral detection: первый op с out-движением non-stable
+  // non-receipt non-gas underlying = «collateral asset» этой позиции.
+  // Все последующие ops с out этого ЖЕ символа = collateral supply (даже
+  // если классификатор ошибочно пометил их как `repay`/`borrow`).
+  // Ops с out ДРУГИХ символов игнорируем — это либо репай (если стейбл/
+  // borrow-currency) либо отдельная позиция (другой Morpho-market).
+  let collateralSymbol: string | null = null;
+  if (receiptLessMode) {
+    for (const op of sorted) {
+      for (const m of op.movement) {
+        if (m.direction !== "out" || m.amount <= 0) continue;
+        if (isReceiptOfProtocol(m.symbol, op.protocol?.id ?? protocolId, m.tokenId)) continue;
+        if (isStableSymbol(m.symbol)) continue; // стейблы скорее всего repay
+        if (
+          (m.symbol === "ETH" || m.symbol === "WETH") &&
+          m.amount < 0.01 &&
+          (m.usd ?? 0) < 100
+        )
+          continue; // gas
+        collateralSymbol = normalizeSymbol(m.symbol);
+        break;
+      }
+      if (collateralSymbol) break;
+    }
+  }
+
+  for (const op of sorted) {
+    let receiptIn = 0;
+    let receiptOut = 0;
+    for (const m of op.movement) {
+      if (!isMatchingReceipt(m)) continue;
+      if (m.direction === "in") receiptIn += m.amount;
+      else if (m.direction === "out") receiptOut += m.amount;
+    }
+    if (receiptIn > 0 || receiptOut > 0) sawAnyReceipt = true;
+
+    // Receipt пришёл — fill / depositTx с одно-tx-входом (Uni V3).
+    if (receiptIn > 0) {
+      let costForFill = depositUsdFromOp(op);
+      if (costForFill === 0 && op.linkedHash) {
+        const linked = opByHash.get(op.linkedHash);
+        if (linked) costForFill = depositUsdFromOp(linked);
+      }
+      amount += receiptIn;
+      cost += costForFill;
+    }
+
+    // Receipt ушёл — withdraw, списываем proportional cost.
+    if (receiptOut > 0 && amount > 0) {
+      const avg = cost / amount;
+      const portionToRemove = Math.min(receiptOut, amount);
+      cost -= portionToRemove * avg;
+      amount -= portionToRemove;
+      if (amount < 1e-9) {
+        amount = 0;
+        cost = 0;
+      }
+    }
+
+    // Receipt-less учёт: для каждой op'и считаем USD-стоимость out-движений
+    // именно `collateralSymbol`, а не всех out-токенов. Это игнорирует:
+    //  - стейбл-репаи (USDC out для Morpho repay)
+    //  - WBTC/другие коллатерали других Morpho-маркетов того же протокола
+    // Подход устойчив к мис-классификации `repay` vs `lend_supply`.
+    if (receiptLessMode && collateralSymbol) {
+      for (const m of op.movement) {
+        if (m.direction !== "out" || m.amount <= 0) continue;
+        if (normalizeSymbol(m.symbol) !== collateralSymbol) continue;
+        if (isReceiptOfProtocol(m.symbol, op.protocol?.id ?? protocolId, m.tokenId))
+          continue;
+        // Стоимость через LotTracker WAC (приоритет 1 в depositUsdFromOp).
+        const wac = lotTracker?.avgAt(m.symbol, op.time) ?? null;
+        if (wac != null && wac > 0) {
+          receiptlessCost += m.amount * wac;
+        } else if (m.usd != null && m.usd > 0) {
+          receiptlessCost += m.usd;
+        }
+      }
+    }
+  }
+
+  // Receipt-less mode (Morpho Blue): возвращаем cost basis из out-side
+  // underlying'ов (через depositUsdFromOp с LotTracker WAC).
+  if (receiptLessMode) {
+    return { costUsd: receiptlessCost, receiptAmount: 0 };
+  }
+  // Sanity: если фильтр был по lpTokenId но за весь цикл receipt не появился
+  // (linker дефолт не сработал) — fallback на receiptless-учёт.
+  if (!sawAnyReceipt && receiptlessCost > 0) {
+    return { costUsd: receiptlessCost, receiptAmount: 0 };
+  }
+
+  return { costUsd: cost, receiptAmount: amount };
+}
+
+function currentCycleDepositForSymbol(
+  ops: ClassifiedOp[],
+  protocolId: string,
+  chain: string,
+  openedAt: number | null,
+  symbol: string,
+  /** См. комментарий у findFirstOpen — фильтр по конкретному LP-маркету. */
+  lpTokenId?: string,
+  /**
+   * Исторические цены DefiLlama (часовой bucket). Если переданы — используем
+   * `amount × historical_price(time)` вместо `m.usd` (которое = `amount ×
+   * current_price` от DeBank, искажает старые ops).
+   *
+   * КРИТИЧНО: без этого позиция открытая 6 мес назад при ETH=$1500 считается
+   * сегодня при ETH=$4000 → startUsd инфлирована в 2.6× (баг новых кошельков
+   * 2026-05-09).
+   */
+  histPrices?: Map<string, number>,
+): { amount: number; usd: number } {
+  const target = normalizeSymbol(symbol);
+  let amount = 0;
+  let usd = 0;
+  for (const op of ops) {
+    if (op.status === "failed") continue;
+    if (isJunkOp(op)) continue;
+    if (!op.protocol || op.protocol.id !== protocolId) continue;
+    if (op.chain !== chain) continue;
+    if (openedAt != null && op.time < openedAt) continue;
+    // НЕ требуем OPEN_TYPES — берём любые out-движения с symbol которые
+    // ушли в адрес этого протокола (даже если op = "swap" / "unknown").
+    // Исключаем claim_rewards (это inbound rewards, не deposit).
+    if (op.type === "claim_rewards") continue;
+    if (!opMatchesLpMarket(op, lpTokenId)) continue;
+    for (const m of op.movement) {
+      if (m.direction !== "out" || m.amount <= 0) continue;
+      if (normalizeSymbol(m.symbol) !== target) continue;
+      amount += m.amount;
+      // Приоритет: historical price (DefiLlama hourly) > m.usd fallback.
+      let priceAtTx: number | null = null;
+      if (histPrices && histPrices.size > 0) {
+        if (isStableSymbol(m.symbol)) {
+          priceAtTx = 1;
+        } else {
+          const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
+          if (coin) {
+            const hp = priceFromMap(histPrices, coin, op.time);
+            if (hp != null && hp > 0) priceAtTx = hp;
+          }
+        }
+      }
+      if (priceAtTx != null) {
+        usd += m.amount * priceAtTx;
+      } else if (m.usd != null && m.usd > 0) {
+        // Diagnostic: warn в console когда падаем на DeBank current price.
+        // Это означает что DefiLlama не вернула historical для этого
+        // (chain, token, time) — startUsd позиции искажён.
+        if (typeof window !== "undefined") {
+          const ageDays = Math.floor((Date.now() / 1000 - op.time) / 86400);
+          if (ageDays > 7) {
+            console.warn(
+              `[startUsd fallback] using DeBank current price for ${m.symbol} ` +
+                `on ${op.chain} (op ${ageDays} days ago). ` +
+                `historical price not available — startUsd likely inflated.`,
+            );
+          }
+        }
+        usd += m.usd;
+      }
+    }
+  }
+  return { amount, usd };
+}
+
+/**
+ * Сопоставляет op с конкретным LP-маркетом по mint'у LP-receipt'а.
+ * - Если `lpTokenId` не задан — пропускаем все ops (legacy поведение).
+ * - Иначе оп матчится, если:
+ *   1. Его `linkedLpTokenId` (от async-deposit linker) равен lpTokenId, ИЛИ
+ *   2. В его movement есть protocol-token с этим tokenId (классические
+ *      Uniswap-style lp_add/remove где receipt в той же tx).
+ * Сравнение нечувствительно к chain-prefix'у ("arb:0x..." vs "0x...").
+ */
+function opMatchesLpMarket(op: ClassifiedOp, lpTokenId?: string): boolean {
+  if (!lpTokenId) return true;
+  const target = stripChainPrefix(lpTokenId).toLowerCase();
+  const linked = op.linkedLpTokenId
+    ? stripChainPrefix(op.linkedLpTokenId).toLowerCase()
+    : null;
+  if (linked === target) return true;
+  for (const m of op.movement) {
+    if (!m.isProtocolToken) continue;
+    if (stripChainPrefix(m.tokenId).toLowerCase() === target) return true;
+  }
+  return false;
+}
+
+/**
+ * Нормализация tokenId / pool.id для матчинга через `:`-разделители.
+ * Известные форматы DeBank:
+ *   - "arb:0x..." / "eth:0x..." — chain prefix (короткий тэг до 6 символов
+ *     БЕЗ префикса 0x).
+ *   - "0x...:lending" / "0x...:vault" — pool variant suffix (тип пула).
+ *   - Просто "0x..." — без декораций.
+ * Возвращаем «голый» 0x-адрес: убираем chain prefix СПЕРЕДИ и market suffix
+ * СЗАДИ, оставляя только hex-часть. Если это не hex (например, "ethereum")
+ * — возвращаем как есть.
+ */
+function stripChainPrefix(id: string): string {
+  let s = id;
+  // Удаляем chain prefix вида "arb:" / "eth:" / "bera:" / "matic:" — короткий
+  // тэг (до 6 символов, без 0x) перед двоеточием.
+  s = s.replace(/^[a-z]{2,6}:/i, "");
+  // Удаляем market/variant suffix вида ":lending" / ":vault" / ":spot"
+  // (любой текстовый суффикс после двоеточия).
+  s = s.replace(/:[a-z][a-z0-9_-]+$/i, "");
+  return s;
+}
+
+/**
+ * Σ всех out-движений токена в адрес протокола за всю историю — нужен
+ * для расчёта supply-yield лендинга: `current_amount − Σ deposited`.
+ */
+function depositAmountSum(
+  ops: ClassifiedOp[],
+  protocolId: string,
+  symbol: string,
+): number {
+  let sum = 0;
+  for (const op of ops) {
+    if (op.status === "failed") continue;
+    if (isJunkOp(op)) continue;
+    if (!op.protocol || op.protocol.id !== protocolId) continue;
+    for (const m of op.movement) {
+      if (m.direction !== "out" || m.amount <= 0) continue;
+      if (normalizeSymbol(m.symbol) !== normalizeSymbol(symbol)) continue;
+      sum += m.amount;
+    }
+  }
+  return sum;
+}
+
+/**
+ * Посчитать накопленные fees / supply-yield для позиции.
+ *  - Для V3 LP — fees лежат в `lp.rewards` (uncollected fees, не часть supply).
+ *  - Для лендинга — supply yield = `(current_amount − Σ deposited) × current_price`,
+ *    т.е. чистые проценты, начисленные протоколом сверху, без перемешивания с
+ *    движением цены актива.
+ */
+function computeFees(
+  lp: LiveProtocolPosition,
+  ops: ClassifiedOp[],
+  currentPrices: Map<string, number>,
+  ageDays: number | null,
+): {
+  feesUsd: number;
+  source: "v3_rewards" | "supply_yield";
+  byToken: OpenPosition["feesByToken"];
+} | null {
+  if (isV3LpProtocol(lp.protocolName)) {
+    const usd = lp.rewards.reduce((s, r) => s + r.usd, 0);
+    if (usd <= 0) return null;
+    const byToken: OpenPosition["feesByToken"] = lp.rewards
+      .filter((r) => r.amount > 0)
+      .map((r) => ({
+        symbol: r.symbol,
+        amount: r.amount,
+        usd: r.usd,
+        nativeApr: null, // у V3 fees нет «исходной amount» базы для native APR
+      }));
+    return { feesUsd: usd, source: "v3_rewards", byToken };
+  }
+  // Lending — yield по supply.
+  if (lp.category.toLowerCase().includes("lend")) {
+    let yieldUsd = 0;
+    const byToken: OpenPosition["feesByToken"] = [];
+    for (const s of lp.supply) {
+      const deposited = depositAmountSum(ops, lp.protocolId, s.symbol);
+      if (deposited <= 0) continue;
+      const accrued = s.amount - deposited;
+      if (accrued <= 0) continue;
+      const cur = isStableSymbol(s.symbol)
+        ? 1
+        : (currentPrices.get(normalizeSymbol(s.symbol)) ?? null);
+      const usd = cur != null && cur > 0 ? accrued * cur : 0;
+      yieldUsd += usd;
+      const nativeApr =
+        ageDays && ageDays > 0
+          ? (accrued / deposited) * (365 / ageDays) * 100
+          : null;
+      byToken.push({ symbol: s.symbol, amount: accrued, usd, nativeApr });
+    }
+    if (yieldUsd <= 0) return null;
+    return { feesUsd: yieldUsd, source: "supply_yield", byToken };
+  }
+  return null;
+}
+
+function fallbackUsdFromOpen(
+  ops: ClassifiedOp[],
+  protocolId: string,
+  symbol: string,
+  /** Исторические цены — критично для long-term позиций (см. cycleDeposit comment). */
+  histPrices?: Map<string, number>,
+): { totalAmount: number; totalUsd: number } {
+  // Для fallback: сумма OUT-движений целевого токена в open-операции этого протокола.
+  let totalAmount = 0;
+  let totalUsd = 0;
+  for (const op of ops) {
+    if (op.status === "failed") continue;
+    if (isJunkOp(op)) continue;
+    if (!op.protocol || op.protocol.id !== protocolId) continue;
+    for (const m of op.movement) {
+      if (m.direction !== "out" || m.amount <= 0) continue;
+      if (normalizeSymbol(m.symbol) !== normalizeSymbol(symbol)) continue;
+      totalAmount += m.amount;
+      // Приоритет: historical price > m.usd fallback.
+      let priceAtTx: number | null = null;
+      if (histPrices && histPrices.size > 0) {
+        if (isStableSymbol(m.symbol)) {
+          priceAtTx = 1;
+        } else {
+          const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
+          if (coin) {
+            const hp = priceFromMap(histPrices, coin, op.time);
+            if (hp != null && hp > 0) priceAtTx = hp;
+          }
+        }
+      }
+      if (priceAtTx != null) {
+        totalUsd += m.amount * priceAtTx;
+      } else if (m.usd != null && m.usd > 0) {
+        totalUsd += m.usd;
+      }
+    }
+  }
+  return { totalAmount, totalUsd };
+}
+
+/**
+ * Определяет, является ли live-позиция фактически закрытой (но API вернул
+ * residual dust).
+ *
+ * DeBank/Vybe/CoinStats регулярно показывают «$0.50 — $50» остатки на
+ * lending/LP позициях после полного withdraw — это accrued interest, dust
+ * rewards, точность округления протокола, in-flight rewards. С точки
+ * зрения пользователя позиция закрыта, но в UI она висит как открытая.
+ *
+ * Эвристика (срабатывает любая):
+ *   1. Hard dust (current+debt < $1) → точно закрыта.
+ *   2. Shrunk to dust: currentUsd < 1% от max исторического депозита
+ *      ИЛИ < 5% от startUsd, плюс пороги $50 / $5 чтобы не отсечь валидные.
+ *   3. Withdrawn ratio: Σ withdrawn / Σ deposited ≥ 90% (по любым in-направлениям
+ *      операций с этим protocolId+chain — не требуем точного `lend_withdraw`).
+ *
+ * Если истории нет (CoinStats-кошелёк) — отсекаем только hard dust.
+ */
+const LIVE_HARD_DUST_USD = 1;
+/** Если current < этой суммы И уменьшилось > 99% от max историч. депозита — закрыта. */
+const LIVE_SHRUNK_DUST_USD = 50;
+/** Если есть close events и withdrawn/deposited >= 90% — закрыта. */
+const CLOSED_WITHDRAW_RATIO = 0.9;
+/** Доля современного остатка относительно max-deposit ниже которой считаем закрытой. */
+const SHRUNK_RATIO = 0.01;
+
+function isLivePositionClosed(
+  lp: LiveProtocolPosition,
+  ops: ClassifiedOp[],
+): boolean {
+  const totalCurrentUsd = lp.assetUsd;
+  const totalDebtUsd = lp.borrow.reduce((s, b) => s + b.usd, 0);
+  const netCurrentUsd = totalCurrentUsd - totalDebtUsd;
+
+  // Hard dust: явно закрытая, < $1 net остаток.
+  if (Math.abs(netCurrentUsd) < LIVE_HARD_DUST_USD) {
+    return true;
+  }
+
+  // Анализ истории (нужен для двух эвристик ниже).
+  // Считаем все in/out движения для (protocolId, chain) — НЕ требуем точного
+  // совпадения `lend_withdraw`/`lp_remove`, потому что для нестандартных
+  // протоколов classifier может пометить operations как `swap`/`unknown`.
+  let totalDepositedUsd = 0;
+  let totalWithdrawnUsd = 0;
+  let maxRunningDeposit = 0;
+  let runningDeposit = 0;
+  let hasCloseEvent = false;
+  for (const op of ops) {
+    if (op.status === "failed") continue;
+    if (isJunkOp(op)) continue;
+    if (!op.protocol || op.protocol.id !== lp.protocolId) continue;
+    if (op.chain !== lp.chain) continue;
+    const isAdd =
+      op.type === "lp_add" ||
+      op.type === "lend_supply" ||
+      op.type === "stake";
+    const isRemove =
+      op.type === "lp_remove" ||
+      op.type === "lend_withdraw" ||
+      op.type === "unstake";
+    if (!isAdd && !isRemove) continue;
+    if (isRemove) hasCloseEvent = true;
+    for (const m of op.movement) {
+      if (m.amount <= 0) continue;
+      const usd = m.usd ?? 0;
+      if (isAdd && m.direction === "out") {
+        totalDepositedUsd += usd;
+        runningDeposit += usd;
+      } else if (isRemove && m.direction === "in") {
+        totalWithdrawnUsd += usd;
+        runningDeposit -= usd;
+      }
+    }
+    if (runningDeposit > maxRunningDeposit) maxRunningDeposit = runningDeposit;
+  }
+
+  // 2. Shrunk to dust: позиция уменьшилась до пыли относительно своего
+  // исторического максимума. Поднятый порог $50 ловит lending residual.
+  if (
+    totalCurrentUsd < LIVE_SHRUNK_DUST_USD &&
+    totalDebtUsd < LIVE_SHRUNK_DUST_USD &&
+    maxRunningDeposit > 0 &&
+    totalCurrentUsd / maxRunningDeposit < SHRUNK_RATIO
+  ) {
+    return true;
+  }
+
+  // 3. Withdrawn ratio: явная история закрытий и большая часть депозитов
+  // выведена. Применяем только если currentUsd «низкий» в абсолюте — иначе
+  // активная позиция с rolling-депозитами могла бы сработать ложно.
+  if (
+    hasCloseEvent &&
+    totalCurrentUsd < LIVE_SHRUNK_DUST_USD &&
+    totalDebtUsd < LIVE_SHRUNK_DUST_USD &&
+    totalDepositedUsd > 0 &&
+    totalWithdrawnUsd / totalDepositedUsd >= CLOSED_WITHDRAW_RATIO
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export function buildOpenPositions(
+  loaded: BuildInput[],
+  options?: BuildOptions,
+): OpenPosition[] {
+  const currentPrices = buildCurrentPriceMap(loaded);
+  const histPrices = options?.histPrices ?? new Map<string, number>();
+  const v3MintPoolPrices = options?.v3MintPoolPrices;
+  const v3MintCgPrices = options?.v3MintCgPrices;
+  const trackerByWallet = new Map<string, CostBasisTracker>();
+  for (const l of loaded) {
+    trackerByWallet.set(l.wallet.id, buildCostBasisTracker(l.ops, histPrices));
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  V3 mint matching: для каждой LIVE V3 позиции находим op.hash mint'а,
+  //  который её создал. Используется как стабильный per-NFT discriminator
+  //  (вместо supplyAmountsHash который чувствителен к ребалансировке).
+  //
+  //  Алгоритм:
+  //    1. Группируем ops по (wallet, protocolId, chain) только V3-style.
+  //    2. Считаем "open" mints (lp_add) минус "closed" (lp_remove FIFO).
+  //    3. Для каждой LIVE V3 позиции: жадный matching по symbol pair +
+  //       amount magnitude (current supply ≈ deposited × WAC scale).
+  //    4. Один mint можно сматчить только один раз (Set already-matched).
+  //
+  //  Если match не нашёлся (live > mints или нет данных) → fallback
+  //  на supplyAmountsHash из buildOne.
+  // ─────────────────────────────────────────────────────────────────────
+  const v3MintMatches = matchV3LiveToMints(loaded);
+
+  // Set всех mint hash'ей которые УЖЕ привязаны к конкретным NFT через
+  // matchV3LiveToMints. Передаётся в buildV3Details как `consumedMintHashes`
+  // чтобы fallback strict-pair-filter ИСКЛЮЧИЛ их при построении unmatched
+  // NFT — иначе один mint используется для двух NFT (баг POS-009/010 PAXG).
+  const consumedMintHashesByPC = new Map<string, Set<string>>();
+  for (const [matchKey, mintHash] of v3MintMatches) {
+    // matchKey = `${walletId}|${protocolId}|${chain}|${pair}|${assetUsd}`
+    // Группируем по walletId|protocolId|chain (без assetUsd, без pair —
+    // чтобы все NFT одного протокола+chain в этом wallet знали про consumed).
+    const parts = matchKey.split("|");
+    const groupKey = `${parts[0]}|${parts[1]}|${parts[2]}`;
+    let s = consumedMintHashesByPC.get(groupKey);
+    if (!s) {
+      s = new Set();
+      consumedMintHashesByPC.set(groupKey, s);
+    }
+    s.add(mintHash);
+  }
+
+  // Все живые позиции по всем кошелькам.
+  // Перед buildOne фильтруем «фантомные» позиции (закрытые on-chain, но
+  // API вернуло residual dust — типичная проблема DeBank lending после
+  // withdraw, остаточные accrued interest на $0.50-$5).
+  const all: OpenPosition[] = [];
+  for (const l of loaded) {
+    if (!l.live) continue;
+    for (const lp of l.live.positions) {
+      if (isLivePositionClosed(lp, l.ops)) continue;
+      const matchKey = v3LiveMatchKey({
+        walletId: l.wallet.id,
+        protocolId: lp.protocolId,
+        chain: lp.chain,
+        symbols: lp.supply.map((s) => s.symbol),
+        assetUsd: lp.assetUsd,
+      });
+      const v3MintHash = v3MintMatches.get(matchKey);
+      const consumedKey = `${l.wallet.id}|${lp.protocolId}|${lp.chain}`;
+      const consumedSet = consumedMintHashesByPC.get(consumedKey);
+      if (
+        typeof window !== "undefined" &&
+        isV3LpProtocol(lp.protocolName) &&
+        !v3MintHash
+      ) {
+        console.warn(
+          `[V3 unmatched] live ${lp.protocolName} ${lp.chain} ` +
+            `${lp.supply.map((s) => `${s.amount.toFixed(3)} ${s.symbol}`).join("+")} ` +
+            `(assetUsd=$${lp.assetUsd.toFixed(2)}) → no mint match. ` +
+            `key="${matchKey}". Fallback: strict pair filter в buildV3Details. ` +
+            `Excluded ${consumedSet?.size ?? 0} consumed mints.`,
+        );
+      }
+      const built = buildOne(
+        lp,
+        l,
+        trackerByWallet,
+        currentPrices,
+        histPrices,
+        v3MintHash,
+        v3MintPoolPrices,
+        v3MintCgPrices,
+        consumedSet,
+      );
+      if (built) all.push(built);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  SELF-AUDIT: детектируем структурно-сомнительные позиции и логируем.
+  //
+  //  Срабатывает когда после `buildOne` обнаруживаются дубликаты ключей
+  //  `(walletId, chain, protocolId, symbols)` — это значит несколько
+  //  LiveProtocolPosition сливаются в один override-scope (баг 06.05.2026
+  //  с POS-001/002 в Uniswap V3, когда credit toggle переключал обе).
+  //
+  //  Также детектируем абсолютно одинаковую `startUsd` (с точностью до
+  //  $0.01) у >=2 позиций — почти всегда следствие неуникального matching
+  //  по `lp.lpTokenId` (V3 NFT-style: один pool.id для нескольких NFT).
+  //
+  //  Эти диагностики НЕ ломают рендер — просто console.warn в dev. Они
+  //  пишут точный детект, чтобы при следующем подобном случае пользователь
+  //  не открывал тикет, а методика сама подсказала что искать.
+  // ─────────────────────────────────────────────────────────────────────
+  if (typeof window !== "undefined" && all.length > 1) {
+    const byScope = new Map<string, OpenPosition[]>();
+    const byStartUsd = new Map<string, OpenPosition[]>();
+    for (const p of all) {
+      const sym = [...p.supplyTokens.map((t) => t.symbol)].sort().join("+");
+      const scopeKey = `${p.walletId}|${p.chain}|${p.protocol.id}|${sym}`;
+      const arr = byScope.get(scopeKey) ?? [];
+      arr.push(p);
+      byScope.set(scopeKey, arr);
+      if (p.startUsd > 1) {
+        const usdKey = `${p.walletId}|${p.chain}|${p.protocol.id}|${p.startUsd.toFixed(2)}`;
+        const arr2 = byStartUsd.get(usdKey) ?? [];
+        arr2.push(p);
+        byStartUsd.set(usdKey, arr2);
+      }
+    }
+    for (const [scope, group] of byScope) {
+      if (group.length < 2) continue;
+      const distinctInstance = new Set(group.map((p) => p.instanceId)).size;
+      if (distinctInstance < group.length) {
+        console.warn(
+          `[Capflow audit] Duplicate position scope without instanceId discriminator: ${scope}. ` +
+            `${group.length} live positions share same key. ` +
+            `Override toggles (credit/hidden/currentValue) will collide. ` +
+            `Likely cause: multiple V3 NFTs in same pool, или не-уникальный pool.id от DeBank.`,
+        );
+      }
+    }
+    for (const [usdKey, group] of byStartUsd) {
+      if (group.length < 2) continue;
+      console.warn(
+        `[Capflow audit] ${group.length} positions with identical startUsd ($${group[0]!.startUsd.toFixed(2)}) ` +
+          `in ${usdKey}. ` +
+          `Likely cause: cost basis attribution sums по pool, не по NFT. ` +
+          `Symbols: ${group.map((p) => p.supplyTokens.map((t) => t.symbol).join("+")).join(" | ")}`,
+      );
+    }
+  }
+
+  // ВНИМАНИЕ: Inferred-позиции (реконструированные из истории) НЕ попадают
+  // в OpenPositions. Если live API не видит позицию — почти всегда она
+  // закрыта on-chain (просто classifier не распознал withdraw как
+  // `lp_remove`/`lend_withdraw` для нестандартного протокола), и
+  // показывать её как «открытую» — это «фантом».
+  //
+  // Все inferred-кандидаты (открытые без матча close + неполные closures)
+  // идут в архив через `buildClosedPositions` как `unmatched`-циклы.
+  // Пользователь видит их в Листе закрытых позиций, и они НЕ учитываются
+  // в аналитике дашборда.
+  //
+  // Если у пользователя реально есть открытая нишевая позиция (live API
+  // не покрывает) — она попадёт в архив как unmatched, и оттуда её можно
+  // явно «открыть как live» (overrides).
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  V3 multi-NFT fee claims attribution: pro-rata by current liquidity
+  //
+  //  Проблема: `computeClaimedFeesUsd` возвращает Σ всех claim_rewards
+  //  для (protocolId, chain, pair). Если в одном pool у юзера 2 NFT
+  //  (две WETH/USDC позиции) — обе получат ту же сумму → overcounting.
+  //
+  //  В DeBank нет NFT tokenId → точно отнести claim к конкретной NFT
+  //  без RPC чтения логов нельзя. Используем pro-rata по currentUsd:
+  //  каждой NFT — её доля от общего liquidity группы. Для одиночных NFT
+  //  делитель = 1, поведение не меняется.
+  // ─────────────────────────────────────────────────────────────────────
+  {
+    type Group = { positions: OpenPosition[]; total: number };
+    const groups = new Map<string, Group>();
+    for (const p of all) {
+      const isV3 = p.v3 != null;
+      if (!isV3) continue;
+      const pair = [...p.supplyTokens.map((t) => t.symbol)]
+        .sort()
+        .join("+");
+      const key = `${p.walletId}|${p.chain}|${p.protocol.id}|${pair}`;
+      const g = groups.get(key) ?? { positions: [], total: 0 };
+      g.positions.push(p);
+      g.total += p.currentUsd > 0 ? p.currentUsd : 0;
+      groups.set(key, g);
+    }
+    for (const g of groups.values()) {
+      if (g.positions.length < 2) continue;
+      // Каждая позиция в группе сейчас имеет ОДИНАКОВЫЙ feesClaimedUsd
+      // (= total claims по pair). Разделим pro-rata по currentUsd.
+      const claimedTotal = g.positions[0]?.feesClaimedUsd ?? 0;
+      if (claimedTotal <= 0) continue;
+      for (const p of g.positions) {
+        const share =
+          g.total > 0 ? (p.currentUsd > 0 ? p.currentUsd : 0) / g.total : 1 / g.positions.length;
+        p.feesClaimedUsd = claimedTotal * share;
+        p.feesLifetimeUsd = (p.feesUsd ?? 0) + p.feesClaimedUsd;
+        if (p.startUsd > 0 && p.ageDays && p.ageDays > 0) {
+          p.feeAprLifetime =
+            (p.feesLifetimeUsd / p.startUsd) * (365 / p.ageDays) * 100;
+        }
+        // Также pro-rata детализированную историю — каждый event имеет
+        // своё `usd`, делим на ту же долю; tokensReceived amount'ы тоже.
+        p.feesClaimedHistory = p.feesClaimedHistory.map((ev) => ({
+          ...ev,
+          usd: ev.usd * share,
+          tokensReceived: ev.tokensReceived.map((t) => ({
+            symbol: t.symbol,
+            amount: t.amount * share,
+            usd: t.usd * share,
+          })),
+          aprPeriod:
+            p.startUsd > 0 && ev.daysSincePrev && ev.daysSincePrev > 0
+              ? ((ev.usd * share) / p.startUsd) * (365 / ev.daysSincePrev) * 100
+              : null,
+        }));
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  V3 multi-NFT cost basis redistribution (FIX для POS-009/010 PAXG dup):
+  //
+  //  Если N V3 NFT в одном pair имеют ОДИНАКОВЫЙ startUsd (= тот же mint
+  //  attributed N раз через fallback), это значит:
+  //   - DeBank вернул N live позиций (split NFT через decreaseLiquidity+mint)
+  //   - В ops history только M < N mints
+  //   - Несколько NFT получили один и тот же deposit USD (дубль)
+  //
+  //  Решение: redistribute total startUsd pro-rata к currentUsd. Это
+  //  даёт реалистичный baseline для PnL до тех пор пока Alchemy log
+  //  parsing для отдельных NFT mints не реализован (Phase 5+).
+  //
+  //  Условие срабатывания:
+  //   - Группа V3 NFT с одинаковым (walletId, chain, protocolId, pair)
+  //   - >= 2 позиции с identical startUsd (с tolerance $1)
+  //   - Σ startUsd > Σ currentUsd × 1.05 (т.е. дубль завышает cost basis)
+  // ─────────────────────────────────────────────────────────────────────
+  {
+    type Group2 = { positions: OpenPosition[]; totalCurrent: number };
+    const groups2 = new Map<string, Group2>();
+    for (const p of all) {
+      if (!p.v3) continue;
+      const pair = [...p.supplyTokens.map((t) => t.symbol)].sort().join("+");
+      const key = `${p.walletId}|${p.chain}|${p.protocol.id}|${pair}`;
+      const g = groups2.get(key) ?? { positions: [], totalCurrent: 0 };
+      g.positions.push(p);
+      g.totalCurrent += p.currentUsd > 0 ? p.currentUsd : 0;
+      groups2.set(key, g);
+    }
+    for (const g of groups2.values()) {
+      if (g.positions.length < 2) continue;
+      // Детект identical startUsd (with $1 tolerance).
+      const startUsds = g.positions.map((p) => p.startUsd);
+      const distinctCount = new Set(
+        startUsds.map((u) => Math.round(u)),
+      ).size;
+      const totalStart = startUsds.reduce((a, b) => a + b, 0);
+      // Если distinctCount=1 → ВСЕ имеют одинаковый startUsd → дубль.
+      // Если totalStart > totalCurrent × 1.05 → cost basis явно завышен.
+      const isDuplicated =
+        distinctCount === 1 ||
+        (g.totalCurrent > 0 && totalStart > g.totalCurrent * 1.05);
+      if (!isDuplicated) continue;
+      // True total deposit = МАКСИМУМ из startUsd'ов (1 mint × N НЕ должен
+      // умножать). Альтернатива — взять distinct values без учёта дублей.
+      const trueTotalDeposit = Math.max(...startUsds);
+      // Распределяем pro-rata к currentUsd.
+      for (const p of g.positions) {
+        const share =
+          g.totalCurrent > 0
+            ? (p.currentUsd > 0 ? p.currentUsd : 0) / g.totalCurrent
+            : 1 / g.positions.length;
+        const newStartUsd = trueTotalDeposit * share;
+        // Меняем startUsd. Pro-rata также supplyTokens.startUsd чтобы
+        // сохранить консистентность.
+        const oldStartUsd = p.startUsd;
+        p.startUsd = newStartUsd;
+        if (oldStartUsd > 0) {
+          for (const t of p.supplyTokens) {
+            t.startUsd = (t.startUsd / oldStartUsd) * newStartUsd;
+          }
+        }
+        p.netPnlUsd = p.currentUsd - p.startUsd - p.currentDebtUsd;
+        p.netPnlPct =
+          p.startUsd > 0 ? (p.netPnlUsd / p.startUsd) * 100 : 0;
+      }
+      if (typeof window !== "undefined") {
+        console.warn(
+          `[V3 redistribution] Found ${g.positions.length} duplicate-startUsd ` +
+            `V3 positions in ${g.positions[0]?.protocol.name} ${g.positions[0]?.chain} ` +
+            `(pair: ${g.positions[0]?.supplyTokens.map((t) => t.symbol).join("+")}). ` +
+            `Redistributed total $${trueTotalDeposit.toFixed(2)} pro-rata по currentUsd. ` +
+            `Реальный cost basis per NFT требует Alchemy log parsing (Phase 5+).`,
+        );
+      }
+    }
+  }
+
+  // Сортируем: сначала свежие открытия (если openedAt известен), затем по
+  // currentUsd по убыванию.
+  all.sort((a, b) => {
+    if (a.openedAt && b.openedAt) return b.openedAt - a.openedAt;
+    if (a.openedAt) return -1;
+    if (b.openedAt) return 1;
+    return b.currentUsd - a.currentUsd;
+  });
+
+  // Выдаём id'ы.
+  return all.map((p, i) => ({
+    ...p,
+    id: `POS-${String(i + 1).padStart(3, "0")}`,
+  }));
+}
+
+/**
+ * Set ключей `${walletId}|${chain}|${protocolId}` для всех позиций,
+ * которые live API в данный момент возвращает как активные.
+ *
+ * Используется в `buildClosedPositions` чтобы решить: незакрытый цикл
+ * из истории — это реально открытая позиция (есть в live) или
+ * unmatched-фантом (live её не видит → почти всегда закрыта).
+ */
+export function buildLiveProtocolKeys(loaded: BuildInput[]): Set<string> {
+  const keys = new Set<string>();
+  for (const l of loaded) {
+    if (!l.live) continue;
+    for (const lp of l.live.positions) {
+      if (isLivePositionClosed(lp, l.ops)) continue;
+      keys.add(`${l.wallet.id}|${lp.chain}|${lp.protocolId}`);
+    }
+  }
+  return keys;
+}
+
+function buildOne(
+  lp: LiveProtocolPosition,
+  loaded: BuildInput,
+  trackerByWallet: Map<string, CostBasisTracker>,
+  currentPrices: Map<string, number>,
+  histPrices: Map<string, number>,
+  /**
+   * Hash mint-op'а для V3-style NFT-positions. Если задан — используется
+   * как stable per-NFT discriminator (instanceId), и `findFirstOpen` /
+   * `currentCostBasisForPosition` фильтруют ops по op.hash mint'а вместо
+   * pool.id. Без этого две V3 NFT в одном пуле получают одинаковый
+   * cost basis (см. POS-001/002 на Alex 2026-05-07).
+   */
+  v3MintOpHash?: string,
+  /** Точные V3 pool prices на mint-блоках (slot0). Для buildV3Details. */
+  v3MintPoolPrices?: BuildOptions["v3MintPoolPrices"],
+  /** CoinGecko USD цены на timestamp mint'а — наивысший приоритет. */
+  v3MintCgPrices?: BuildOptions["v3MintCgPrices"],
+  /**
+   * Set hash'ей mints, уже привязанных к ДРУГИМ V3 NFT в этом протоколе+chain.
+   * Передаётся в buildV3Details чтобы fallback strict-pair-filter их
+   * исключил (предотвращает дубль cost basis для unmatched NFT).
+   */
+  consumedMintHashes?: ReadonlySet<string>,
+): OpenPosition | null {
+  const { wallet, ops } = loaded;
+  if (lp.supply.length === 0) return null;
+
+  const targetSyms = new Set(lp.supply.map((s) => normalizeSymbol(s.symbol)));
+
+  // Универсальный matching по mint'у/contract-address LP-receipt'а.
+  // У каждой DeFi-позиции (lending market, LP, vault, perp, staking pool)
+  // свой уникальный контракт — этот контракт и используем для уникализации.
+  // Применяем для ВСЕХ категорий: если у позиции есть `lpTokenId` (DeBank
+  // pool.id / detail.token.id / supply protocol-token id) — фильтруем ops
+  // по нему, отделяя историю одного маркета от других в этом протоколе.
+  // Если `lpTokenId` не задан — фильтр not-op (двухступенчатый fallback в
+  // findFirstOpen / cycleDeposit гарантирует что результаты не потеряются).
+  const filterLpTokenId = lp.lpTokenId;
+  // Трёхступенчатый поиск даты открытия:
+  //   1) С lpTokenId-фильтром + строгий targetSyms (по live supply) —
+  //      обычная семантика для протоколов с receipt'ом.
+  //   2) Без lpTokenId, строгий targetSyms — fallback если DeBank не дал
+  //      pool.id или формат не совпал с linker'ом.
+  //   3) Без lpTokenId + RELAX режим (любое meaningful out > $1) —
+  //      для receipt-less протоколов (Morpho Blue) или случаев когда
+  //      historical collateral symbols отличаются от live supply
+  //      (Morpho показывает WETH+USDC через unwrap GLV-vault, а в
+  //      истории был GLV out → строгий targetSyms никогда не найдёт).
+  let opened = findFirstOpen(
+    ops,
+    lp.protocolId,
+    lp.chain,
+    targetSyms,
+    filterLpTokenId,
+  );
+  if (!opened && filterLpTokenId) {
+    opened = findFirstOpen(ops, lp.protocolId, lp.chain, targetSyms);
+  }
+  if (!opened) {
+    opened = findFirstOpen(
+      ops,
+      lp.protocolId,
+      lp.chain,
+      targetSyms,
+      undefined,
+      true /* relax */,
+    );
+  }
+  // V3 short-circuit: если у нас есть mint op.hash для этой live позиции
+  // (от matchV3LiveToMints), переопределяем `opened` на ИМЕННО этот mint.
+  // Без этого 3 V3 NFT в одном пуле получают одинаковую дату — самой ранней
+  // mint в этом пуле. С v3MintOpHash каждая получает свою дату создания.
+  if (v3MintOpHash) {
+    const mintOp = ops.find((o) => o.hash === v3MintOpHash);
+    if (mintOp) {
+      opened = { time: mintOp.time, hash: mintOp.hash };
+    }
+  } else if (isV3LpProtocol(lp.protocolName)) {
+    // V3 без сматченного NFT: findFirstOpen фильтрует по `targetSyms.has`
+    // (intersection), что для WETH/ARB live позиции возвращает самый ранний
+    // WETH/USDC mint (общий WETH). Перезаписываем на самый ранний lp_add с
+    // ТОЧНОЙ парой = sorted normalized live symbols.
+    const livePairKey = [...targetSyms].sort().join("+");
+    const earliestPairMatch = ops
+      .filter(
+        (o) =>
+          !!o.protocol &&
+          o.protocol.id === lp.protocolId &&
+          o.chain === lp.chain &&
+          o.type === "lp_add" &&
+          o.status !== "failed",
+      )
+      .map((o) => {
+        const meaningful = o.movement.filter(
+          (m) =>
+            m.direction === "out" &&
+            m.amount > 0 &&
+            !m.isProtocolToken &&
+            !(
+              (m.symbol === "ETH" || m.symbol === "WETH") &&
+              m.amount < 0.01 &&
+              (m.usd ?? 0) < 100
+            ),
+        );
+        const pair = [
+          ...new Set(meaningful.map((m) => normalizeSymbol(m.symbol))),
+        ]
+          .sort()
+          .join("+");
+        return { op: o, pair };
+      })
+      .filter((x) => x.pair === livePairKey)
+      .sort((a, b) => a.op.time - b.op.time)[0];
+    if (earliestPairMatch) {
+      opened = {
+        time: earliestPairMatch.op.time,
+        hash: earliestPairMatch.op.hash,
+      };
+    }
+  }
+  const tracker = trackerByWallet.get(wallet.id);
+
+  // V3-style concentrated liquidity → отдельная механика с IL.
+  const v3 = isV3LpProtocol(lp.protocolName)
+    ? buildV3Details(
+        lp,
+        ops,
+        histPrices,
+        currentPrices,
+        v3MintOpHash,
+        v3MintPoolPrices,
+        v3MintCgPrices,
+        consumedMintHashes,
+      )
+    : null;
+
+  const supplyTokens: OpenPositionToken[] = lp.supply.map((s) => {
+    // Стартовая стоимость = «сколько USD я реально вложил в эту позицию
+    // в момент открытия». Это семантически отличается от current value
+    // (которое включает накопленный yield).
+    //
+    // Алгоритм:
+    // 1. **ПРИОРИТЕТ** — `cycleDeposit.usd`: сумма USD которая ушла в адрес
+    //    protocolId за этот цикл. Точное значение из tx histories.
+    //    Используем если `live.amount >= deposit.amount × 0.95` (т.е. позиция
+    //    не была частично выведена). Yield-рост (live > deposit) не считаем
+    //    проблемой — startUsd остаётся реально вложенным.
+    // 2. **Fallback на runningAvg** — если cycleDeposit.usd = 0
+    //    (classifier не нашёл deposit ops в истории, например для очень
+    //    нишевого протокола без полной истории на DeBank/Helius).
+    //    `startUsd = live.amount × avgAt(opened.time)` — средневзвешенная
+    //    цена покупки токена на момент открытия позиции.
+    // 3. Last resort — пропорциональный fallbackUsdFromOpen.
+    const isStable = s.isStable;
+    const avgNow = isStable ? 1 : (tracker?.currentAvg(s.symbol) ?? null);
+    const avgAtOpen = isStable
+      ? 1
+      : opened
+        ? (tracker?.avgAt(s.symbol, opened.time) ?? avgNow)
+        : avgNow;
+    let cycleDeposit = currentCycleDepositForSymbol(
+      ops,
+      lp.protocolId,
+      lp.chain,
+      opened?.time ?? null,
+      s.symbol,
+      filterLpTokenId,
+      histPrices,
+    );
+    // Fallback без фильтра, если по конкретному маркету ничего не нашли
+    // (DeBank pool.id не совпал с linkedLpTokenId / линкер не свёл пары).
+    if (cycleDeposit.usd === 0 && filterLpTokenId) {
+      cycleDeposit = currentCycleDepositForSymbol(
+        ops,
+        lp.protocolId,
+        lp.chain,
+        opened?.time ?? null,
+        s.symbol,
+        undefined,
+        histPrices,
+      );
+    }
+
+    let startUsd: number;
+    let priceSource: OpenPositionToken["priceSource"];
+
+    if (
+      cycleDeposit.usd > 0 &&
+      cycleDeposit.amount > 0 &&
+      // Позиция должна сохранять минимум 50% депозита — иначе была
+      // частичная выгрузка и нужно скейлить пропорционально.
+      s.amount >= cycleDeposit.amount * 0.5
+    ) {
+      // Если live.amount ≈ deposit.amount или больше — берём ровно ту USD,
+      // которая была вложена. Yield (live > deposit × 1.05) НЕ влияет на
+      // startUsd — он попадёт в "current − start" как priceOnlyPnl.
+      // Если live.amount меньше deposit (был частичный withdraw) — скейлим.
+      if (s.amount >= cycleDeposit.amount * 0.95) {
+        startUsd = cycleDeposit.usd;
+      } else {
+        // Частичный withdraw — startUsd пропорционально оставшейся доле.
+        startUsd = cycleDeposit.usd * (s.amount / cycleDeposit.amount);
+      }
+      priceSource = "cost_basis";
+    } else if (avgAtOpen != null && avgAtOpen > 0) {
+      startUsd = s.amount * avgAtOpen;
+      priceSource = "cost_basis";
+    } else {
+      const fb = fallbackUsdFromOpen(ops, lp.protocolId, s.symbol, histPrices);
+      startUsd =
+        fb.totalAmount > 0
+          ? fb.totalUsd * (s.amount / fb.totalAmount)
+          : s.usd;
+      priceSource = "fallback";
+    }
+    // Нормализуем tokenId: убираем chain prefix ("arb:0x..." → "0x...")
+    // и suffix ":lending"/":vault" — нужно для on-chain lookup'ов.
+    const rawTid = s.tokenId;
+    const cleanTid = rawTid
+      ? rawTid
+          .replace(/^[a-z]{2,6}:/i, "")
+          .replace(/:[a-z][a-z0-9_-]+$/i, "")
+      : undefined;
+    return {
+      symbol: s.symbol,
+      amount: s.amount,
+      currentUsd: s.usd,
+      avgBuyPrice: isStable ? 1 : (avgAtOpen ?? null),
+      startUsd,
+      priceSource,
+      ...(cleanTid && { tokenId: cleanTid }),
+    };
+  });
+
+  // Position-level startUsd через **universal WAC по receipt-токену**:
+  //   - V3 LP: используем механизм Uniswap V3 (с расчётом IL).
+  //   - Любая позиция с известным `lpTokenId` (lending aToken, staking stETH,
+  //     LP receipt, GMX V2 GM/GLV, …): идём по матчащим ops хронологически,
+  //     накапливаем `cost` (USD заплачено) и `amount` (receipt-token
+  //     получено). При partial withdraw списываем cost = receiptOut × avg.
+  //     В итоге `costUsd` = «сколько вложено в то, что СЕЙЧАС в позиции».
+  //     Это правильная semantics для multi-deposit + partial-withdraw циклов.
+  //   - Если `lpTokenId` неизвестен (DeBank не отдал anchor): fallback на
+  //     per-token decomposition supplyTokens.startUsd.reduce(+).
+  // КРИТИЧНО: для start-USD нужно различать 2 типа multi-asset supply:
+  //
+  //  A) **Independent multi-collateral** (Aave V3, Morpho, Compound):
+  //     каждый supply-актив депонируется ОТДЕЛЬНОЙ tx, имеет независимый
+  //     receipt (aWETH+aWBTC) или receipt-less учёт. `currentCostBasisForPosition`
+  //     отслеживает только ОДИН receipt → даёт неполный ответ. Правильно
+  //     суммировать per-token startUsd через `supplyTokens.reduce`.
+  //
+  //  B) **Aggregated single-receipt** (GMX V2 GM, GLV, GLP, FLP, Fluid
+  //     Vault fVLT, Balancer BPT): пользователь вкладывает X USDC,
+  //     получает ОДИН receipt-токен. Live state показывает «underlying»
+  //     композицию (1.94 WETH + 4528 USDC), но это разложение receipt'а,
+  //     не отдельные депозиты. Position-level по этому receipt'у даёт
+  //     ПРАВИЛЬНЫЙ суммарный USD ($9000), а per-token sum даёт неправильный
+  //     ($4528 — scaled до live underlying ratio). Баг 2026-05-09: POS-001
+  //     GMX V2 показывал $4528 вместо $9000.
+  //
+  // Решение: считаем ОБА варианта и берём МАКСИМУМ:
+  //   - Для (A) Aave: positionLevel ≈ половина (один receipt из двух),
+  //     supplySum ≈ полная сумма → MAX берёт supplySum (правильно)
+  //   - Для (B) GMX: positionLevel ≈ полная сумма (один receipt), supplySum
+  //     ≈ scaled (неполная) → MAX берёт positionLevel (правильно)
+  //   - Для single-asset lending: оба ≈ полная сумма → MAX = либо
+  //
+  // Различаем (A) single-aggregated vs (B) multi-collateral через признак
+  // «есть ли в supplyTokens символ, которого пользователь физически НЕ
+  // вносил из кошелька». Если есть — это synthetic decomposition
+  // aggregated-receipt'а, и supplySumStartUsd ненадёжен.
+  //
+  //   - **(A) Single-aggregated** (GMX V2 GM, GLV, Fluid Vault fVLT, Balancer
+  //     BPT, Pendle SY/PT/YT): пользователь вносит ОДИН тип актива (USDC),
+  //     получает receipt, который live-state раскладывает на multi-asset
+  //     композицию (WBTC + USDC). WBTC в out-movements не появлялся.
+  //     → use `positionLevelDeposit` (out-side USD only)
+  //   - **(B) Independent multi-collateral** (Aave V3, Morpho, Compound):
+  //     каждый supply-актив депозитится отдельной tx с реальным out-movement.
+  //     → use `MAX(positionLevelDeposit, supplySumStartUsd)`
+  //
+  // ВАЖНО: предыдущая попытка различать через `distinctReceipts.size` была
+  // неверной, потому что ops протокола включают ВСЕ позиции пользователя в
+  // этом протоколе (POS-001, POS-002, POS-003 = 3 разных GM-контракта в
+  // GMX V2), что даёт `size > 1` всегда. Из-за этого фикс не активировался
+  // и POS-002 показывал $5,366 вместо $5,000. Bug 2026-05-09 v3.
+  const positionLevelDeposit =
+    !v3 && filterLpTokenId
+      ? currentCostBasisForPosition(
+          ops,
+          lp.protocolId,
+          lp.chain,
+          opened?.time ?? null,
+          filterLpTokenId,
+          tracker,
+          histPrices,
+        ).costUsd
+      : 0;
+  const supplySumStartUsd = supplyTokens.reduce((acc, t) => acc + t.startUsd, 0);
+  // Собираем set'ом символов то что пользователь реально вносил в эту
+  // конкретную позицию (фильтр по filterLpTokenId, чтобы не смешивать
+  // разные сабпозиции одного протокола).
+  const cycleStart = opened?.time ?? 0;
+  const outSymbolsInCycle = new Set<string>();
+  for (const op of ops) {
+    if (op.status === "failed") continue;
+    if (!op.protocol || op.protocol.id !== lp.protocolId) continue;
+    if (op.chain !== lp.chain) continue;
+    if (op.time < cycleStart) continue;
+    if (op.type !== "lp_add" && op.type !== "lend_supply") continue;
+    if (filterLpTokenId && !opMatchesLpMarket(op, filterLpTokenId)) continue;
+    for (const m of op.movement) {
+      if (m.direction !== "out" || m.amount <= 0) continue;
+      if (m.isProtocolToken) continue;
+      // Gas micro-amounts ETH не считаем «вкладом».
+      if (
+        (m.symbol === "ETH" || m.symbol === "WETH") &&
+        m.amount < 0.01 &&
+        (m.usd ?? 0) < 100
+      )
+        continue;
+      outSymbolsInCycle.add(normalizeSymbol(m.symbol));
+    }
+  }
+  // Если хоть один supply-токен НЕ был внесён пользователем — это synthetic
+  // decomposition aggregated-receipt'а.
+  const hasSyntheticSupply = supplyTokens.some(
+    (t) => !outSymbolsInCycle.has(normalizeSymbol(t.symbol)),
+  );
+  const isSingleAggregated = hasSyntheticSupply && positionLevelDeposit > 0;
+  const startUsd = v3
+    ? v3.depositUsd
+    : isSingleAggregated
+      ? positionLevelDeposit
+      : Math.max(positionLevelDeposit, supplySumStartUsd);
+  // Используем lp.assetUsd для всех типов (включая V3) — это
+  // authoritative DeBank-видимое значение которое включает в себя:
+  //   - Underlying liquidity (PAXG + USDC)
+  //   - Accrued uncollected fees
+  // Совпадает с тем что DeBank UI показывает пользователю.
+  // Pending fees отдельно выделяются в `fees` поле через `lp.rewards`.
+  const currentUsd = lp.assetUsd;
+  const currentDebtUsd = lp.borrow.reduce((acc, t) => acc + t.usd, 0);
+  const ageDays = opened
+    ? Math.max(0, Math.floor((Date.now() / 1000 - opened.time) / 86_400))
+    : null;
+
+  // Fees / supply-yield.
+  const fees = computeFees(lp, ops, currentPrices, ageDays);
+  const feesUsd = fees?.feesUsd ?? null;
+  const feesSource = fees?.source ?? null;
+  const feesByToken: OpenPosition["feesByToken"] = fees?.byToken ?? [];
+  const feeApr =
+    feesUsd != null && startUsd > 0 && ageDays && ageDays > 0
+      ? (feesUsd / startUsd) * (365 / ageDays) * 100
+      : null;
+
+  // Claimed fees: Σ всех claim_rewards ops по этому protocolId × chain.
+  // Для V3 LP — фильтруем по символ-паре (WETH/USDC NFT не должен видеть
+  // fee'и от WETH/ARB NFT в том же протоколе+chain).
+  const livePairKey = isV3LpProtocol(lp.protocolName)
+    ? [...targetSyms].sort().join("+")
+    : undefined;
+  const feesClaimedUsd = computeClaimedFeesUsd(
+    ops,
+    lp.protocolId,
+    lp.chain,
+    histPrices,
+    livePairKey,
+  );
+  // Детализация по claim'ам — для popup с хронологией.
+  const feesClaimedHistory = buildClaimedFeesHistory(
+    ops,
+    lp.protocolId,
+    lp.chain,
+    histPrices,
+    livePairKey,
+    opened?.time ?? null,
+    startUsd,
+  );
+  const feesLifetimeUsd = (feesUsd ?? 0) + feesClaimedUsd;
+  const feeAprLifetime =
+    startUsd > 0 && ageDays && ageDays > 0
+      ? (feesLifetimeUsd / startUsd) * (365 / ageDays) * 100
+      : null;
+
+  // instanceId — стабильный per-position discriminator. Для V3 NFT и других
+  // multi-position-в-одном-пуле случаев нужен, чтобы override'ы (credit
+  // toggle, hidden, currentValue) применялись к КАЖДОЙ позиции отдельно.
+  // Используем hash supply-amounts (округлённых до 4 знаков) — уникальный
+  // отпечаток позиции даже без NFT tokenId.
+  // Приоритет: mint op.hash (для V3 NFT, стабилен per-NFT) > supplyHash
+  // (fallback для всего остального, чувствителен к ребалансировке amounts).
+  const supplyHash = supplyAmountsHash(supplyTokens);
+  const stableInstanceId = v3MintOpHash || supplyHash || undefined;
+
+  return {
+    id: "", // будет проставлен снаружи после сортировки
+    walletId: wallet.id,
+    walletName: wallet.name,
+    walletChain: wallet.chain,
+    chain: lp.chain,
+    protocol: { id: lp.protocolId, name: lp.protocolName, category: lp.category },
+    // Pendle V2 даёт category="common" + itemName="Deposit" — это yield-position,
+    // классифицируем как LP. Включаем itemName в детект для таких случаев.
+    kind: kindFromCategory(`${lp.category} ${lp.itemName ?? ""}`),
+    itemName: lp.itemName,
+    openedAt: opened?.time ?? null,
+    openHash: opened?.hash ?? null,
+    ageDays,
+    instanceId: stableInstanceId,
+    supplyTokens,
+    debtTokens: lp.borrow.map((b) => ({
+      symbol: b.symbol,
+      amount: b.amount,
+      usd: b.usd,
+    })),
+    startUsd,
+    currentUsd,
+    currentDebtUsd,
+    healthRate: lp.healthRate ?? null,
+    feesUsd,
+    feesSource,
+    feesClaimedUsd,
+    feesLifetimeUsd,
+    feeApr,
+    feeAprLifetime,
+    feesClaimedHistory,
+    feesByToken,
+    // По умолчанию 0 — кредитный статус выставляется вручную через
+    // override-чекбокс в UI (см. credit_overrides.ts).
+    creditFundedUsd: 0,
+    ...(v3 ? { v3 } : {}),
+  };
+}
+
+/**
+ * Σ всех `claim_rewards` ops для конкретного (protocolId, chain).
+ * USD считаем по hist-ценам в момент claim → fallback на m.usd.
+ */
+function computeClaimedFeesUsd(
+  ops: ClassifiedOp[],
+  protocolId: string,
+  chain: string,
+  histPrices: Map<string, number>,
+  /**
+   * Опциональный фильтр: считаем только claim_rewards ops, у которых
+   * receives' symbol-pair == livePairKey (sorted normalized). Без этого
+   * параметра на V3 позиции одного протокола+chain все pair'ы (WETH/USDC,
+   * WETH/ARB) сливаются в одну сумму. С ним — каждая пара видит свои
+   * fee'и.
+   */
+  livePairKey?: string,
+): number {
+  let total = 0;
+  for (const op of ops) {
+    if (op.status === "failed") continue;
+    if (isJunkOp(op)) continue;
+    if (op.type !== "claim_rewards") continue;
+    if (!op.protocol || op.protocol.id !== protocolId) continue;
+    if (op.chain !== chain) continue;
+    if (livePairKey != null) {
+      const meaningful = op.movement.filter(
+        (m) => m.direction === "in" && m.amount > 0 && !m.isProtocolToken,
+      );
+      const opPair = [
+        ...new Set(meaningful.map((m) => normalizeSymbol(m.symbol))),
+      ]
+        .sort()
+        .join("+");
+      if (opPair !== livePairKey) continue;
+    }
+    for (const m of op.movement) {
+      if (m.direction !== "in" || m.amount <= 0) continue;
+      if (isStableSymbol(m.symbol)) {
+        total += m.amount;
+        continue;
+      }
+      const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
+      let price: number | null = null;
+      if (coin) {
+        const p = priceFromMap(histPrices, coin, op.time);
+        if (p != null && p > 0) price = p;
+      }
+      if (price != null) {
+        total += m.amount * price;
+      } else if (m.usd != null && m.usd > 0) {
+        total += m.usd;
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * Развёрнутая история claim'ов для одной позиции — детализация для popup'а.
+ *
+ * Возвращает Array<ClaimEvent> отсортированный по времени, где каждый event:
+ *   - время / hash claim'а
+ *   - USD-стоимость снятых fee'ев на момент claim'а (hist-цена)
+ *   - токены и их amount'ы
+ *   - days since previous claim (или с момента открытия для первого)
+ *   - APR за период: `(claim_usd / startUsd) × (365 / days) × 100`
+ *
+ * APR-baseline = `startUsd` (cost basis). Стабилен между периодами,
+ * не требует исторической стоимости позиции (которой у нас нет).
+ *
+ * positionUsdAtClaim сейчас = `startUsd` (placeholder); в будущем можно
+ * заменить на реальную стоимость через pool sqrtPrice на блоке claim'а.
+ *
+ * pnlSincePrev пока null — без исторической стоимости позиции вычислить
+ * нельзя. Если нужно — добавим RPC-чтение sqrtPrice на блоке claim'а.
+ */
+function buildClaimedFeesHistory(
+  ops: ClassifiedOp[],
+  protocolId: string,
+  chain: string,
+  histPrices: Map<string, number>,
+  livePairKey: string | undefined,
+  openedTime: number | null,
+  startUsd: number,
+): OpenPosition["feesClaimedHistory"] {
+  const events: OpenPosition["feesClaimedHistory"] = [];
+  for (const op of ops) {
+    if (op.status === "failed") continue;
+    if (isJunkOp(op)) continue;
+    if (op.type !== "claim_rewards") continue;
+    if (!op.protocol || op.protocol.id !== protocolId) continue;
+    if (op.chain !== chain) continue;
+    if (livePairKey != null) {
+      const meaningful = op.movement.filter(
+        (m) => m.direction === "in" && m.amount > 0 && !m.isProtocolToken,
+      );
+      const opPair = [
+        ...new Set(meaningful.map((m) => normalizeSymbol(m.symbol))),
+      ]
+        .sort()
+        .join("+");
+      if (opPair !== livePairKey) continue;
+    }
+    let usd = 0;
+    const tokensReceived: { symbol: string; amount: number; usd: number }[] = [];
+    for (const m of op.movement) {
+      if (m.direction !== "in" || m.amount <= 0) continue;
+      let tokenUsd = 0;
+      if (isStableSymbol(m.symbol)) {
+        tokenUsd = m.amount;
+      } else {
+        const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
+        let price: number | null = null;
+        if (coin) {
+          const p = priceFromMap(histPrices, coin, op.time);
+          if (p != null && p > 0) price = p;
+        }
+        tokenUsd = price != null ? m.amount * price : (m.usd ?? 0);
+      }
+      usd += tokenUsd;
+      tokensReceived.push({
+        symbol: normalizeSymbol(m.symbol),
+        amount: m.amount,
+        usd: tokenUsd,
+      });
+    }
+    if (usd <= 0) continue;
+    events.push({
+      time: op.time,
+      hash: op.hash,
+      usd,
+      tokensReceived,
+      positionUsdAtClaim: startUsd > 0 ? startUsd : null,
+      aprPeriod: null, // заполним ниже после сортировки
+      daysSincePrev: null,
+      pnlSincePrev: null,
+      pnlSincePrevPct: null,
+    });
+  }
+  events.sort((a, b) => a.time - b.time);
+  // Считаем APR за период от предыдущего claim'а (или openedTime для
+  // первого claim'а) до этого claim'а.
+  let prevTime = openedTime ?? null;
+  for (const ev of events) {
+    if (prevTime != null && startUsd > 0) {
+      const days = (ev.time - prevTime) / 86_400;
+      if (days > 0) {
+        ev.daysSincePrev = days;
+        ev.aprPeriod = (ev.usd / startUsd) * (365 / days) * 100;
+      }
+    }
+    prevTime = ev.time;
+  }
+  return events;
+}
+
+/* ====================== Inferred positions из истории ===================== */
+
+/** Минимальная нетто-сумма депозитов в USD, чтобы считать позицию открытой. */
+const INFERRED_MIN_DEPOSIT_USD = 1;
+
+const ADD_TYPES = new Set<ClassifiedOp["type"]>([
+  "lp_add",
+  "lend_supply",
+  "stake",
+  "perp_open",
+]);
+
+const REMOVE_TYPES = new Set<ClassifiedOp["type"]>([
+  "lp_remove",
+  "lend_withdraw",
+  "unstake",
+  "perp_close",
+]);
+
+/**
+ * Кандидат на отдельную inferred-позицию — каждый `lp_add` (или иной
+ * open-event) создаёт отдельную запись. Депозиты НЕ слипаются в одну
+ * сумму. lp_remove распределяются FIFO — гасят более ранние депозиты
+ * первыми.
+ */
+interface PositionCandidate {
+  protocolId: string;
+  protocolName: string;
+  protocolCategory: string;
+  chain: string;
+  /** Время открытия — `op.time` исходного lp_add. */
+  openedAt: number;
+  openHash: string;
+  /** Per-token остаток в этом «отдельном» депозите. */
+  remaining: Map<string, { symbol: string; amount: number; usd: number }>;
+}
+
+function inferredKindFromCategory(cat: string): PositionKind {
+  return kindFromCategory(cat);
+}
+
+/**
+ * Реконструирует позиции для кошелька из истории операций.
+ *
+ * Алгоритм (по требованию пользователя):
+ *  1. Каждый `lp_add` (и аналогичные open-types) создаёт **отдельную**
+ *     позицию-кандидата с собственными tokens/usd/timestamp.
+ *  2. `lp_remove` (и close-types) распределяются FIFO — сначала гасят
+ *     самый ранний lp_add того же протокола, потом следующий и т.д.
+ *  3. После применения всех removes остаются позиции с положительными
+ *     остатками — они и идут в OpenPosition[].
+ *  4. `claim_rewards` для протокола накапливаются в общий feesClaimedUsd
+ *     и распределяются между остающимися позициями пропорционально их
+ *     стоимости (примерно справедливо).
+ *
+ * Это даёт например для Flash Trade: 2 lp_add (548 USDC + 752 USDC) без
+ * removes → 2 отдельные позиции с разными датами открытия.
+ */
+function buildInferredPositions(
+  loaded: BuildInput,
+  liveKeys: Set<string>,
+): OpenPosition[] {
+  const wallet = loaded.wallet;
+
+  // Группируем по протоколу: сначала собираем все open-events в порядке
+  // времени, потом проходим removes и гасим FIFO.
+  const candidatesByProto = new Map<string, PositionCandidate[]>();
+  // claim_rewards суммируем глобально по протоколу (потом распределим).
+  const claimedByProto = new Map<string, number>();
+
+  // Сортируем ops по времени для FIFO.
+  const sortedOps = [...loaded.ops].sort((a, b) => a.time - b.time);
+
+  for (const op of sortedOps) {
+    if (op.status === "failed") continue;
+    if (isJunkOp(op)) continue;
+    if (!op.protocol) continue;
+    const protoKey = `${op.chain}|${op.protocol.id}`;
+
+    if (op.type === "claim_rewards") {
+      let claimed = 0;
+      for (const m of op.movement) {
+        if (m.direction !== "in" || m.amount <= 0) continue;
+        if (m.usd != null && m.usd > 0) claimed += m.usd;
+      }
+      claimedByProto.set(protoKey, (claimedByProto.get(protoKey) ?? 0) + claimed);
+      continue;
+    }
+
+    const isAdd = ADD_TYPES.has(op.type);
+    const isRemove = REMOVE_TYPES.has(op.type);
+    if (!isAdd && !isRemove) continue;
+
+    if (isAdd) {
+      // Каждый lp_add → отдельный candidate.
+      const remaining = new Map<
+        string,
+        { symbol: string; amount: number; usd: number }
+      >();
+      for (const m of op.movement) {
+        if (m.direction !== "out" || m.amount <= 0) continue;
+        const sym = normalizeSymbol(m.symbol);
+        const cur = remaining.get(sym) ?? { symbol: m.symbol, amount: 0, usd: 0 };
+        cur.amount += m.amount;
+        cur.usd += m.usd ?? 0;
+        remaining.set(sym, cur);
+      }
+      // Если ни одного выходящего токена — это «open» без депозита, пропускаем.
+      if (remaining.size === 0) continue;
+      const candidate: PositionCandidate = {
+        protocolId: op.protocol.id,
+        protocolName: op.protocol.name,
+        protocolCategory: op.protocol.category ?? "yield",
+        chain: op.chain,
+        openedAt: op.time,
+        openHash: op.hash,
+        remaining,
+      };
+      const arr = candidatesByProto.get(protoKey) ?? [];
+      arr.push(candidate);
+      candidatesByProto.set(protoKey, arr);
+      continue;
+    }
+
+    // isRemove — FIFO применяем к существующим candidates этого протокола.
+    const arr = candidatesByProto.get(protoKey);
+    if (!arr || arr.length === 0) continue;
+    for (const m of op.movement) {
+      if (m.direction !== "in" || m.amount <= 0) continue;
+      const sym = normalizeSymbol(m.symbol);
+      let amountLeft = m.amount;
+      let usdLeft = m.usd ?? 0;
+      for (const cand of arr) {
+        if (amountLeft <= 0) break;
+        const tok = cand.remaining.get(sym);
+        if (!tok || tok.amount <= 0) continue;
+        const used = Math.min(tok.amount, amountLeft);
+        const usdShare = (used / m.amount) * usdLeft;
+        tok.amount -= used;
+        tok.usd -= usdShare;
+        if (tok.amount <= 1e-9) cand.remaining.delete(sym);
+        amountLeft -= used;
+      }
+    }
+  }
+
+  // Финал: для каждой пары protoKey + candidate с остатками — строим OpenPosition.
+  const out: OpenPosition[] = [];
+  for (const [protoKey, candidates] of candidatesByProto) {
+    const live = liveKeys.has(`${wallet.id}|${protoKey.split("|")[0]}|${protoKey.split("|")[1]}`);
+    if (live) continue;
+
+    // Сначала отфильтруем «пустые» (полностью погашенные) candidates.
+    const survivors = candidates.filter((c) => {
+      let totalUsd = 0;
+      for (const t of c.remaining.values()) totalUsd += t.usd;
+      return totalUsd >= INFERRED_MIN_DEPOSIT_USD;
+    });
+    if (survivors.length === 0) continue;
+
+    // Распределим claim_rewards протокола пропорционально remaining USD.
+    const claimedTotal = claimedByProto.get(protoKey) ?? 0;
+    const survivorsUsd = survivors.map((c) => {
+      let s = 0;
+      for (const t of c.remaining.values()) s += t.usd;
+      return s;
+    });
+    const totalSurvivorUsd = survivorsUsd.reduce((a, b) => a + b, 0);
+
+    survivors.forEach((cand, idx) => {
+      const candUsd = survivorsUsd[idx]!;
+      const supplyTokens: OpenPositionToken[] = [];
+      for (const tok of cand.remaining.values()) {
+        if (tok.amount <= 0 || tok.usd <= 0) continue;
+        supplyTokens.push({
+          symbol: tok.symbol,
+          amount: tok.amount,
+          currentUsd: tok.usd,
+          avgBuyPrice: tok.amount > 0 ? tok.usd / tok.amount : null,
+          startUsd: tok.usd,
+          priceSource: "fallback",
+        });
+      }
+      if (supplyTokens.length === 0) return;
+
+      const ageDays = Math.max(
+        0,
+        Math.floor((Date.now() / 1000 - cand.openedAt) / 86_400),
+      );
+      const startUsd = candUsd;
+      const currentUsd = candUsd;
+      const feesClaimedUsd =
+        totalSurvivorUsd > 0
+          ? (claimedTotal * candUsd) / totalSurvivorUsd
+          : 0;
+      const feesLifetimeUsd = feesClaimedUsd;
+      const feeAprLifetime =
+        startUsd > 0 && ageDays > 0
+          ? (feesLifetimeUsd / startUsd) * (365 / ageDays) * 100
+          : null;
+
+      out.push({
+        id: "",
+        walletId: wallet.id,
+        walletName: wallet.name,
+        walletChain: wallet.chain,
+        chain: cand.chain,
+        protocol: {
+          id: cand.protocolId,
+          name: cand.protocolName,
+          category: cand.protocolCategory,
+        },
+        kind: inferredKindFromCategory(cand.protocolCategory),
+        itemName: "Из истории",
+        openedAt: cand.openedAt,
+        openHash: cand.openHash,
+        ageDays,
+        instanceId: cand.openHash,
+        supplyTokens,
+        debtTokens: [],
+        startUsd,
+        currentUsd,
+        currentDebtUsd: 0,
+        healthRate: null,
+        feesUsd: null,
+        feesSource: null,
+        feesClaimedUsd,
+        feesLifetimeUsd,
+        feeApr: null,
+        feeAprLifetime,
+        feesByToken: [],
+        creditFundedUsd: 0,
+        inferred: true,
+      });
+    });
+  }
+  return out;
+}
+
+/* ============================ V3 LP details =============================== */
+
+/**
+ * Подсчитать стоимость депозита, HODL value и impermanent loss для V3 LP.
+ *
+ * Алгоритм:
+ *  1. Найти все `lp_add` ops, где OUT-движение содержит токен из live.supply.
+ *     Берём ALL такие events — пользователь мог добавлять ликвидность несколько
+ *     раз.
+ *  2. Для каждого деп события: deposit_usd_at_tx = Σ amount_i × price_at_tx_i,
+ *     где price_at_tx — историческая цена из DefiLlama (для стейблов = $1).
+ *  3. Σ deposit_usd по всем событиям = `depositUsd`.
+ *  4. Σ deposit_amount по токенам × current_price = `hodlUsd`.
+ *  5. IL = hodlUsd − live.assetUsd.
+ */
+function buildV3Details(
+  lp: LiveProtocolPosition,
+  ops: ClassifiedOp[],
+  histPrices: Map<string, number>,
+  currentPrices: Map<string, number>,
+  /**
+   * Hash mint op'а (от matchV3LiveToMints). Если задан — фильтруем
+   * lp_add ops ТОЛЬКО до этого конкретного mint'а. Без него все mints
+   * в одном пуле (например, 3 NFT WETH/USDC) суммируются → все позиции
+   * получают одинаковый depositUsd. С ним — каждая видит свой mint.
+   */
+  v3MintOpHash?: string,
+  /**
+   * Точные USD-цены V3 mint'ов через `pool.slot0()` на mint-блоке.
+   * **ПРИОРИТЕТНЫЙ** источник для `priceAtTx` — точнее DefiLlama hourly,
+   * совпадает с Revert Finance / Uniswap UI (отклонение 0%).
+   * Ключ: `${chain}|${txHash}`.
+   */
+  v3MintPoolPrices?: BuildOptions["v3MintPoolPrices"],
+  /**
+   * CoinGecko USD цены на timestamp mint'а — НАИВЫСШИЙ приоритет (если
+   * есть). Совпадает с Revert Finance методологией (multi-venue
+   * aggregator, USDC ≠ exactly $1, byte-precise match).
+   * Ключ: `${chain}|${txHash}`.
+   */
+  v3MintCgPrices?: BuildOptions["v3MintCgPrices"],
+  /**
+   * Set hash'ей mint ops, которые уже привязаны к ДРУГИМ NFT через
+   * matchV3LiveToMints. Когда `v3MintOpHash` не задан (этот NFT не
+   * получил матч), fallback strict-pair-filter ДОЛЖЕН исключить эти
+   * консьюмированные mints — иначе один и тот же mint используется
+   * для двух NFT, и обе показывают одинаковый startUsd (баг
+   * POS-009/010 PAXG dup).
+   */
+  consumedMintHashes?: ReadonlySet<string>,
+): V3Details | null {
+  // Live supply tokens — нормализованные.
+  const liveSyms = new Set(lp.supply.map((s) => normalizeSymbol(s.symbol)));
+  // Канонический символ-пэйр live-позиции (sorted, normalized).
+  const livePairKey = [...liveSyms].sort().join("+");
+
+  const lpAdds = ops.filter(
+    (o) =>
+      !!o.protocol &&
+      o.protocol.id === lp.protocolId &&
+      o.type === "lp_add" &&
+      o.status !== "failed",
+  );
+  // Фильтр пары: ТОЧНОЕ совпадение sorted normalized symbol-pair'а
+  // между мн-вом OUT'ов mint-op'а и live supply. Используем `intersect`
+  // ТОЛЬКО если v3MintOpHash задан (тогда отдельный mint всё равно отсечёт
+  // лишнее). Без v3MintOpHash строгий фильтр по паре критичен — иначе
+  // WETH/ARB live позиция засосёт WETH/USDC mint'ы потому что WETH общий,
+  // и startUsd получится сумма чужих NFT (баг POS-003 на Alex 2026-05-08).
+  let matched = lpAdds.filter((op) => {
+    const outs = op.movement.filter(
+      (m) => m.direction === "out" && m.amount > 0 && !m.isProtocolToken,
+    );
+    // Газ ETH (микро) исключаем при определении пары.
+    const meaningful = outs.filter(
+      (m) =>
+        !(
+          (m.symbol === "ETH" || m.symbol === "WETH") &&
+          m.amount < 0.01 &&
+          (m.usd ?? 0) < 100
+        ),
+    );
+    if (meaningful.length === 0) return false;
+    const opPairKey = [...new Set(meaningful.map((m) => normalizeSymbol(m.symbol)))]
+      .sort()
+      .join("+");
+    return opPairKey === livePairKey;
+  });
+  // Если есть привязка к конкретному mint NFT — оставляем только его.
+  // Это разделяет 3 V3 NFT в одном пуле, у каждой свой depositUsd.
+  if (v3MintOpHash) {
+    matched = matched.filter((op) => op.hash === v3MintOpHash);
+  } else if (consumedMintHashes && consumedMintHashes.size > 0) {
+    // Этот NFT не получил матч в matchV3LiveToMints — но другие NFT в
+    // том же пуле получили. Исключаем их mints из fallback strict-pair
+    // filter чтобы не дублировать cost basis (баг POS-009/010).
+    matched = matched.filter((op) => !consumedMintHashes.has(op.hash));
+  }
+  if (matched.length === 0) return null;
+
+  // Per-token суммы депозитов и USD-стоимость на момент каждого депозита.
+  const depositMap = new Map<string, number>();
+  let depositUsd = 0;
+  let histCount = 0;
+  let fallbackCount = 0;
+
+  for (const op of matched) {
+    // 1. Попытка точной цены через V3 pool slot0 на блоке mint'а.
+    //    Совпадает с Revert / Uniswap UI байт-в-байт (если стейблов хватает).
+    const poolPriceKey = `${op.chain}|${op.hash.toLowerCase()}`;
+    const poolPrice = v3MintPoolPrices?.get(poolPriceKey);
+    const cgPrice = v3MintCgPrices?.get(poolPriceKey);
+    // Determine USD per token0 / token1 if poolPrice available + one side stable.
+    let usdPerToken0: number | null = null;
+    let usdPerToken1: number | null = null;
+    let pricesFromCg = false;
+    // ──────────────────────────────────────────────────────────────────
+    //  ПРИОРИТЕТ #0: CoinGecko per-token USD на timestamp mint'а.
+    //
+    //  Совпадает с Revert Finance методологией (multi-venue aggregator,
+    //  USDC ≠ exactly $1, time-bucketed). Если для обоих токенов есть
+    //  CoinGecko цена — используем их напрямую и пропускаем pool-derived
+    //  логику. Slot0 остаётся fallback'ом если CoinGecko вернул null
+    //  (новый токен / rate-limit).
+    // ──────────────────────────────────────────────────────────────────
+    if (poolPrice && cgPrice) {
+      const t0 = poolPrice.token0.toLowerCase();
+      const t1 = poolPrice.token1.toLowerCase();
+      const cg0 = cgPrice.byAddress.get(t0);
+      const cg1 = cgPrice.byAddress.get(t1);
+      // Native ETH placeholder (movement.tokenId = 0xeeeeee...) — добавим
+      // в byAddress по WETH адресу через anchorTokenAddress fallback.
+      const cgNativeEth = cgPrice.byAddress.get("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+      const c0 = cg0 ?? (poolPrice.anchorTokenAddress?.toLowerCase() === t0 ? cgNativeEth : undefined);
+      const c1 = cg1 ?? (poolPrice.anchorTokenAddress?.toLowerCase() === t1 ? cgNativeEth : undefined);
+      if (c0 != null && c1 != null) {
+        usdPerToken0 = c0;
+        usdPerToken1 = c1;
+        pricesFromCg = true;
+      }
+    }
+    if (!pricesFromCg && poolPrice) {
+      // Идентификация какой токен в пуле — token0 vs token1 по адресу.
+      // Movement.tokenId: для arb/eth/etc. — chain-prefix или raw 0x-hex.
+      // Сравниваем case-insensitively, без chain prefix.
+      const mints = op.movement.filter(
+        (m) => m.direction === "out" && m.amount > 0 && !m.isProtocolToken,
+      );
+      // Снимаем chain prefix у tokenId если есть.
+      const stripPrefix = (id: string): string =>
+        id.includes(":") ? id.split(":").pop()! : id;
+      const t0 = poolPrice.token0.toLowerCase();
+      const t1 = poolPrice.token1.toLowerCase();
+      // Один из mints должен быть стейблом — тогда другой = token-USD-price.
+      let stableUsd = 0;
+      let stableSide: 0 | 1 | null = null;
+      for (const m of mints) {
+        if (!isStableSymbol(m.symbol)) continue;
+        const tid = stripPrefix(m.tokenId).toLowerCase();
+        if (tid === t0) {
+          stableSide = 0;
+          stableUsd = 1;
+        } else if (tid === t1) {
+          stableSide = 1;
+          stableUsd = 1;
+        }
+      }
+      if (stableSide === 1) {
+        // token1 = stable ($1) → token0 USD = price1Per0
+        usdPerToken0 = poolPrice.price1Per0 * stableUsd;
+        usdPerToken1 = stableUsd;
+      } else if (stableSide === 0) {
+        // token0 = stable ($1) → token1 USD = 1 / price1Per0
+        usdPerToken0 = stableUsd;
+        usdPerToken1 = stableUsd / poolPrice.price1Per0;
+      } else {
+        // Volatile/volatile pool (WETH/ARB, WBTC/ETH, PAXG/WBTC, etc.):
+        // pool ratio даёт точное соотношение, но абсолютный USD нужен
+        // из внешнего источника.
+        //
+        // ПРИОРИТЕТ якорей:
+        //   1) **anchor pool slot0** на ТОМ ЖЕ блоке (`poolPrice.anchorTokenUsd`):
+        //      точная цена WETH-USD на блоке mint'а из WETH/USDC pool.
+        //      Совпадает с Revert Finance / Uniswap UI байт-в-байт.
+        //   2) DefiLlama hourly bucket для самого ликвидного токена пары —
+        //      fallback если anchor pool не сконфигурирован для этой сети
+        //      или RPC чтение упало.
+        //
+        // Без anchor'а (только DefiLlama) дрифт достигает $10-30 на $14k
+        // позиции (баг POS-002 на Alex 2026-05-08: $14,583 vs $14,555).
+        if (
+          poolPrice.anchorTokenAddress != null &&
+          poolPrice.anchorTokenUsd != null &&
+          poolPrice.anchorTokenUsd > 0
+        ) {
+          const anchorAddr = poolPrice.anchorTokenAddress.toLowerCase();
+          if (t0 === anchorAddr) {
+            usdPerToken0 = poolPrice.anchorTokenUsd;
+            usdPerToken1 = poolPrice.anchorTokenUsd / poolPrice.price1Per0;
+          } else if (t1 === anchorAddr) {
+            usdPerToken1 = poolPrice.anchorTokenUsd;
+            usdPerToken0 = poolPrice.anchorTokenUsd * poolPrice.price1Per0;
+          }
+        }
+        // Fallback на DefiLlama если anchor не сработал.
+        if (usdPerToken0 == null && usdPerToken1 == null) {
+          const t0Mov = mints.find(
+            (m) => stripPrefix(m.tokenId).toLowerCase() === t0,
+          );
+          const t1Mov = mints.find(
+            (m) => stripPrefix(m.tokenId).toLowerCase() === t1,
+          );
+          const anchorPriority = (sym: string): number => {
+            const s = normalizeSymbol(sym);
+            if (s === "ETH") return 3;
+            if (s === "BTC") return 2;
+            return 1;
+          };
+          const t0Priority = t0Mov ? anchorPriority(t0Mov.symbol) : 0;
+          const t1Priority = t1Mov ? anchorPriority(t1Mov.symbol) : 0;
+          function llamaPrice(mov: TokenMovement): number | null {
+            const coin = defillamaCoinKey(op.chain, mov.tokenId, mov.symbol);
+            if (!coin) return null;
+            const p = priceFromMap(histPrices, coin, op.time);
+            return p != null && p > 0 ? p : null;
+          }
+          if (t0Priority >= t1Priority && t0Mov) {
+            const p0 = llamaPrice(t0Mov);
+            if (p0 != null) {
+              usdPerToken0 = p0;
+              usdPerToken1 = p0 / poolPrice.price1Per0;
+            }
+          }
+          if (usdPerToken0 == null && t1Mov) {
+            const p1 = llamaPrice(t1Mov);
+            if (p1 != null) {
+              usdPerToken1 = p1;
+              usdPerToken0 = p1 * poolPrice.price1Per0;
+            }
+          }
+        }
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    //  ТОЧНЫЙ путь: Pool.Mint event с atomic amount0/amount1
+    //
+    //  Если poolPrice содержит exactAmount0/1 (прочитаны из receipt log'ов)
+    //  — используем их напрямую, минуя округлённый m.amount от DeBank.
+    //  Это убирает $1-3 noise от DeBank rounding'а и даёт точное совпадение
+    //  с Revert (тот тоже парсит Pool.Mint event).
+    //
+    //  exactAmount хранится как string (uint256), чтобы пережить JSON serial.
+    //  Конвертация в human float через split-by-decimals для сохранения
+    //  всех ~17 sig digits JS Number'а.
+    // ──────────────────────────────────────────────────────────────────
+    function atomicToHuman(atomic: string, decimals: number): number {
+      if (!atomic) return 0;
+      const s = atomic.padStart(decimals + 1, "0");
+      const intPart = s.slice(0, s.length - decimals) || "0";
+      const fracPart = s.slice(s.length - decimals);
+      return Number(`${intPart}.${fracPart}`);
+    }
+    let usedExact = false;
+    if (
+      poolPrice &&
+      poolPrice.exactAmount0 != null &&
+      poolPrice.exactAmount1 != null
+    ) {
+      const a0 = atomicToHuman(poolPrice.exactAmount0, poolPrice.decimals0);
+      const a1 = atomicToHuman(poolPrice.exactAmount1, poolPrice.decimals1);
+      // Найти symbol для каждой стороны через movement (DeBank даёт правильный
+      // symbol для UI, но atomic amounts читаем из chain'а).
+      const stripPrefix = (id: string): string =>
+        id.includes(":") ? id.split(":").pop()! : id;
+      const t0Lower = poolPrice.token0.toLowerCase();
+      const t1Lower = poolPrice.token1.toLowerCase();
+      let sym0 = "";
+      let sym1 = "";
+      for (const m of op.movement) {
+        if (m.direction !== "out") continue;
+        const tid = stripPrefix(m.tokenId).toLowerCase();
+        const symN = normalizeSymbol(m.symbol);
+        if (tid === t0Lower) sym0 = symN;
+        else if (tid === t1Lower) sym1 = symN;
+        else if (symN === "ETH" && poolPrice.anchorTokenAddress) {
+          // native ETH match: addr to one of pool tokens via anchor.
+          const a = poolPrice.anchorTokenAddress.toLowerCase();
+          if (a === t0Lower) sym0 = symN;
+          else if (a === t1Lower) sym1 = symN;
+        }
+      }
+      // Если symbol не определился — fallback из known WETH symbol.
+      if (!sym0 && poolPrice.anchorTokenAddress?.toLowerCase() === t0Lower) sym0 = "ETH";
+      if (!sym1 && poolPrice.anchorTokenAddress?.toLowerCase() === t1Lower) sym1 = "ETH";
+
+      depositMap.set(sym0 || `t0:${t0Lower.slice(0, 6)}`, (depositMap.get(sym0) ?? 0) + a0);
+      depositMap.set(sym1 || `t1:${t1Lower.slice(0, 6)}`, (depositMap.get(sym1) ?? 0) + a1);
+
+      // USD prices: используем уже вычисленные usdPerToken{0,1}, или $1 для стейблов.
+      let p0 = usdPerToken0;
+      let p1 = usdPerToken1;
+      if (p0 == null && sym0 && isStableSymbol(sym0)) p0 = 1;
+      if (p1 == null && sym1 && isStableSymbol(sym1)) p1 = 1;
+      // Последний fallback на DefiLlama для редких случаев.
+      if (p0 == null && sym0) {
+        const coin = defillamaCoinKey(op.chain, t0Lower, sym0);
+        if (coin) {
+          const hp = priceFromMap(histPrices, coin, op.time);
+          if (hp != null && hp > 0) p0 = hp;
+        }
+      }
+      if (p1 == null && sym1) {
+        const coin = defillamaCoinKey(op.chain, t1Lower, sym1);
+        if (coin) {
+          const hp = priceFromMap(histPrices, coin, op.time);
+          if (hp != null && hp > 0) p1 = hp;
+        }
+      }
+      if (p0 != null) {
+        depositUsd += a0 * p0;
+        histCount++;
+      }
+      if (p1 != null) {
+        depositUsd += a1 * p1;
+        histCount++;
+      }
+      usedExact = true;
+      // Диагностический лог.
+      if (typeof window !== "undefined") {
+        const priceSource = pricesFromCg
+          ? "coingecko+mintEvent"
+          : poolPrice.anchorTokenUsd != null
+            ? "anchor_pool_slot0+mintEvent"
+            : "pool_slot0_with_stable+mintEvent";
+        console.info(
+          `[V3 startUsd] ${op.protocol?.name ?? ""} ${op.chain} mint=${op.hash.slice(0, 10)} ` +
+            `block=${poolPrice.blockNumber} src=${priceSource} ` +
+            `t0=${t0Lower.slice(0, 8)}/$${p0?.toFixed(4) ?? "?"} ` +
+            `t1=${t1Lower.slice(0, 8)}/$${p1?.toFixed(6) ?? "?"} ` +
+            `(${a0.toFixed(8)} ${sym0} + ${a1.toFixed(8)} ${sym1}) → $${depositUsd.toFixed(2)}`,
+        );
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    //  Fallback: старая логика через op.movement (DeBank rounded amounts)
+    //  Используется когда poolPrice нет или Mint event не прочитался.
+    // ──────────────────────────────────────────────────────────────────
+    if (!usedExact) {
+    for (const m of op.movement) {
+      if (m.direction !== "out" || m.amount <= 0) continue;
+      const sym = normalizeSymbol(m.symbol);
+      depositMap.set(sym, (depositMap.get(sym) ?? 0) + m.amount);
+
+      // Цена в момент tx — приоритет: pool sqrtPrice > DefiLlama > m.usd.
+      let priceAtTx: number | null = null;
+      // 1. Pool sqrtPrice (если pool был WETH/USDC и USDC = $1).
+      if (poolPrice && (usdPerToken0 != null || usdPerToken1 != null)) {
+        const stripPrefix = (id: string): string =>
+          id.includes(":") ? id.split(":").pop()! : id;
+        const tid = stripPrefix(m.tokenId).toLowerCase();
+        // Прямое совпадение address-to-address.
+        if (tid === poolPrice.token0.toLowerCase() && usdPerToken0 != null) {
+          priceAtTx = usdPerToken0;
+          histCount++;
+        } else if (
+          tid === poolPrice.token1.toLowerCase() &&
+          usdPerToken1 != null
+        ) {
+          priceAtTx = usdPerToken1;
+          histCount++;
+        } else {
+          const symNorm = normalizeSymbol(m.symbol);
+          if (symNorm === "ETH" && poolPrice.anchorTokenAddress) {
+            const anchorAddr = poolPrice.anchorTokenAddress.toLowerCase();
+            if (anchorAddr === poolPrice.token0.toLowerCase() && usdPerToken0 != null) {
+              priceAtTx = usdPerToken0;
+              histCount++;
+            } else if (
+              anchorAddr === poolPrice.token1.toLowerCase() &&
+              usdPerToken1 != null
+            ) {
+              priceAtTx = usdPerToken1;
+              histCount++;
+            }
+          }
+        }
+      }
+      if (priceAtTx == null && isStableSymbol(m.symbol)) {
+        priceAtTx = 1;
+        histCount++;
+      }
+      if (priceAtTx == null) {
+        const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
+        if (coin) {
+          const hp = priceFromMap(histPrices, coin, op.time);
+          if (hp != null && hp > 0) {
+            priceAtTx = hp;
+            histCount++;
+          }
+        }
+      }
+      if (priceAtTx == null) {
+        if (m.usd != null && m.usd > 0) {
+          priceAtTx = m.usd / m.amount;
+          fallbackCount++;
+        }
+      }
+      if (priceAtTx != null) depositUsd += m.amount * priceAtTx;
+    }
+    if (typeof window !== "undefined") {
+      const breakdown = op.movement
+        .filter((m) => m.direction === "out" && m.amount > 0)
+        .map((m) => `${m.amount.toFixed(8)} ${m.symbol}`)
+        .join(" + ");
+      const priceSource = poolPrice
+        ? poolPrice.anchorTokenUsd != null
+          ? "anchor_pool_slot0"
+          : "pool_slot0_with_stable"
+        : "defillama_only";
+      console.info(
+        `[V3 startUsd] ${op.protocol?.name ?? ""} ${op.chain} mint=${op.hash.slice(0, 10)} ` +
+          `block=${poolPrice?.blockNumber ?? "?"} src=${priceSource} ` +
+          `t0=${poolPrice?.token0?.slice(0, 8) ?? ""}/$${usdPerToken0?.toFixed(4) ?? "?"} ` +
+          `t1=${poolPrice?.token1?.slice(0, 8) ?? ""}/$${usdPerToken1?.toFixed(6) ?? "?"} ` +
+          `(${breakdown}) → $${depositUsd.toFixed(2)}`,
+      );
+    }
+    }
+  }
+
+  // HODL value = Σ deposit_amount × current_price.
+  let hodlUsd = 0;
+  const depositTokens: V3Details["depositTokens"] = [];
+  for (const [sym, amount] of depositMap) {
+    const cur = isStableSymbol(sym)
+      ? 1
+      : (currentPrices.get(sym) ?? null);
+    const usdAtDeposit = matched
+      .flatMap((op) => op.movement)
+      .filter(
+        (m) =>
+          m.direction === "out" &&
+          normalizeSymbol(m.symbol) === sym &&
+          m.amount > 0,
+      )
+      .reduce((s, m) => s + (m.usd ?? 0), 0); // эта сумма пойдёт в depositTokens.usdAtDeposit как справочно (current-priced)
+    depositTokens.push({ symbol: sym, amount, usdAtDeposit });
+    if (cur != null) hodlUsd += amount * cur;
+  }
+
+  const currentLpUsd = lp.assetUsd;
+  const impermanentLossUsd = hodlUsd - currentLpUsd;
+  const pnlUsd = currentLpUsd - depositUsd;
+  const pnlPct = depositUsd > 0 ? (pnlUsd / depositUsd) * 100 : 0;
+  const pricesSource: V3Details["pricesSource"] =
+    fallbackCount === 0
+      ? "historical"
+      : histCount === 0
+        ? "fallback"
+        : "mixed";
+
+  return {
+    depositTokens,
+    depositUsd,
+    hodlUsd,
+    impermanentLossUsd,
+    currentLpUsd,
+    pnlUsd,
+    pnlPct,
+    pricesSource,
+  };
+}
+
+/**
+ * Матчинг LIVE V3 позиций с mint-op'ами (lp_add, создающими NFT).
+ *
+ * Каждый mint в V3 (Uniswap V3, Pancake V3, Sushi V3, Algebra) создаёт
+ * **уникальный NFT** в `NonfungiblePositionManager`. Без RPC чтения мы не
+ * знаем NFT tokenId, но можем сматчить по supply токенам и amount'ам:
+ *
+ *   1. Группируем `lp_add` ops в (wallet, protocolId, chain) только для
+ *      V3-style протоколов.
+ *   2. FIFO consumption: каждый `lp_remove` закрывает самый ранний open
+ *      mint с теми же symbols. После всех removes — `openMints[]`.
+ *   3. Для каждой LIVE V3 позиции в этом протоколе:
+ *      - Фильтруем openMints по точному совпадению **symbol pair**
+ *        (sorted: WETH+USDC ≠ WETH+ARB).
+ *      - Сортируем кандидатов по близости amount'ов (live vs deposited).
+ *      - Берём лучшего, удаляем из пула, сохраняем в matches.
+ *
+ * Возвращаем `Map<liveMatchKey, mintOpHash>` где liveMatchKey =
+ * `${walletId}|${protocolId}|${chain}|${sorted-symbols}|${assetUsd}`.
+ *
+ * Если match не нашёлся (live позиций больше чем mint'ов) — `instanceId`
+ * для такой позиции упадёт на fallback `supplyAmountsHash` в `buildOne`.
+ */
+/**
+ * Канонический ключ для сопоставления LIVE V3 позиции с её mint op.hash
+ * через `matchV3LiveToMints`. Используется в обоих местах (генератор и
+ * потребитель), чтобы avoid silent mismatch.
+ *
+ * КРИТИЧНО: использует `normalizeSymbol` (WETH→ETH) ДО сортировки. Если
+ * этого не делать, ключи расходятся когда live state имеет 'WETH' а
+ * mint history имеет 'ETH' (ситуация Alex 2026-05-08: lookup не находил
+ * v3MintMatches, и POS-001/POS-003 получали неправильные startUsd).
+ */
+function v3LiveMatchKey(args: {
+  walletId: string;
+  protocolId: string;
+  chain: string;
+  symbols: readonly string[];
+  assetUsd: number;
+}): string {
+  const sym = [...args.symbols].map((s) => normalizeSymbol(s)).sort().join("+");
+  return `${args.walletId}|${args.protocolId}|${args.chain}|${sym}|${args.assetUsd.toFixed(2)}`;
+}
+
+function matchV3LiveToMints(
+  loaded: BuildInput[],
+): Map<string, string /* op.hash */> {
+  const out = new Map<string, string>();
+
+  for (const l of loaded) {
+    if (!l.live) continue;
+
+    // 1. Собираем V3-style mints в этом кошельке per protocol+chain.
+    type Mint = {
+      hash: string;
+      time: number;
+      protocolId: string;
+      chain: string;
+      symbols: string; // sorted "SYM1+SYM2"
+      amount0: number;
+      amount1: number;
+    };
+    const mintsByPC = new Map<string, Mint[]>(); // key: protocolId|chain
+    for (const op of l.ops) {
+      if (op.status === "failed") continue;
+    if (isJunkOp(op)) continue;
+      if (!op.protocol) continue;
+      if (op.type !== "lp_add") continue;
+      if (!isV3LpProtocol(op.protocol.name)) continue;
+      // КРИТИЧНО: исключаем `increaseLiquidity` ops — это не создание NFT,
+      // а добор ликвидности в существующую. Они тоже sends-only и
+      // классифицируются как `lp_add`, но НЕ соответствуют отдельной NFT.
+      // Если их оставить, optimal assignment может сматчить live к доп.депу
+      // (баг POS-002 на Alex 2026-05-08: $1,836 mint → переключилось на
+      // $474 increase, дата сместилась с Apr на May).
+      if (op.notes?.includes("v3-increase-liquidity")) continue;
+      const outs = op.movement.filter(
+        (m) => m.direction === "out" && m.amount > 0 && !m.isProtocolToken,
+      );
+      // Газ ETH (микро) исключаем.
+      const meaningfulOuts = outs.filter(
+        (m) =>
+          !(
+            (m.symbol === "ETH" || m.symbol === "WETH") &&
+            m.amount < 0.01 &&
+            (m.usd ?? 0) < 100
+          ),
+      );
+      if (meaningfulOuts.length === 0) continue;
+      // Используем `normalizeSymbol` (WETH→ETH) ДО сортировки, чтобы
+      // канонический порядок не сбивался когда mint имеет 'ETH' а live
+      // имеет 'WETH' (или наоборот).
+      const sortedOuts = [...meaningfulOuts]
+        .map((m) => ({ ...m, _canonSym: normalizeSymbol(m.symbol) }))
+        .sort((a, b) => a._canonSym.localeCompare(b._canonSym));
+      const symbols = sortedOuts.map((m) => m._canonSym).join("+");
+      const amount0 = sortedOuts[0]?.amount ?? 0;
+      const amount1 = sortedOuts[1]?.amount ?? 0;
+      const key = `${op.protocol.id}|${op.chain}`;
+      const arr = mintsByPC.get(key) ?? [];
+      arr.push({
+        hash: op.hash,
+        time: op.time,
+        protocolId: op.protocol.id,
+        chain: op.chain,
+        symbols,
+        amount0,
+        amount1,
+      });
+      mintsByPC.set(key, arr);
+    }
+
+    // 2. FIFO consumption: lp_remove закрывает старейший open mint с
+    //    matching symbols. (Грубая heuristic, но обычно работает для
+    //    хронологических partial closes.)
+    const closedSet = new Set<string>(); // op.hash mint'ов которые были закрыты
+    for (const op of [...l.ops].sort((a, b) => a.time - b.time)) {
+      if (op.status === "failed") continue;
+    if (isJunkOp(op)) continue;
+      if (!op.protocol) continue;
+      if (op.type !== "lp_remove") continue;
+      if (!isV3LpProtocol(op.protocol.name)) continue;
+      // Партиальные `decreaseLiquidity` (receives-only, NFT не сжигается)
+      // НЕ закрывают NFT — она остаётся live. Не FIFO-консумим её здесь,
+      // чтобы не помечать живой mint как закрытый.
+      if (op.notes?.includes("v3-decrease-liquidity")) continue;
+      const ins = op.movement
+        .filter(
+          (m) => m.direction === "in" && m.amount > 0 && !m.isProtocolToken,
+        )
+        .map((m) => ({ ...m, _canonSym: normalizeSymbol(m.symbol) }))
+        .sort((a, b) => a._canonSym.localeCompare(b._canonSym));
+      const symbols = ins.map((m) => m._canonSym).join("+");
+      const key = `${op.protocol.id}|${op.chain}`;
+      const mints = (mintsByPC.get(key) ?? [])
+        .filter((m) => m.symbols === symbols && !closedSet.has(m.hash))
+        .sort((a, b) => a.time - b.time);
+      // Закрытие — самый старый. Heuristic: берём первый, чтобы не
+      // удалить слишком много (partial closes тоже могут попасть, тогда
+      // mint остаётся открытым). Усложнить можно через amount diff,
+      // но для начальной версии достаточно FIFO.
+      const oldest = mints[0];
+      if (oldest) closedSet.add(oldest.hash);
+    }
+
+    // 3. Match LIVE V3 positions to remaining open mints.
+    //    КРИТИЧНО: при N лайвов и M минтов в одном pool+pair greedy-матчинг
+    //    может дать sub-optimal (пример: 4 WETH/USDC NFT с близкими ETH-
+    //    суммами). Поэтому для каждой группы (protocol, chain, pair)
+    //    собираем все live + mint, и решаем optimal assignment через
+    //    brute-force перестановки (N! для маленьких N).
+    type LivePos = {
+      lp: LiveProtocolPosition;
+      amt0: number;
+      amt1: number;
+      key: string; // protocol|chain
+      pair: string; // sorted normalized symbols
+    };
+    const livesByGroup = new Map<string, LivePos[]>(); // key: protocol|chain|pair
+    for (const lp of l.live.positions) {
+      if (!isV3LpProtocol(lp.protocolName)) continue;
+      const liveSorted = [...lp.supply]
+        .map((s) => ({ ...s, _canonSym: normalizeSymbol(s.symbol) }))
+        .sort((a, b) => a._canonSym.localeCompare(b._canonSym));
+      const pair = liveSorted.map((s) => s._canonSym).join("+");
+      const groupKey = `${lp.protocolId}|${lp.chain}|${pair}`;
+      const arr = livesByGroup.get(groupKey) ?? [];
+      arr.push({
+        lp,
+        amt0: liveSorted[0]?.amount ?? 0,
+        amt1: liveSorted[1]?.amount ?? 0,
+        key: `${lp.protocolId}|${lp.chain}`,
+        pair,
+      });
+      livesByGroup.set(groupKey, arr);
+    }
+
+    function distance(
+      live: { amt0: number; amt1: number },
+      mint: Mint,
+    ): number {
+      const d0 =
+        live.amt0 + mint.amount0 > 0
+          ? Math.abs(live.amt0 - mint.amount0) / (live.amt0 + mint.amount0)
+          : 0;
+      const d1 =
+        live.amt1 + mint.amount1 > 0
+          ? Math.abs(live.amt1 - mint.amount1) / (live.amt1 + mint.amount1)
+          : 0;
+      return d0 + d1;
+    }
+
+    // Brute-force optimal assignment по permutations. Для N <= 8 фактически
+    // мгновенно (8! = 40320). N > 8 в DeFi не встречается на практике.
+    function optimalAssign(
+      lives: LivePos[],
+      mints: Mint[],
+    ): Map<number, number> {
+      const n = lives.length;
+      const m = mints.length;
+      const k = Math.min(n, m);
+      if (k === 0) return new Map();
+      // Если k > 8 — fallback на greedy (slot не реалистичен в DeFi).
+      if (k > 8) {
+        const used = new Set<number>();
+        const out = new Map<number, number>();
+        const order = [...lives.keys()].sort();
+        for (const li of order) {
+          let bestJ = -1;
+          let bestD = Infinity;
+          for (let j = 0; j < m; j++) {
+            if (used.has(j)) continue;
+            const d = distance(lives[li]!, mints[j]!);
+            if (d < bestD) {
+              bestD = d;
+              bestJ = j;
+            }
+          }
+          if (bestJ >= 0) {
+            out.set(li, bestJ);
+            used.add(bestJ);
+          }
+        }
+        return out;
+      }
+      // Brute force: для каждой перестановки mint indices длины k подсчитываем
+      // total distance и берём минимальную.
+      const liveIdx = [...Array(n).keys()];
+      const mintIdx = [...Array(m).keys()];
+      let bestPerm: number[] = [];
+      let bestSum = Infinity;
+      function recurse(picked: number[], available: number[]): void {
+        if (picked.length === k) {
+          let sum = 0;
+          for (let i = 0; i < k; i++) {
+            sum += distance(lives[liveIdx[i]!]!, mints[picked[i]!]!);
+          }
+          if (sum < bestSum) {
+            bestSum = sum;
+            bestPerm = [...picked];
+          }
+          return;
+        }
+        for (let i = 0; i < available.length; i++) {
+          const next = available[i]!;
+          recurse(
+            [...picked, next],
+            [...available.slice(0, i), ...available.slice(i + 1)],
+          );
+        }
+      }
+      recurse([], mintIdx);
+      const result = new Map<number, number>();
+      for (let i = 0; i < bestPerm.length; i++) {
+        result.set(liveIdx[i]!, bestPerm[i]!);
+      }
+      return result;
+    }
+
+    for (const [groupKey, lives] of livesByGroup) {
+      const liveSamplePair = lives[0]!.pair;
+      const liveKey = lives[0]!.key;
+      const mints = (mintsByPC.get(liveKey) ?? []).filter(
+        (m) => !closedSet.has(m.hash) && m.symbols === liveSamplePair,
+      );
+      if (mints.length === 0) {
+        if (typeof window !== "undefined") {
+          console.warn(
+            `[V3 match] no mints for live group ${groupKey} (${lives.length} lives)`,
+          );
+        }
+        continue;
+      }
+      const assignment = optimalAssign(lives, mints);
+      for (const [liveIdx, mintIdx] of assignment) {
+        const lp = lives[liveIdx]!.lp;
+        const mintHash = mints[mintIdx]!.hash;
+        const matchKey = v3LiveMatchKey({
+          walletId: l.wallet.id,
+          protocolId: lp.protocolId,
+          chain: lp.chain,
+          symbols: lp.supply.map((s) => s.symbol),
+          assetUsd: lp.assetUsd,
+        });
+        out.set(matchKey, mintHash);
+      }
+      // Удаляем сматченные mints из общего пула (для других групп — на случай
+      // если два разных pair'а в одной протокол+chain имеют наложение).
+      const matchedHashes = new Set(
+        [...assignment.values()].map((j) => mints[j]!.hash),
+      );
+      const remaining = (mintsByPC.get(liveKey) ?? []).filter(
+        (m) => !matchedHashes.has(m.hash),
+      );
+      mintsByPC.set(liveKey, remaining);
+
+      if (typeof window !== "undefined" && (lives.length > 1 || mints.length > 1)) {
+        const summary = [...assignment.entries()].map(([li, mi]) => {
+          const lv = lives[li]!;
+          const mn = mints[mi]!;
+          return `${lv.amt0.toFixed(3)}/${lv.amt1.toFixed(3)} → ${mn.hash.slice(0, 10)} (${mn.amount0.toFixed(3)}/${mn.amount1.toFixed(3)})`;
+        });
+        console.info(
+          `[V3 match] ${groupKey}: ${lives.length}L ${mints.length}M → ${summary.join(" | ")}`,
+        );
+      }
+    }
+  }
+
+  return out;
+}

@@ -1,0 +1,179 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+  IMAGE_API: ghcr.io/${{ github.repository }}-api
+  IMAGE_WEB: ghcr.io/${{ github.repository }}-web
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build-and-push:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      api-tag: ${{ steps.meta-api.outputs.version }}
+      web-tag: ${{ steps.meta-web.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (api)
+        id: meta-api
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_API }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & push api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          tags: ${{ steps.meta-api.outputs.tags }}
+          labels: ${{ steps.meta-api.outputs.labels }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+      - name: Extract metadata (web)
+        id: meta-web
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_WEB }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & push web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          tags: ${{ steps.meta-web.outputs.tags }}
+          labels: ${{ steps.meta-web.outputs.labels }}
+          build-args: |
+            VITE_API_URL=${{ vars.VITE_API_URL || '/api' }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy compose & Caddyfile to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "infra/docker-compose.yml,infra/caddy/Caddyfile"
+          target: "/opt/cap-flow"
+          strip_components: 0
+
+      - name: Deploy on remote
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          API_IMAGE: ${{ env.IMAGE_API }}:${{ needs.build-and-push.outputs.api-tag }}
+          WEB_IMAGE: ${{ env.IMAGE_WEB }}:${{ needs.build-and-push.outputs.web-tag }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: API_IMAGE,WEB_IMAGE
+          script: |
+            set -euo pipefail
+            cd /opt/cap-flow
+
+            COMPOSE="docker compose -f infra/docker-compose.yml --env-file .env --env-file .env.images"
+
+            # GHCR auth (token must have read:packages)
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USER }}" --password-stdin
+
+            # .env must be provisioned on the server (chmod 600). We never copy it from CI.
+            if [ ! -f .env ]; then
+              echo "ERROR: /opt/cap-flow/.env is missing — provision it on the server first."
+              exit 1
+            fi
+
+            # Save current image tags so we can roll back if smoke test fails.
+            if [ -f .env.images ]; then
+              cp .env.images .env.images.previous
+            fi
+
+            # Pin image tags for this deploy.
+            cat > .env.images <<EOF
+            API_IMAGE=${API_IMAGE}
+            WEB_IMAGE=${WEB_IMAGE}
+            EOF
+            export $(grep -v '^#' .env.images | xargs)
+
+            # 1. Pull new images (does not affect running containers).
+            $COMPOSE pull api web
+
+            # 2. Backup DB before any migration. Keep last 30 pre-deploy snapshots.
+            mkdir -p backups/pre-deploy
+            $COMPOSE exec -T postgres \
+              pg_dump -U "$(grep POSTGRES_USER .env | cut -d= -f2)" \
+                      "$(grep POSTGRES_DB .env | cut -d= -f2)" \
+              | gzip > "backups/pre-deploy/$(date +%Y%m%d-%H%M%S)-${API_IMAGE##*:}.sql.gz"
+            ls -1t backups/pre-deploy/*.sql.gz | tail -n +31 | xargs -r rm
+
+            # 3. Run migration. set -e aborts deploy if it fails — old containers stay up.
+            $COMPOSE run --rm migrate
+
+            # 4. Roll new containers.
+            $COMPOSE up -d --remove-orphans
+
+            # 5. Smoke test — wait up to 60s for /health to return 200.
+            for i in $(seq 1 30); do
+              if $COMPOSE exec -T api wget -qO- http://127.0.0.1:3000/health >/dev/null 2>&1; then
+                echo "✓ API healthy after ${i}x2s"
+                break
+              fi
+              if [ "$i" = "30" ]; then
+                echo "✗ API failed health check — rolling back"
+                if [ -f .env.images.previous ]; then
+                  mv .env.images.previous .env.images
+                  export $(grep -v '^#' .env.images | xargs)
+                  $COMPOSE up -d --remove-orphans
+                fi
+                exit 1
+              fi
+              sleep 2
+            done
+
+            # 6. Public end-to-end check via Caddy.
+            curl -fsS --retry 5 --retry-delay 2 https://cap-flow.ru/api/v1/users >/dev/null
+
+            rm -f .env.images.previous
+            docker image prune -f

@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+**/build
+**/.turbo
+**/coverage
+**/.git
+**/.github
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+**/.DS_Store
+**/.vscode
+**/.idea
+infra/.volumes
+infra/caddy/data
+infra/caddy/config

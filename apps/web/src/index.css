@@ -1,0 +1,137 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* -------------------------------------------------------------------------- */
+/*  Capflow — design tokens (HSL components, чтобы Tailwind мог делать /alpha) */
+/* -------------------------------------------------------------------------- */
+
+@layer base {
+  :root {
+    /* Light theme */
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 188 84% 42%;        /* brand cyan-blue */
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+
+    --accent: 210 40% 94%;
+    --accent-foreground: 222 47% 11%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+
+    --success: 152 70% 38%;
+    --warning: 32 95% 44%;
+
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 188 84% 42%;
+
+    /* «Бордюр» карточки (тонкая обводка) */
+    --hairline: 214 32% 91%;
+    /* Свечение страницы */
+    --glow-1: 174 72% 54%;
+    --glow-2: 217 91% 60%;
+    --glow-alpha: 0.10;
+  }
+
+  .dark {
+    /* Dark theme — Capflow brand */
+    --background: 222 47% 6%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 45% 8%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 45% 8%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 174 72% 54%;
+    --primary-foreground: 222 47% 6%;
+
+    --secondary: 217 33% 14%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 33% 12%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 217 33% 16%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+
+    --success: 152 76% 50%;
+    --warning: 38 92% 55%;
+
+    --border: 217 33% 18%;
+    --input: 217 33% 18%;
+    --ring: 174 72% 54%;
+
+    --hairline: 0 0% 100%;          /* белый с альфой через /5 в utilities */
+    --glow-1: 174 72% 54%;
+    --glow-2: 217 91% 60%;
+    --glow-alpha: 0.14;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    @apply bg-brand-cyan/30 text-foreground;
+  }
+
+  /* Плавный переход при смене темы */
+  html.theme-transition * {
+    transition: background-color 200ms ease, border-color 200ms ease,
+      color 200ms ease, fill 200ms ease, stroke 200ms ease;
+  }
+}
+
+@layer components {
+  /* Текст-градиент в стиле логотипа */
+  .text-brand-gradient {
+    @apply bg-brand-gradient bg-clip-text text-transparent;
+  }
+
+  /* Декоративный фон страницы — мягкое свечение в углах */
+  .app-glow {
+    background-image: radial-gradient(
+        60% 60% at 15% 0%,
+        hsl(var(--glow-1) / var(--glow-alpha)),
+        transparent 60%
+      ),
+      radial-gradient(
+        50% 50% at 100% 100%,
+        hsl(var(--glow-2) / var(--glow-alpha)),
+        transparent 60%
+      );
+  }
+
+  /* Тонкая «волосяная» граница, адаптивная к теме */
+  .hairline {
+    border-color: hsl(var(--hairline) / 0.08);
+  }
+  .dark .hairline {
+    border-color: hsl(var(--hairline) / 0.06);
+  }
+}

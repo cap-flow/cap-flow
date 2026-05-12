@@ -1,0 +1,169 @@
+name: cap-flow
+
+# Production deploy compose.
+#
+# Two .env layers (Compose reads them in order, later wins):
+#   1. `infra/.env` — loaded automatically by Compose (used here for
+#      tagged image versions and per-environment overrides).
+#   2. `.env` at the monorepo root — referenced via `env_file:` on
+#      api/worker/migrate services. Holds JWT_SECRET, API keys, etc.
+#
+# Bring up:  `docker compose -f infra/docker-compose.yml up -d`
+# Migrate:   `docker compose -f infra/docker-compose.yml run --rm migrate`
+# Logs:      `docker compose -f infra/docker-compose.yml logs -f api worker`
+
+x-api-build: &api-build
+  context: ..
+  dockerfile: apps/api/Dockerfile
+
+# Common env shared by api + worker. Compose's `<<:` YAML merge keeps
+# the two service env blocks in sync without copy-paste drift.
+x-api-env: &api-env
+  NODE_ENV: ${NODE_ENV:-production}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: ${DATABASE_URL}
+  REDIS_URL: redis://redis:6379
+  CORS_ORIGIN: ${CORS_ORIGIN}
+  COOKIE_SECURE: ${COOKIE_SECURE:-true}
+  COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence — every write is fsync'd, queue/state survives
+    # restarts. RDB snapshots disabled (we have postgres for durable
+    # state; AOF is enough for queue/cache/sessions).
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+
+  # One-shot migrator. Runs `node packages/db/dist/migrate.js` against the DB
+  # and exits. Triggered explicitly: `docker compose run --rm migrate`.
+  migrate:
+    image: ${API_IMAGE:-cap-flow-api:latest}
+    build: *api-build
+    working_dir: /app/packages/db
+    entrypoint: ["/sbin/tini", "--"]
+    command: ["node", "dist/migrate.js"]
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    restart: "no"
+    profiles: ["tools"]
+
+  api:
+    image: ${API_IMAGE:-cap-flow-api:latest}
+    build: *api-build
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      <<: *api-env
+      API_HOST: 0.0.0.0
+      API_PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks: [internal]
+
+  # BullMQ worker — separate long-running process that drains the
+  # `portfolio-refresh` and `payment-monitor` queues. Same image as the
+  # api, different command. Must run; without it manual `/refresh` jobs
+  # just queue forever.
+  worker:
+    image: ${API_IMAGE:-cap-flow-api:latest}
+    build: *api-build
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      <<: *api-env
+    command: ["node", "dist/worker.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [internal]
+
+  web:
+    image: ${WEB_IMAGE:-cap-flow-web:latest}
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks: [internal]
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-:80}
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    networks: [internal, public]
+
+networks:
+  internal:
+  public:
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+  caddy-config:

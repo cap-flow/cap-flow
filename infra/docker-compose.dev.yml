@@ -1,0 +1,55 @@
+# Lightweight stack for local development.
+# Only the data services are containerized; api/web run on the host via
+# `pnpm dev` so you get fast HMR and direct stack traces.
+#
+# Usage:
+#   docker compose -f infra/docker-compose.dev.yml up -d
+#   docker compose -f infra/docker-compose.dev.yml down
+#
+# Env: reads from project-root .env (see .env.example).
+
+name: cap-flow-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-capflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-capflow_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-capflow}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Redis serves three jobs at once:
+  #   1) Shared cache for upstream-provider responses (prices, balances).
+  #   2) Per-user token-bucket quotas keyed by (user_id, provider).
+  #   3) BullMQ queue backend (Phase 4 — not started yet).
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # BullMQ requires `noeviction` so job records are never silently dropped.
+    # We use `volatile-lru` instead: keys with explicit EXPIRE (the cache and
+    # quota counters) are LRU-evictable; BullMQ keys (which carry no EXPIRE)
+    # are kept until completion. Combines both subsystems on one Redis safely.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-dev-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-dev-data:
+  redis-dev-data:

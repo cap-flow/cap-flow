@@ -1,0 +1,29 @@
+{
+  "name": "cap-flow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Full-stack TypeScript monorepo: React (Vite) + Fastify + Drizzle + PostgreSQL + Caddy",
+  "engines": {
+    "node": ">=20.10.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.12.3",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter \"./apps/*\" run dev",
+    "build": "pnpm -r run build",
+    "lint": "pnpm -r run lint",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "db:generate": "pnpm --filter @cap-flow/db run generate",
+    "db:migrate": "pnpm --filter @cap-flow/db run migrate",
+    "db:push": "pnpm --filter @cap-flow/db run push",
+    "db:studio": "pnpm --filter @cap-flow/db run studio",
+    "docker:up": "docker compose -f infra/docker-compose.yml up -d --build",
+    "docker:down": "docker compose -f infra/docker-compose.yml down",
+    "docker:logs": "docker compose -f infra/docker-compose.yml logs -f"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,54 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_tag:
+        description: "API image tag to roll back to (short SHA, e.g. abc1234)"
+        required: true
+      web_tag:
+        description: "Web image tag to roll back to (short SHA, e.g. abc1234)"
+        required: true
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  IMAGE_API: ghcr.io/${{ github.repository }}-api
+  IMAGE_WEB: ghcr.io/${{ github.repository }}-web
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Roll back on remote
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          API_IMAGE: ${{ env.IMAGE_API }}:${{ inputs.api_tag }}
+          WEB_IMAGE: ${{ env.IMAGE_WEB }}:${{ inputs.web_tag }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: API_IMAGE,WEB_IMAGE
+          script: |
+            set -euo pipefail
+            cd /opt/cap-flow
+
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USER }}" --password-stdin
+
+            cat > .env.images <<EOF
+            API_IMAGE=${API_IMAGE}
+            WEB_IMAGE=${WEB_IMAGE}
+            EOF
+            export $(grep -v '^#' .env.images | xargs)
+
+            COMPOSE="docker compose -f infra/docker-compose.yml --env-file .env --env-file .env.images"
+            $COMPOSE pull api web
+            $COMPOSE up -d --remove-orphans
+
+            # NOTE: this rolls code only. If the failed deploy applied a destructive
+            # migration, you must restore from backups/pre-deploy/*.sql.gz manually.
+            echo "⚠ If the failed deploy ran a destructive migration, restore the DB from backups/pre-deploy/."
