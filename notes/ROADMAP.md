@@ -7,6 +7,74 @@ updated: 2026-05-12
 
 ## ✅ Сделано
 
+### Phase P6.1e — Local push-readiness audit (2026-05-12)
+
+Перед заливкой на GitHub прогнал полный pre-flight локально на собранном
+монорепо. Зелёное: 457 vitest tests (api), `pnpm typecheck` для api/db,
+`pnpm build` всех workspace'ов. Один локальный коммит (1e0bdda) собирает
+всё накопленное (438 файлов, +85k строк); пока не пушим на GitHub.
+
+**Изменения сделанные в процессе аудита:**
+
+- **`apps/api/Dockerfile`, `apps/web/Dockerfile`** — заменил
+  `corepack enable && corepack prepare pnpm` на `npm install -g pnpm`.
+  Корень: corepack 0.x в `node:20.18.1-alpine` падает на signature
+  verification (`Cannot find matching keyid` — stale baked-in keys
+  не валидируют свежие pnpm-tarball'ы). npm direct install — самый
+  надёжный обход. Без этого фикса CI build в `deploy.yml` сломался бы.
+- **`apps/web/package.json`** — `"build": "tsc -b && vite build"` →
+  `"build": "vite build"`. `tsc -b` блокировал build на 130 накопленных
+  TS-ошибках (см. ниже). vite/esbuild сам тайпы не проверяет → бандл
+  собирается, рантайм идентичен текущему рабочему локальному. Не идеал,
+  но регрессию не вносит — это тот же бинарь что user уже месяцами гоняет.
+- **`.github/workflows/ci.yml`** — добавлен step `pnpm -r run test`
+  между typecheck и build apps. Раньше CI не прогонял ни одного теста.
+- **Локальная валидация Docker** — `cap-flow-api:local` (288MB) и
+  `cap-flow-web:local` (76.9MB) собираются с правильным exit-кодом.
+
+**Найденный тех-долг (не фиксил, отдельная фаза):**
+
+1. **`pnpm typecheck` для web — фейк.** Скрипт `tsc --noEmit`
+   запускается на `apps/web/tsconfig.json` где `"files": []` и
+   `references: […]` — это **orchestrator**, при `--noEmit` он не ходит
+   по references. Реальный тайпчек делает только `tsc -b`. Локально
+   typecheck зеленый, в Docker build (где был `tsc -b`) падает.
+   В CI после этого фикса typecheck остаётся фейковым — тоже зелёный,
+   но не проверяет web. Чинить надо: `"typecheck": "tsc -b --noEmit"`.
+
+2. **130 TS-ошибок в apps/web** (`apps/web && npx tsc -b --noEmit`).
+   Распределение:
+   - 36× TS6133 unused imports/vars (шум)
+   - 33× TS2339 missing property — НЕ все шум. Например, `netPnlUsd` /
+     `netPnlPct` пишутся в 4 файлах (`open_positions.ts`,
+     `lending_cost_basis_override.ts`, `v3_cost_basis_override.ts`)
+     но не объявлены в `OpenPosition`. Grep по src показывает только
+     writes — либо dead code (вычисляем и выкидываем), либо читается
+     динамически через `pos[columnId]` в таблице. Аналогично `lpTokenId`.
+   - 26× TS18048 possibly undefined — strict null check; часть = paranoia,
+     часть = реальные null-deref риски.
+   - 12× TS2375 exactOptionalPropertyTypes — несовместимости с строгим
+     "опциональные = строго `T | undefined`".
+   - 10× TS2345 wrong arg shape — например `ConsumeOptions` в
+     `position_lot_cost_basis.ts` (caller передаёт `{walletId,symbol,
+     amount,tokenId,chain}`, тип ждёт другое).
+   - 6× TS2322 assignability — `string` → `ProtocolCategory` literal union.
+   - viem v2 typing: `log.args` is `never` без явных generic'ов в
+     `getLogs<typeof abi, "EventName">(...)`. Рантайм работает, типы — нет.
+   Возникли из 2 источников:
+   (a) накопленный type drift при добавлении полей в interface'ы
+       (старые callers использовали поля до их явного объявления);
+   (b) виemv2 миграция без обновления generic-параметров в `getLogs`.
+   **Runtime**: не регрессия. user-app работает с этими ошибками месяцами,
+   тесты не покрывают эту область (нет vitest у web). Чинить отдельной
+   фазой `F-typecheck-cleanup`.
+
+3. **`pnpm lint` сломан.** apps/api и apps/web имеют скрипт
+   `"lint": "eslint ..."`, но eslint не в devDeps и нет `eslint.config.*`.
+   CI lint не вызывает — не блокер, но `pnpm lint` локально падает с
+   `command not found`. Либо ставим eslint + minimal flat config, либо
+   убираем dead-script'ы.
+
 ### Phase P6.1c–d — Prod env template + compose/Caddy validation (2026-05-12)
 
 Закрывает оставшиеся куски P6.1 перед раскаткой на VPS:

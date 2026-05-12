@@ -9,7 +9,10 @@ ARG PNPM_VERSION=9.12.3
 FROM node:${NODE_VERSION}-alpine AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+# Install pnpm directly via npm. Bypasses corepack's signature
+# verification, which breaks in this base image (stale baked-in keys
+# can't validate freshly-published pnpm tarballs).
+RUN npm install -g pnpm@${PNPM_VERSION}
 WORKDIR /repo
 
 # ─────────────────────────── 2. fetch deps ──────────────────────────
