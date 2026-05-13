@@ -1352,21 +1352,9 @@ function AddWalletForm({
           onChange={(e) => setChainSelect(e.target.value)}
           className="flex h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground"
         >
-          <optgroup label="DeBank">
-            <option value="evm">{t("registry.form.chain.evm")}</option>
-          </optgroup>
-          <optgroup label="Helius">
-            <option value="sol">{t("registry.form.chain.sol")}</option>
-          </optgroup>
-          {COINSTATS_CHAIN_GROUPS.map((g) => (
-            <optgroup key={g.group} label={`CoinStats · ${g.group}`}>
-              {g.chains.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label}
-                </option>
-              ))}
-            </optgroup>
-          ))}
+          {/* Beta scope: EVM only. Solana (Helius) and CoinStats chains
+              are hidden until their data pipelines are production-ready. */}
+          <option value="evm">{t("registry.form.chain.evm")}</option>
         </select>
       </div>
       <div className="space-y-1.5 sm:col-span-2">

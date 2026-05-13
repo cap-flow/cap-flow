@@ -1,12 +1,16 @@
+import { useState } from "react";
 import { AlertTriangle, Database, DollarSign, Users, Zap } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/features/auth/AuthProvider";
 import {
   useAdminPortfolios,
   useAdminPortfoliosAggregate,
 } from "@/features/admin/portfolios/hooks";
 import type { AdminAccountRow } from "@/features/admin/portfolios/api";
+import { useImpersonateUser } from "@/features/admin/users/hooks";
 
 import { PageHeader } from "./_PageHeader";
 
@@ -18,7 +22,7 @@ export function AdminPortfoliosPage(): JSX.Element {
     <div>
       <PageHeader
         title="Портфели"
-        description="Все аккаунты платформы: TVL, последний refresh, ошибки за 24ч."
+        description="Все аккаунты платформы: текущий капитал, последний refresh, ошибки за 24ч. Кликни по строке — провалишься в дашборд этого пользователя (impersonation)."
         actions={
           <Button
             variant="outline"
@@ -51,7 +55,7 @@ export function AdminPortfoliosPage(): JSX.Element {
             <tr>
               <th className="px-4 py-3 font-medium">Аккаунт</th>
               <th className="px-4 py-3 font-medium">Владелец</th>
-              <th className="px-4 py-3 font-medium text-right">TVL</th>
+              <th className="px-4 py-3 font-medium text-right">Текущий капитал</th>
               <th className="px-4 py-3 font-medium">Last refresh</th>
               <th className="px-4 py-3 font-medium">Trigger</th>
               <th className="px-4 py-3 font-medium text-right">24ч</th>
@@ -88,8 +92,47 @@ export function AdminPortfoliosPage(): JSX.Element {
 }
 
 function Row({ row }: { readonly row: AdminAccountRow }) {
+  const { user: me, startImpersonation } = useAuth();
+  const navigate = useNavigate();
+  const impersonate = useImpersonateUser();
+  const [busy, setBusy] = useState(false);
+
+  const isSelf = me?.id === row.ownerId;
+
+  async function handleDrillIn() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      if (isSelf) {
+        // No need to impersonate own account — just navigate home.
+        navigate("/", { replace: false });
+        return;
+      }
+      const res = await impersonate.mutateAsync(row.ownerId);
+      await startImpersonation({
+        accessToken: res.accessToken,
+        impersonatedUserId: row.ownerId,
+      });
+      navigate("/", { replace: false });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <tr className="hover:bg-card/60">
+    <tr
+      className="cursor-pointer hover:bg-card/60"
+      role="link"
+      tabIndex={0}
+      onClick={handleDrillIn}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          void handleDrillIn();
+        }
+      }}
+      aria-disabled={busy}
+    >
       <td className="px-4 py-3">
         <div className="flex items-center gap-2">
           <span className="font-medium text-foreground">{row.accountName}</span>
@@ -100,7 +143,14 @@ function Row({ row }: { readonly row: AdminAccountRow }) {
         </div>
       </td>
       <td className="px-4 py-3">
-        <div className="text-foreground">{row.ownerName ?? "—"}</div>
+        <div className="text-foreground">
+          {row.ownerName ?? "—"}
+          {isSelf && (
+            <Badge variant="muted" className="ml-2">
+              это вы
+            </Badge>
+          )}
+        </div>
         <div className="text-xs text-muted-foreground">
           {row.ownerEmail ?? "—"}
         </div>
@@ -173,7 +223,7 @@ function KpiGrid({ aggregate, isLoading, error }: KpiGridProps): JSX.Element {
       />
       <KpiCard
         icon={<DollarSign className="h-4 w-4" />}
-        label="Общий TVL"
+        label="Общий капитал"
         value={
           aggregate
             ? `$${Math.round(aggregate.totalUsd).toLocaleString("ru-RU")}`

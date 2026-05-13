@@ -96,6 +96,15 @@ export function useWallets() {
     [setState],
   );
 
+  /** Replace the entire wallets state. Used by useWalletsHydration to sync
+   *  the API-side wallets table into this localStorage-backed legacy store. */
+  const replace = useCallback(
+    (next: WalletsState) => {
+      setState(next);
+    },
+    [setState],
+  );
+
   const selected =
     state.list.find((w) => w.id === state.selectedId) ?? null;
 
@@ -103,9 +112,11 @@ export function useWallets() {
     list: state.list,
     selectedId: state.selectedId,
     selected,
+    state,
     add,
     update,
     remove,
     select,
+    replace,
   };
 }

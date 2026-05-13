@@ -12,7 +12,9 @@ build/
 .env
 .env.local
 .env.*.local
+.env.smoketest
 !.env.example
+!.env.prod.example
 
 # Logs
 logs/

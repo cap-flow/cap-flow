@@ -337,11 +337,9 @@ function WalletDetail({
                 onChange={(e) => setAddrType(e.target.value as AddressType)}
                 disabled={addAddr.isPending}
               >
+                {/* Beta scope: EVM only. Other types disabled until their
+                    on-chain data pipelines are production-ready. */}
                 <option value="evm">EVM</option>
-                <option value="solana">Solana</option>
-                <option value="tron">Tron</option>
-                <option value="btc">Bitcoin</option>
-                <option value="other">Other</option>
               </select>
             </div>
           </div>

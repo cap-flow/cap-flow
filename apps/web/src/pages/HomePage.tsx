@@ -66,6 +66,12 @@ import {
   type ProtocolBreakdown,
 } from "@/lib/dashboard/metrics";
 import { useUsdRub } from "@/lib/dashboard/fxRate";
+import { usePrimaryAccount } from "@/features/accounts/hooks";
+import {
+  useAccountSnapshot,
+  useTriggerAccountRefresh,
+} from "@/features/portfolio/hooks";
+import type { SnapshotMetrics } from "@/features/portfolio/api";
 import {
   isLendingReceipt,
   isProtocolToken,
@@ -164,6 +170,13 @@ export function HomePage(): JSX.Element {
   const { loadedById, internalHashes } = useLoadedWallets();
   const [annotations] = useOpAnnotations();
   const { rate: usdRub } = useUsdRub();
+  // Server-side snapshot (worker-written hourly). Authoritative source
+  // for top-level metrics (Текущий капитал, Стартовый капитал) — the
+  // client-side compute from LoadedWalletsProvider stays for positions
+  // and per-token breakdown until phase F6 finishes the migration.
+  const primary = usePrimaryAccount();
+  const { metrics: snapshotMetrics } = useAccountSnapshot(primary?.id);
+  const triggerRefresh = useTriggerAccountRefresh(primary?.id);
 
   // Rebuild snapshot с учётом internal-pairs cross-wallet. Это важно: при
   // переводе между своими кошельками cost basis не должен «съедаться» как
@@ -554,7 +567,13 @@ export function HomePage(): JSX.Element {
         <div className="w-full shrink-0 lg:w-[300px]">
           <WalletBalancesBlock
             loadedList={loadedList}
-            totalUsd={m.walletUsd}
+            totalUsd={
+              m.walletUsd === 0 &&
+              typeof snapshotMetrics?.totalUsd === "number" &&
+              snapshotMetrics.totalUsd > 0
+                ? snapshotMetrics.totalUsd
+                : m.walletUsd
+            }
             usdRub={usdRub}
             locale={locale}
             compact
@@ -566,6 +585,7 @@ export function HomePage(): JSX.Element {
       <CapitalHero
         m={m}
         usdRub={usdRub}
+        snapshot={snapshotMetrics}
         pnlTotalUsd={pnlTotalUsd}
         pnlTotalPct={pnlTotalPct}
         pnlOwnUsd={pnlOwnUsd}
@@ -650,6 +670,7 @@ const ALLOCATION_PALETTE = [
 function CapitalHero({
   m,
   usdRub,
+  snapshot,
   pnlTotalUsd,
   pnlTotalPct,
   pnlOwnUsd,
@@ -669,6 +690,7 @@ function CapitalHero({
 }: {
   m: DashboardMetrics;
   usdRub: number;
+  snapshot: SnapshotMetrics | null;
   pnlTotalUsd: number;
   pnlTotalPct: number | null;
   pnlOwnUsd: number;
@@ -689,6 +711,32 @@ function CapitalHero({
   const positiveTotal = pnlTotalUsd >= 0;
   const positiveOwn = pnlOwnUsd >= 0;
   const positiveCredit = pnlCreditUsd >= 0;
+
+  // Server snapshot wins over client compute when both are present. The
+  // client-side LoadedWalletsProvider is being deprecated (phase F6); for
+  // SaaS users with no local cache it returns 0 across the board, so we
+  // fall back to the worker-written snapshot which always has fresh
+  // totalUsd / costBasis from the upstream APIs.
+  const snapshotTotalUsd =
+    typeof snapshot?.totalUsd === "number" && snapshot.totalUsd > 0
+      ? snapshot.totalUsd
+      : null;
+  const snapshotStartUsd =
+    snapshot?.costBasis && snapshot.costBasis.length > 0
+      ? snapshot.costBasis.reduce(
+          (sum, cb) =>
+            sum + (typeof cb.totalPaidUsd === "number" ? cb.totalPaidUsd : 0),
+          0,
+        )
+      : null;
+  const currentUsdToShow =
+    snapshotTotalUsd !== null && m.totalAssetsUsd === 0
+      ? snapshotTotalUsd
+      : m.totalAssetsUsd;
+  const startUsdToShow =
+    snapshotStartUsd !== null && snapshotStartUsd > 0 && m.startUsdEffective === 0
+      ? snapshotStartUsd
+      : m.startUsdEffective;
 
   // Топ-5 групп + "Прочее" для donut'а.
   const allocSegments = useMemo(() => {
@@ -741,11 +789,13 @@ function CapitalHero({
       <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-5">
         <BigKpi
           label="Стартовый капитал"
-          value={formatUsd(m.startUsdEffective, locale)}
+          value={formatUsd(startUsdToShow, locale)}
           delta={
             m.startUsdAll > 0
               ? `${formatRub(m.startRub, locale)} вложено`
-              : `WAC × текущие активы (нет ручных пометок)`
+              : snapshotStartUsd !== null
+                ? "Из server snapshot (Σ totalPaidUsd по cost basis)"
+                : `WAC × текущие активы (нет ручных пометок)`
           }
           deltaPositive
           deltaIcon
@@ -757,10 +807,10 @@ function CapitalHero({
         />
         <BigKpi
           label="Текущий капитал"
-          value={formatUsd(m.totalAssetsUsd, locale)}
-          delta={`≈ ${formatRub(m.totalAssetsUsd * usdRub, locale)}`}
+          value={formatUsd(currentUsdToShow, locale)}
+          delta={`≈ ${formatRub(currentUsdToShow * usdRub, locale)}`}
           deltaPositive
-          tooltip="Σ on-chain балансов кошельков + брутто-стоимость supply во всех DeFi-позициях. Раньше называлось «Активы сегодня»."
+          tooltip="Σ on-chain балансов кошельков + брутто-стоимость supply во всех DeFi-позициях. Источник: server snapshot (worker, hourly cron) с fallback на клиентский compute."
         />
         <BigKpi
           label="Собственный капитал"

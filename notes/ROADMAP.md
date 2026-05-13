@@ -7,6 +7,126 @@ updated: 2026-05-12
 
 ## ✅ Сделано
 
+### Phase F6a — Dashboard reads from server snapshot (2026-05-13)
+
+Закрывает первую часть миграции дашборда с pre-SaaS client-side compute
+на серверные `portfolio_snapshots`. Раньше HomePage CapitalHero показывал
+$0 для нового SaaS-юзера потому что `LoadedWalletsProvider` пуллил
+кошельки из `localStorage.capflow.wallets` (legacy store), который при
+свежем логине пуст. Реальные данные были в БД (worker'ом обновлены
+каждый час), но фронт их не видел.
+
+**Что сделано (рабочий fix для топ-KPI):**
+
+- **`apps/web/src/features/portfolio/api.ts`** + **`hooks.ts`** — новый
+  feature-модуль для дашборд-снапшотов:
+  - `useAccountSnapshot(accountId)` — React Query'ит `/refresh-status`,
+    отдаёт `metrics: SnapshotMetrics` с auto-refetch каждые 60s.
+  - `useTriggerAccountRefresh(accountId)` — mutation, дёргает
+    `POST /accounts/:id/refresh` + invalidate'ит snapshot через 3s.
+  - Zod-схема `snapshotMetricsSchema` (totalUsd, perAddress, costBasis,
+    operationsCount и т.д.) с `passthrough()` для forward-compat.
+
+- **`apps/web/src/pages/HomePage.tsx`** — пробрасывает `snapshotMetrics`
+  в CapitalHero. Внутри CapitalHero три override'а:
+  - `currentUsdToShow = snapshot.totalUsd ?? m.totalAssetsUsd`
+  - `startUsdToShow = Σ snapshot.costBasis[].totalPaidUsd ?? m.startUsdEffective`
+  - `WalletBalancesBlock.totalUsd = snapshot.totalUsd когда m.walletUsd=0`
+  Поведение: server snapshot выигрывает когда client = 0; иначе
+  client-side compute сохраняется (для пользователей с активным
+  LoadedWalletsProvider кэшем).
+
+- **`apps/web/src/features/wallets/useWalletsHydration.ts`** + хук в
+  AppShell — bridge `wallet_addresses` БД → `localStorage.capflow.wallets`.
+  При логине подтягивает API-кошельки в legacy store, чтобы остальные
+  части HomePage (positions, charts) хотя бы знали о существовании
+  кошельков. Полная замена legacy store на API — следующая под-фаза.
+
+**Результат:** для vladimir@cap-flow.ru на vitalik.eth — все три
+top-level KPI ('Общий баланс', 'Стартовый капитал', 'Текущий капитал')
+показывают корректные $1 254 720.31 / $3 500.00.
+
+**Остаётся F6b (отдельная фаза):**
+
+- Расширить `metrics` snapshot новыми полями: `ownCapitalUsd`,
+  `totalDebtUsd`, `protocolsAssetUsd`, `feesLifetimeUsd`. Worker делает
+  `metrics.perAddress[].chains` — этого хватает для top-3 KPI, но
+  СОБСТВЕННЫЙ КАПИТАЛ / СОВОКУПНЫЙ ДОЛГ остаются $0.
+- Заменить `LoadedWalletsProvider` положениями/лотами из server data.
+  HomePage line ~3000 секции PositionsBlock, AssetTimeline, и т.п.
+  читают client-state — мигрировать на API endpoints.
+- Удалить `localStorage.capflow.wallets` store целиком; убрать
+  hydration bridge как промежуточный слой.
+- Estimate: 2-3 дня плотной работы.
+
+### Phase P6.1f — Local prod-stack smoke test (2026-05-13)
+
+Поднял `infra/docker-compose.yml` (prod-конфиг) полностью локально через
+`.env.smoketest` (substitution layer, не трогает user's `.env`). Cleaner
+test of "что увидит cap-flow.ru при первом деплое". Все 6 сервисов
+(postgres/redis/migrate/api/worker/web/caddy) зелёные. End-to-end auth и
+BullMQ pipeline работает.
+
+**Сделано в процессе:**
+
+- **`.env.smoketest`** в gitignore'е (`.env.smoketest` + `!.env.prod.example`
+  whitelist для prod-template'а). Substitution-слой для compose'а:
+  `DATABASE_URL=postgres://...@postgres:5432/...`, `REDIS_URL=redis://redis:6379`,
+  `NODE_ENV=production`, `COOKIE_SECURE=false`, `CADDY_DOMAIN=:80`
+  (ACME отключён). Реальные секреты (JWT, API keys) подтягиваются из
+  user's `.env` через `env_file:` блок в compose.
+
+- **`packages/db/drizzle/0000_baseline.sql`** (49KB, 172 DDL):
+  pg_dump dev-БД `--schema-only --no-owner --no-privileges --no-comments`,
+  стрипнут `\restrict`/`\unrestrict` psql metacommand'ы. Существующие
+  миграции переименованы 0001-0005. На пустой БД накатывается чисто.
+
+- **`packages/db/src/migrate.ts` переписан** — был drizzle runtime
+  migrator (`drizzle-orm/node-postgres/migrator`), требующий
+  `meta/_journal.json` (его не существует, миграции рукописные).
+  Заменён на простой SQL runner: создаёт `public.__migrations` tracking
+  table, читает `*.sql` из `./drizzle`, прогоняет в транзакциях по
+  одной. Применённые file'ы записываются в tracking table — повторный
+  запуск idempotent (skip applied). Schema-qualified `public.__migrations`
+  потому что baseline SQL вызывает `SET search_path = ''`.
+
+- **`apps/{api,web}/Dockerfile`** уже было: corepack → npm direct
+  (см. P6.1e).
+
+- **`.env.smoketest:CADDY_ACME_EMAIL=admin@localhost`** (dummy) —
+  Caddyfile глобальный блок `email {$CADDY_ACME_EMAIL}` требует
+  непустой аргумент даже при `:80` (где ACME не запускается). На
+  prod-deploy будет реальный email — не повлияет.
+
+**Smoke test — что прогнал:**
+
+1. `docker compose up -d postgres redis` → healthy 2с.
+2. `docker compose run --rm migrate` → 6 миграций накатилось, exit 0.
+3. `docker compose up -d` → все 6 контейнеров healthy/running.
+4. `docker compose exec api node dist/scripts/seed-admin.js` → создан
+   `vladimir@cap-flow.ru` (admin) + primary account "Main".
+5. `POST /api/v1/auth/login` (через Caddy:80) → 200, Set-Cookie
+   `cap_access` (scope=`/api/v1/upstream`) + `cap_refresh`
+   (scope=`/api/v1/auth`) + JWT в body.
+6. `GET /api/v1/auth/me` с Bearer → 200, user payload.
+7. `GET /api/v1/accounts` → seeded primary account возвращается.
+8. `POST /api/v1/accounts/:id/wallets` с `0x000...dEaD` → 201 Created.
+9. `POST /api/v1/accounts/:id/refresh` → 202 + jobId.
+10. `docker logs cap-flow-worker-1` → виден тот же jobId с
+    `msg: "[worker] refresh completed"`, `trigger: admin`. BullMQ
+    pipeline работает.
+
+**Архитектурный итог:** деплой на пустую prod-БД теперь предсказуем.
+Достаточно: `.env` с заполненными секретами, `docker compose up -d`,
+`docker compose run --rm migrate`, `docker compose exec api node
+dist/scripts/seed-admin.js`. На VPS это уже автоматизировано в
+`.github/workflows/deploy.yml`.
+
+Стек оставлен поднятым (postgres/redis/api/worker/web/caddy) — можно
+открыть `http://localhost/` в браузере и пощупать SaaS UI поверх свежей
+prod-БД (там только seeded admin + 1 wallet). Тушится через
+`docker compose -f infra/docker-compose.yml --env-file .env.smoketest down -v`.
+
 ### Phase P6.1e — Local push-readiness audit (2026-05-12)
 
 Перед заливкой на GitHub прогнал полный pre-flight локально на собранном

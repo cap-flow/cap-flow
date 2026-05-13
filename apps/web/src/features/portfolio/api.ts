@@ -1,0 +1,97 @@
+import { z } from "zod";
+
+import { api } from "@/lib/api/client";
+
+/**
+ * Shape of `metrics` blob the server writes to `portfolio_snapshots`.
+ *
+ * Authoritative summary of the account: total USD across all wallets,
+ * per-address per-chain breakdown, cost-basis tracking, error log. The
+ * worker re-computes this every hour (cron) and on manual refresh.
+ *
+ * Dashboard reads this via `useAccountSnapshot()`; pre-SaaS client-side
+ * compute is being phased out (see notes/ROADMAP.md F6 phase).
+ */
+export const snapshotMetricsSchema = z
+  .object({
+    totalUsd: z.number().nullish(),
+    perAddress: z
+      .array(
+        z.object({
+          address: z.string(),
+          kind: z.enum(["evm", "solana", "coinstats", "tron", "other"]),
+          walletName: z.string().nullish(),
+          totalUsd: z.number().nullish(),
+          chains: z
+            .array(
+              z.object({
+                id: z.string(),
+                usdValue: z.number().nullish(),
+              }),
+            )
+            .nullish(),
+        }),
+      )
+      .nullish(),
+    costBasis: z
+      .array(
+        z.object({
+          symbol: z.string(),
+          avgUsd: z.number().nullish(),
+          totalPaidUsd: z.number().nullish(),
+          runningAmount: z.number().nullish(),
+        }),
+      )
+      .nullish(),
+    operationsCount: z.number().nullish(),
+    addressesEvm: z.number().nullish(),
+    addressesSolana: z.number().nullish(),
+    addressesSkipped: z.number().nullish(),
+    refreshedFrom: z.array(z.string()).nullish(),
+    generatedAt: z.string().nullish(),
+    trigger: z.string().nullish(),
+    errors: z.array(z.unknown()).nullish(),
+    stub: z.boolean().nullish(),
+  })
+  .passthrough();
+
+export type SnapshotMetrics = z.infer<typeof snapshotMetricsSchema>;
+
+const refreshStatusSchema = z.object({
+  accountId: z.string().uuid(),
+  lastSnapshot: z
+    .object({
+      id: z.string().uuid(),
+      date: z.string().nullish(),
+      createdAt: z.string(),
+      metrics: snapshotMetricsSchema,
+    })
+    .nullable(),
+  recentJobs: z
+    .array(
+      z.object({
+        id: z.string(),
+        state: z.string(),
+        trigger: z.string(),
+        timestamp: z.number().nullish(),
+        finishedOn: z.number().nullish(),
+        failedReason: z.string().nullish(),
+      }),
+    )
+    .default([]),
+});
+
+export type AccountRefreshStatus = z.infer<typeof refreshStatusSchema>;
+
+const refreshAckSchema = z.object({
+  jobId: z.string(),
+  accountId: z.string().uuid(),
+});
+
+export const portfolioApi = {
+  refreshStatus: (accountId: string) =>
+    api.get(`/v1/accounts/${accountId}/refresh-status`, refreshStatusSchema),
+
+  triggerRefresh: (accountId: string) =>
+    api.post(`/v1/accounts/${accountId}/refresh`, {}, refreshAckSchema),
+};

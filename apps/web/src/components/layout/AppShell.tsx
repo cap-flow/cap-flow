@@ -22,6 +22,7 @@ import { Avatar } from "@/components/profile/Avatar";
 import { useProfile } from "@/components/profile/profile";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
 import { useAuth } from "@/features/auth/AuthProvider";
+import { useWalletsHydration } from "@/features/wallets/useWalletsHydration";
 import { useSidebar } from "./SidebarProvider";
 import { WalletSearch } from "./WalletSearch";
 import { useT } from "@/i18n/I18nProvider";
@@ -51,6 +52,8 @@ const SIDEBAR_W_CLOSED = "w-[72px]";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { collapsed, mobileOpen, setMobileOpen } = useSidebar();
+  // Bridge: API wallets → legacy localStorage store the dashboard reads from.
+  useWalletsHydration();
   return (
     <div className="relative min-h-screen app-glow">
       <Sidebar />
