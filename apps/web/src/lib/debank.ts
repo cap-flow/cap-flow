@@ -175,7 +175,11 @@ export async function fetchAllHistory(
 
   let startTime: number | undefined = undefined;
   let lastSeenTime = Number.POSITIVE_INFINITY;
-  const maxPages = args.maxPages ?? 200;
+  // 50 pages × 20 tx = 1000 most-recent operations. Covers ~years of
+  // typical activity. Power users with vitalik-scale histories pass
+  // maxPages explicitly. 200 (the old default) tied up the browser for
+  // 100+ seconds and blocked the live-state fetch that follows.
+  const maxPages = args.maxPages ?? 50;
 
   for (let page = 0; page < maxPages; page++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
