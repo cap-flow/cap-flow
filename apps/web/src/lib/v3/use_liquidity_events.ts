@@ -21,6 +21,11 @@ import { useEffect, useState, useMemo } from "react";
 
 import { isStableSymbol } from "@/lib/portfolio/protocols";
 import {
+  defillamaCoinKey,
+  fetchHistoricalPrices,
+  priceFromMap,
+} from "@/lib/defillama";
+import {
   EtherscanChainNotSupportedError,
   fetchEtherscanLogs,
   parseLiquidityLog,
@@ -372,6 +377,46 @@ export function useV3LiquidityEvents(
         await sleep(50);
       }
 
+      // ─── Phase B: DefiLlama historical-price fallback ─────────────
+      // Pools where neither token is a stable AND neither token is the
+      // anchor (typically WETH) — e.g. WBTC/PAXG, ETH/WBTC on a sidechain
+      // where the anchor pool isn't WETH/USDC — could not be priced by
+      // slot0 alone.  We hit DefiLlama for the underlying token USD
+      // prices at each event's blockTime.  One batched call across all
+      // such events.
+      const defillamaNeeds: { coin: string; timestamp: number }[] = [];
+      const seenLookups = new Set<string>();
+      for (const acc of accs) {
+        const t0Sym = acc.target.position.token0.symbol;
+        const t1Sym = acc.target.position.token1.symbol;
+        if (isStableSymbol(t0Sym) || isStableSymbol(t1Sym)) continue;
+        const chain = acc.target.position.chain;
+        const t0Coin = defillamaCoinKey(chain, acc.target.position.token0.address, t0Sym);
+        const t1Coin = defillamaCoinKey(chain, acc.target.position.token1.address, t1Sym);
+        if (!t0Coin || !t1Coin) continue;
+        for (const e of [...acc.increases, ...acc.decreases]) {
+          if (!e.blockTime) continue;
+          const k0 = `${t0Coin}|${e.blockTime}`;
+          if (!seenLookups.has(k0)) {
+            seenLookups.add(k0);
+            defillamaNeeds.push({ coin: t0Coin, timestamp: e.blockTime });
+          }
+          const k1 = `${t1Coin}|${e.blockTime}`;
+          if (!seenLookups.has(k1)) {
+            seenLookups.add(k1);
+            defillamaNeeds.push({ coin: t1Coin, timestamp: e.blockTime });
+          }
+        }
+      }
+      let llamaPrices: Map<string, number> | null = null;
+      if (defillamaNeeds.length > 0) {
+        try {
+          llamaPrices = await fetchHistoricalPrices(defillamaNeeds);
+        } catch (err) {
+          errors.push(`defillama-fallback: ${(err as Error).message}`);
+        }
+      }
+
       // Конвертация (slot0 ratio) → (USD price0, USD price1).
       // Логика:
       //   1. Если token1 — стейбл → price0 = price1Per0, price1 = $1
@@ -382,11 +427,14 @@ export function useV3LiquidityEvents(
       //         price1 = anchorTokenUsd / price1Per0
       //      b. token1 == anchor → price1 = anchorTokenUsd,
       //         price0 = anchorTokenUsd × price1Per0
-      //   4. Если ни стейбла ни anchor'а нет — null (skipping cost basis
-      //      для этого event'а; fallback на DefiLlama можно добавить позже).
+      //   4. DefiLlama historical-price fallback per token + event.blockTime
+      //      (WBTC/PAXG and similar exotic pairs where neither side is
+      //      anchor on the local chain).
+      //   5. Если всё mimo — null (skipping cost basis для этого event'а).
       function deriveUsdPrices(
         target: Target,
         pp: PoolPriceCacheValue,
+        event?: V3LiquidityEvent,
       ): { p0: number; p1: number } | null {
         const t0Sym = target.position.token0.symbol;
         const t1Sym = target.position.token1.symbol;
@@ -410,6 +458,19 @@ export function useV3LiquidityEvents(
           }
           if (t1Addr === anchorAddr) {
             return { p0: anchorUsd * pp.price1Per0, p1: anchorUsd };
+          }
+        }
+        // DefiLlama fallback — direct per-token historical USD prices.
+        if (event?.blockTime && llamaPrices) {
+          const chain = target.position.chain;
+          const t0Coin = defillamaCoinKey(chain, t0Addr, t0Sym);
+          const t1Coin = defillamaCoinKey(chain, t1Addr, t1Sym);
+          if (t0Coin && t1Coin) {
+            const p0 = priceFromMap(llamaPrices, t0Coin, event.blockTime);
+            const p1 = priceFromMap(llamaPrices, t1Coin, event.blockTime);
+            if (p0 != null && p0 > 0 && p1 != null && p1 > 0) {
+              return { p0, p1 };
+            }
           }
         }
         return null;
@@ -447,7 +508,7 @@ export function useV3LiquidityEvents(
           const k = `${target.position.chain}|${target.position.poolAddress.toLowerCase()}|${e.txHash.toLowerCase()}`;
           const pp = poolPriceCache.get(k);
           if (!pp) return null;
-          return deriveUsdPrices(target, pp);
+          return deriveUsdPrices(target, pp, e);
         }
 
         for (const e of acc.increases) {
