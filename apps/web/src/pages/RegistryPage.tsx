@@ -10,7 +10,7 @@
  *      того, как мы убедимся, что raw-данные корректны.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -61,6 +61,8 @@ import {
   type SavedWallet,
   type WalletChain,
 } from "@/lib/wallets";
+import { usePrimaryAccount } from "@/features/accounts/hooks";
+import { walletsApi, type AddressType } from "@/features/wallets/api";
 import { computeLpCloseAttribution } from "@/lib/portfolio/cost_basis_tracker";
 import { useT, useI18n } from "@/i18n/I18nProvider";
 import {
@@ -116,6 +118,10 @@ export function RegistryPage(): JSX.Element {
 
   const wallets = useWallets();
   const selected = wallets.selected;
+  // Wires this page's add/remove through the SaaS API. Without this
+  // RegistryPage talked only to localStorage — wallets stayed
+  // device-local and admin/portfolios couldn't see them.
+  const registrySync = useRegistryApiSync(wallets);
 
   const {
     loadedById,
@@ -418,6 +424,7 @@ export function RegistryPage(): JSX.Element {
         onToggleForm={() => setFormOpen((v) => !v)}
         debankKeyOk={Boolean(debankKey)}
         heliusKeyOk={Boolean(heliusKey)}
+        registrySync={registrySync}
       />
 
       {anyLoaded && <CacheFreshness />}
@@ -1030,6 +1037,7 @@ function WalletList({
   onToggleForm,
   debankKeyOk,
   heliusKeyOk,
+  registrySync,
 }: {
   wallets: ReturnType<typeof useWallets>;
   loadedById: Record<string, Loaded>;
@@ -1037,6 +1045,7 @@ function WalletList({
   onToggleForm: () => void;
   debankKeyOk: boolean;
   heliusKeyOk: boolean;
+  registrySync: ReturnType<typeof useRegistryApiSync>;
 }) {
   const t = useT();
   const { forget } = useLoadedWallets();
@@ -1091,7 +1100,7 @@ function WalletList({
                 onSelect={() => wallets.select(w.id)}
                 onRename={(name) => wallets.update(w.id, { name })}
                 onDelete={() => {
-                  wallets.remove(w.id);
+                  void registrySync.onRemove(w.id);
                   forget(w.id);
                 }}
               />
@@ -1112,7 +1121,7 @@ function WalletList({
               <AddWalletForm
                 existing={wallets.list}
                 onAdd={(input) => {
-                  wallets.add(input);
+                  void registrySync.onAdd(input);
                   onToggleForm();
                 }}
               />
@@ -1454,4 +1463,119 @@ function CacheFreshness() {
       </div>
     </div>
   );
+}
+
+/* ============================ API sync hook ============================== */
+
+/**
+ * Mirrors RegistryPage's add/remove into the SaaS wallets table.
+ *
+ * Without this the page used to write only to localStorage; the wallets
+ * stayed device-local, the worker never refreshed them, and
+ * admin/portfolios reported zero TVL for everyone. After this hook is
+ * in place RegistryPage stays the same UX (form, cards, delete button)
+ * but every mutation also lands in the API so:
+ *   - same wallet visible on every device the user logs in from
+ *   - admin/portfolios sees the real capital
+ *   - hourly cron refresh runs for it
+ *
+ * Legacy migration runs once on mount: any localStorage entry without
+ * the `api:` prefix is created via the API; on success it's removed
+ * from localStorage and the hydration query reissues it as
+ * `api:<walletId>:<addressId>`.
+ */
+function useRegistryApiSync(
+  wallets: ReturnType<typeof useWallets>,
+): {
+  onAdd: (input: { name: string; address: string; chain: WalletChain; connectionId?: string }) => Promise<SavedWallet | null>;
+  onRemove: (localId: string) => Promise<void>;
+  migrating: boolean;
+} {
+  const primary = usePrimaryAccount();
+  const [migrating, setMigrating] = useState(false);
+  const migratedRef = useRef(false);
+
+  useEffect(() => {
+    if (!primary || migratedRef.current) return;
+    const legacy = wallets.list.filter((w) => !w.id.startsWith("api:"));
+    if (legacy.length === 0) return;
+    migratedRef.current = true;
+    setMigrating(true);
+    (async () => {
+      for (const w of legacy) {
+        try {
+          const apiW = await walletsApi.create(primary.id, {
+            name: w.name,
+            kind: "external",
+          });
+          await walletsApi.addAddress(primary.id, apiW.id, {
+            address: w.address,
+            type: walletChainToType(w.chain),
+            chains: w.chain === "evm" ? EVM_DEFAULT_CHAINS : [],
+          });
+          wallets.remove(w.id);
+        } catch (err) {
+          console.warn("[registry-migrate] failed", w.name, err);
+        }
+      }
+      setMigrating(false);
+    })();
+  }, [primary, wallets]);
+
+  const onAdd = useCallback(
+    async (input: { name: string; address: string; chain: WalletChain; connectionId?: string }) => {
+      if (!primary) return wallets.add(input);
+      try {
+        const apiW = await walletsApi.create(primary.id, {
+          name: input.name,
+          kind: "external",
+        });
+        await walletsApi.addAddress(primary.id, apiW.id, {
+          address: input.address,
+          type: walletChainToType(input.chain),
+          chains: input.chain === "evm" ? EVM_DEFAULT_CHAINS : [],
+        });
+        return null;
+      } catch (err) {
+        console.error("[registry] api create failed, falling back to local", err);
+        return wallets.add(input);
+      }
+    },
+    [primary, wallets],
+  );
+
+  const onRemove = useCallback(
+    async (localId: string) => {
+      if (localId.startsWith("api:") && primary) {
+        const apiWalletId = localId.split(":")[1];
+        if (apiWalletId) {
+          try {
+            await walletsApi.delete(primary.id, apiWalletId);
+            return;
+          } catch (err) {
+            console.error("[registry] api delete failed", err);
+          }
+        }
+      }
+      wallets.remove(localId);
+    },
+    [primary, wallets],
+  );
+
+  return { onAdd, onRemove, migrating };
+}
+
+const EVM_DEFAULT_CHAINS = [1, 42161, 8453, 10, 137, 56];
+
+function walletChainToType(chain: WalletChain): AddressType {
+  switch (chain) {
+    case "evm":
+      return "evm";
+    case "sol":
+      return "solana";
+    case "coinstats":
+      return "other";
+    default:
+      return "other";
+  }
 }
