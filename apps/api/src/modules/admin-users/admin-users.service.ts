@@ -272,8 +272,21 @@ export class AdminUsersService {
 
   async endImpersonations(
     adminId: string,
-    targetUserId: string
-  ): Promise<number> {
+    targetUserId: string,
+    args?: { ip?: string | null; userAgent?: string | null }
+  ): Promise<{
+    revokedSessions: number;
+    /** Fresh admin tokens so the dashboard can drop the impersonation
+     *  banner without forcing a full re-login. Null when the caller
+     *  isn't a current admin or the user row is missing. */
+    adminTokens: {
+      accessToken: string;
+      accessTokenExpiresAt: Date;
+      refreshToken: string;
+      refreshTokenExpiresAt: Date;
+      admin: UserRow;
+    } | null;
+  }> {
     const now = new Date();
     const rows = await this.db
       .update(schema.sessions)
@@ -286,6 +299,7 @@ export class AdminUsersService {
         )
       )
       .returning({ id: schema.sessions.id });
+
     if (rows.length > 0) {
       await this.audit.log({
         actorUserId: adminId,
@@ -295,7 +309,53 @@ export class AdminUsersService {
         payload: { revokedSessions: rows.length },
       });
     }
-    return rows.length;
+
+    // Mint a fresh non-impersonation session for the admin so the
+    // frontend can swap the cookie+token back without going through
+    // /login. If the admin row is missing or the user isn't an admin
+    // any more we just skip — caller will fall back to logout.
+    const admin = await this.authRepo.findActiveUserById(adminId);
+    if (!admin || admin.role !== "admin") {
+      return { revokedSessions: rows.length, adminTokens: null };
+    }
+
+    const refreshToken = generateRefreshToken();
+    const refreshTokenHash = hashToken(refreshToken);
+    const expiresAt = new Date(
+      now.getTime() + this.config.refreshTtlDays * 24 * 60 * 60 * 1000
+    );
+    const [session] = await this.db
+      .insert(schema.sessions)
+      .values({
+        userId: admin.id,
+        sessionTokenHash: refreshTokenHash,
+        userAgent: args?.userAgent ?? null,
+        ip: args?.ip ?? null,
+        expiresAt,
+      })
+      .returning();
+    if (!session) throw new Error("Admin session insert failed.");
+
+    const access = signAccessToken(
+      {
+        sub: admin.id,
+        role: admin.role as "admin" | "user" | "viewer",
+        sid: session.id,
+      },
+      this.config.jwtSecret,
+      this.config.accessTtlMinutes
+    );
+
+    return {
+      revokedSessions: rows.length,
+      adminTokens: {
+        accessToken: access.token,
+        accessTokenExpiresAt: access.expiresAt,
+        refreshToken,
+        refreshTokenExpiresAt: expiresAt,
+        admin,
+      },
+    };
   }
 
   // Used by audit-log viewer to resolve UUIDs → readable names.

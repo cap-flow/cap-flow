@@ -52,17 +52,22 @@ ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <I18nProvider>
       <ThemeProvider defaultTheme="dark">
-        <SidebarProvider>
-          <LoadedWalletsProvider>
-            <QueryClientProvider client={queryClient}>
-              <BrowserRouter>
-                <AuthProvider>
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter>
+            <AuthProvider>
+              {/* LoadedWalletsProvider depends on useAuth() to drop
+                  cached wallet data when the auth subject changes
+                  (admin <-> impersonation, user switch). Must sit
+                  inside AuthProvider AND inside QueryClient (for
+                  hydration's useQuery). */}
+              <LoadedWalletsProvider>
+                <SidebarProvider>
                   <App />
-                </AuthProvider>
-              </BrowserRouter>
-            </QueryClientProvider>
-          </LoadedWalletsProvider>
-        </SidebarProvider>
+                </SidebarProvider>
+              </LoadedWalletsProvider>
+            </AuthProvider>
+          </BrowserRouter>
+        </QueryClientProvider>
       </ThemeProvider>
     </I18nProvider>
   </React.StrictMode>

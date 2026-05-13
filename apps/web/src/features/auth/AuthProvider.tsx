@@ -130,10 +130,26 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
   );
 
   const endImpersonation = useCallback(async (): Promise<void> => {
-    // Drop the impersonation session everywhere. Reloading + re-login is
-    // the only way to get back to the admin context, since the refresh
-    // cookie has been overwritten by the impersonation session.
-    await logout();
+    // POST /auth/end-impersonation:
+    //   - revokes the impersonation session server-side
+    //   - mints a fresh admin session and sets the admin refresh cookie
+    //   - returns the admin's access token + me-shaped payload
+    //
+    // The endpoint lives under /auth (not /admin/users/.../impersonate)
+    // so the impersonated user (role=user, no admin gate) can call it.
+    //
+    // If anything fails — admin row gone, role demoted, network — we
+    // fall back to a hard logout so the impersonation banner doesn't
+    // strand the user.
+    try {
+      const res = await authApi.endImpersonation();
+      tokenStore.set(res.accessToken);
+      setUser(res.user);
+      setOrigin(null);
+    } catch (err) {
+      console.error("[auth] end-impersonation failed, hard logout", err);
+      await logout();
+    }
   }, [logout]);
 
   const value = useMemo<AuthState>(

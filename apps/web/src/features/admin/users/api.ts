@@ -42,6 +42,7 @@ const impersonateResponseSchema = z.object({
 });
 export type ImpersonateResponse = z.infer<typeof impersonateResponseSchema>;
 
+
 export interface ListFilter {
   readonly status?: AdminUserStatus | undefined;
   readonly role?: AdminUserRole | undefined;

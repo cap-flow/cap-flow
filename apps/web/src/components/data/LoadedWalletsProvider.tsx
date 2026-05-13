@@ -58,6 +58,7 @@ import type {
 } from "@/lib/portfolio/types";
 import { useIntegrations } from "@/lib/integrations";
 import { useWallets, type SavedWallet, type WalletChain } from "@/lib/wallets";
+import { useAuth } from "@/features/auth/AuthProvider";
 import {
   deleteWalletCache,
   readAllWalletCacheIds,
@@ -158,6 +159,7 @@ const LoadedCtx = createContext<Ctx | null>(null);
 export function LoadedWalletsProvider({ children }: { children: React.ReactNode }) {
   const [integrations] = useIntegrations();
   const wallets = useWallets();
+  const { user } = useAuth();
 
   // Гидратация из localStorage при первом рендере: данные уже загруженных
   // кошельков восстанавливаются мгновенно, без API-запросов.
@@ -984,11 +986,34 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
     setLoadedById({});
   }, []);
 
+  // Bootstrap ref must exist before the auth-switch effect below so
+  // that effect can reset it on identity change.
+  const bootstrappedRef = useRef(false);
+
+  // When the auth subject switches (admin starts/stops impersonating
+  // another user, or a different user logs in on the same browser),
+  // every piece of in-memory state belongs to the previous identity.
+  // Hard-reset everything so Bob can't see Vladimir's loaded wallets,
+  // and so the bootstrap effect below re-runs against the new user's
+  // wallet list.
+  const lastUserIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const id = user?.id ?? null;
+    if (lastUserIdRef.current === id) return;
+    // Skip the very first transition (null → first user) — no stale
+    // state to drop, and we want bootstrap to run on initial load.
+    if (lastUserIdRef.current !== null) {
+      for (const cid of readAllWalletCacheIds()) deleteWalletCache(cid);
+      setLoadedById({});
+      bootstrappedRef.current = false;
+    }
+    lastUserIdRef.current = id;
+  }, [user?.id]);
+
   // Bootstrap: автоматически грузим только те кошельки, для которых нет кэша.
   // Если все уже в кэше — не делаем НИ ОДНОГО запроса.
   // Пользователь увидит данные мгновенно, обновляться будет только по
   // явной кнопке "Обновить".
-  const bootstrappedRef = useRef(false);
   useEffect(() => {
     if (bootstrappedRef.current) return;
     if (wallets.list.length === 0) return;

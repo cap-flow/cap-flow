@@ -45,4 +45,19 @@ export const authApi = {
   /** POST /api/v1/auth/logout — clears refresh cookie + revokes session. */
   logout: () =>
     api.post("/v1/auth/logout", undefined as unknown, z.unknown()),
+
+  /** POST /api/v1/auth/end-impersonation — stops the current impersonation
+   *  session and restores admin tokens. Identifies the admin via session
+   *  metadata; requires only auth (not requireAdmin) since the caller IS
+   *  the impersonated user. */
+  endImpersonation: () =>
+    api.post(
+      "/v1/auth/end-impersonation",
+      undefined as unknown,
+      z.object({
+        accessToken: z.string(),
+        expiresAt: z.string(),
+        user: meSchema,
+      }),
+    ),
 };

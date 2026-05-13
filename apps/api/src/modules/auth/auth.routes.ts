@@ -1,8 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
+import { z } from "zod";
+
 import type { Env } from "../../config/env.js";
-import { UnauthorizedError } from "../../core/errors.js";
+import { ForbiddenError, UnauthorizedError } from "../../core/errors.js";
+import type { AdminUsersService } from "../admin-users/admin-users.service.js";
 
 import {
   REFRESH_COOKIE_NAME,
@@ -21,6 +24,7 @@ import type { UserRole } from "./auth.types.js";
 
 interface AuthRoutesOptions {
   readonly env: Env;
+  readonly adminUsers: AdminUsersService;
 }
 
 export async function authRoutes(
@@ -132,6 +136,53 @@ export async function authRoutes(
       const full = await app.auth.getActiveUser(u.id);
       if (!full) throw new UnauthorizedError("User no longer active.");
       return toMe(full, u.impersonation ?? null);
+    }
+  );
+
+  /**
+   * Stop the current impersonation session and return to the admin
+   * identity. Lives under /auth (not /admin/users/.../impersonate)
+   * because the caller is the *impersonated* user — they don't have
+   * admin role, so /admin requires-admin gate would 403. Identity
+   * of the admin to restore is read from session metadata
+   * (req.user.impersonation.impersonatorId, populated by the auth
+   * plugin from sessions.impersonated_by_id).
+   */
+  route.post(
+    "/end-impersonation",
+    {
+      preHandler: app.requireAuth,
+      schema: {
+        response: {
+          200: z.object({
+            accessToken: z.string(),
+            expiresAt: z.string(),
+            user: meResponseSchema,
+          }),
+        },
+      },
+    },
+    async (req, reply) => {
+      const u = req.user;
+      if (!u) throw new UnauthorizedError();
+      if (!u.impersonation) {
+        throw new ForbiddenError("Not currently impersonating.");
+      }
+      const adminId = u.impersonation.impersonatorId;
+      const result = await opts.adminUsers.endImpersonations(adminId, u.id, {
+        ip: req.ip ?? null,
+        userAgent: req.headers["user-agent"] ?? null,
+      });
+      if (!result.adminTokens) {
+        throw new UnauthorizedError("Admin session could not be restored.");
+      }
+      setRefreshCookie(reply, result.adminTokens.refreshToken, cookieCfg);
+      setAccessCookie(reply, result.adminTokens.accessToken, accessCookieCfg);
+      return {
+        accessToken: result.adminTokens.accessToken,
+        expiresAt: result.adminTokens.accessTokenExpiresAt.toISOString(),
+        user: toMe(result.adminTokens.admin, null),
+      };
     }
   );
 }

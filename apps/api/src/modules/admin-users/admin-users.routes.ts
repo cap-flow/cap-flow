@@ -168,24 +168,12 @@ export async function adminUsersRoutes(
     }
   );
 
-  route.delete(
-    "/:id/impersonate",
-    {
-      schema: {
-        params: userIdParamSchema,
-        response: { 200: z.object({ revokedSessions: z.number() }) },
-      },
-    },
-    async (req) => {
-      const u = req.user;
-      if (!u) throw new UnauthorizedError();
-      const revokedSessions = await service.endImpersonations(
-        u.id,
-        req.params.id
-      );
-      return { revokedSessions };
-    }
-  );
+  // NB: DELETE /:id/impersonate is intentionally NOT registered in this
+  // admin-scoped router — the impersonated user (role=user) can't pass
+  // the requireAdmin hook above, but they're the one whose dashboard
+  // shows the "Завершить" button.  The end-impersonation endpoint lives
+  // in apps/api/src/modules/auth (registered separately, requireAuth
+  // only) and identifies the admin via session.impersonatedById.
 }
 
 function toAdminUserResponse(u: UserRow) {

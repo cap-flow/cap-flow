@@ -18,7 +18,13 @@ export function ImpersonationBanner(): JSX.Element | null {
 
   async function handleEnd() {
     await endImpersonation();
-    navigate("/login", { replace: true });
+    // After endImpersonation the AuthProvider has swapped tokens back
+    // to the admin session and refetched /me. Send the admin straight
+    // back to the place they came from (the portfolios drill-in list).
+    // If the backend couldn't restore the admin (rare — admin row
+    // deleted or role demoted) AuthProvider fell back to logout, and
+    // ProtectedRoute will intercept the next render to push /login.
+    navigate("/admin/portfolios", { replace: true });
   }
 
   const originLabel = impersonationOrigin

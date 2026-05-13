@@ -289,7 +289,11 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
 
   await app.register(
     async (api) => {
-      await api.register(authRoutes, { env, prefix: "/auth" });
+      await api.register(authRoutes, {
+        env,
+        adminUsers: adminUsersService,
+        prefix: "/auth",
+      });
       await api.register(passwordResetRoutes, {
         service: passwordResetService,
         prefix: "/auth/password",
