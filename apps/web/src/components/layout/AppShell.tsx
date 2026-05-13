@@ -36,15 +36,15 @@ interface NavItem {
   end: boolean;
 }
 
+// Беспорядка нет: Реестр уже умеет подключить кошелёк и тянуть историю,
+// «Кошельки» / «Операции» были дублями. Подписка и уведомления переехали
+// внутрь «Настройки» (см. SettingsPage). Прямые маршруты /wallets /operations
+// /billing /preferences остались живыми для invite-ссылок и закладок.
 const NAV: NavItem[] = [
   { to: "/", labelKey: "nav.dashboard", icon: LayoutDashboard, end: true },
   { to: "/performance", labelKey: "nav.performance", icon: LineChart, end: false },
   { to: "/insights", labelKey: "nav.insights", icon: PieChart, end: false },
   { to: "/registry", labelKey: "nav.registry", icon: Receipt, end: false },
-  { to: "/wallets", labelKey: "nav.wallets", icon: WalletIcon, end: false },
-  { to: "/operations", labelKey: "nav.operations", icon: ScrollText, end: false },
-  { to: "/billing", labelKey: "nav.billing", icon: CreditCard, end: false },
-  { to: "/preferences", labelKey: "nav.preferences", icon: BellRing, end: false },
 ];
 
 const SIDEBAR_W_OPEN = "w-64";

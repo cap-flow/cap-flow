@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  Bell,
   Check,
+  CreditCard,
   Database,
   Globe,
   History,
@@ -38,8 +40,16 @@ import { AvatarPicker } from "@/components/profile/AvatarPicker";
 import { useProfile, type UserProfile } from "@/components/profile/profile";
 import { usePipelineSettings } from "@/lib/portfolio/pipeline_settings";
 import { cn } from "@/lib/utils";
+import { BillingPage } from "./BillingPage";
+import { PreferencesPage } from "./PreferencesPage";
 
-type Section = "profile" | "appearance" | "language" | "integrations";
+type Section =
+  | "profile"
+  | "appearance"
+  | "language"
+  | "integrations"
+  | "subscription"
+  | "notifications";
 
 export function SettingsPage(): JSX.Element {
   const t = useT();
@@ -96,6 +106,18 @@ export function SettingsPage(): JSX.Element {
             active={section === "integrations"}
             onClick={() => setSection("integrations")}
           />
+          <SectionTab
+            icon={<CreditCard className="h-4 w-4" />}
+            label="Подписка"
+            active={section === "subscription"}
+            onClick={() => setSection("subscription")}
+          />
+          <SectionTab
+            icon={<Bell className="h-4 w-4" />}
+            label="Уведомления"
+            active={section === "notifications"}
+            onClick={() => setSection("notifications")}
+          />
         </nav>
 
         <div className="space-y-6">
@@ -103,6 +125,8 @@ export function SettingsPage(): JSX.Element {
           {section === "appearance" && <AppearanceSection />}
           {section === "language" && <LanguageSection />}
           {section === "integrations" && <IntegrationsSection />}
+          {section === "subscription" && <BillingPage />}
+          {section === "notifications" && <PreferencesPage />}
         </div>
       </div>
     </div>
