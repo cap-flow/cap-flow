@@ -1,7 +1,8 @@
 import { useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries } from "@tanstack/react-query";
 
 import { walletsApi, type WalletAddress } from "./api";
+import { useWallets as useApiWallets } from "./hooks";
 import { usePrimaryAccount } from "@/features/accounts/hooks";
 import {
   useWallets,
@@ -12,70 +13,76 @@ import {
 /**
  * Bridges the legacy `localStorage.capflow.wallets` store (read by
  * LoadedWalletsProvider / HomePage dashboard) with the SaaS server
- * tables (`wallets`, `wallet_addresses`). Without this hook the dashboard
- * shows $0 immediately after login because localStorage is empty even
- * though the server has wallets + a populated snapshot.
+ * tables (`wallets`, `wallet_addresses`).
  *
- * Strategy: on mount, fetch every API wallet of the primary account,
- * fan out into one SavedWallet per (wallet × address) pair, and merge
- * with the existing localStorage state. Server wins on duplicates
- * (matched by address+chain); local-only entries (created via legacy
- * code paths) are preserved.
+ * Reactivity strategy: we deliberately share the **same query key** as
+ * the rest of the wallets feature (`useApiWallets` from
+ * `features/wallets/hooks`). That means any mutation that invalidates
+ * `["wallets", "list", accountId]` — create, rename, delete — fires
+ * this effect, so localStorage stays in lockstep with the API without
+ * a page reload.
  *
- * The bridge is intentionally one-way (server → local). Wallet creation
- * via the new /wallets page already writes to the API. The legacy
- * mutate-on-localStorage paths from the old SPA still write locally;
- * those entries stay until the dashboard is fully migrated to
- * server-sourced data (planned phase F6).
+ * Merge policy: every wallet sourced from the API is keyed `api:<wid>:<aid>`.
+ * On each hydration we **drop all stale `api:`-prefixed entries** and
+ * rewrite them from fresh API data. Local-only entries (legacy from
+ * pre-SaaS) are preserved — those exit only via explicit user action
+ * inside the legacy UI. This is the only way to make UI deletes
+ * propagate back into the dashboard reliably.
+ *
+ * The bridge is one-way (server → local). New wallets created via the
+ * SaaS `/wallets` page hit the API and then the hydration syncs them
+ * to localStorage. Phase F6b will remove the legacy store entirely.
  */
 export function useWalletsHydration(): void {
   const primary = usePrimaryAccount();
   const accountId = primary?.id;
   const { state, replace } = useWallets();
 
-  const list = useQuery({
-    queryKey: ["wallets", accountId, "hydration-list"],
-    queryFn: async () => {
-      if (!accountId) return [] as Array<{ wallet: { id: string; name: string; createdAt: string }; addresses: WalletAddress[] }>;
-      const wallets = await walletsApi.list(accountId);
-      const enriched = await Promise.all(
-        wallets.map(async (w) => ({
-          wallet: { id: w.id, name: w.name, createdAt: w.createdAt },
-          addresses: await walletsApi.listAddresses(accountId, w.id),
-        })),
-      );
-      return enriched;
-    },
-    enabled: Boolean(accountId),
-    staleTime: 5 * 60 * 1000,
+  // Sources the canonical SaaS-side wallet list. Same query key as
+  // mutations (create/rename/delete) so this is invalidated by them.
+  const walletsQ = useApiWallets(accountId ?? null);
+  const wallets = walletsQ.data;
+
+  // Per-wallet address lists, fetched in parallel.
+  const addressesQs = useQueries({
+    queries: (wallets ?? []).map((w) => ({
+      queryKey: ["wallets", "addresses", accountId, w.id] as const,
+      queryFn: () => walletsApi.listAddresses(accountId!, w.id),
+      enabled: Boolean(accountId && w.id),
+      staleTime: 30_000,
+    })),
   });
 
+  const allAddressesReady =
+    !!wallets &&
+    addressesQs.length === (wallets?.length ?? 0) &&
+    addressesQs.every((q) => q.data !== undefined);
+
   useEffect(() => {
-    if (!list.data) return;
+    if (!accountId || !wallets || !allAddressesReady) return;
 
     const apiWallets: SavedWallet[] = [];
-    for (const { wallet, addresses } of list.data) {
-      for (const addr of addresses) {
+    wallets.forEach((w, i) => {
+      const addrs = addressesQs[i]?.data ?? [];
+      for (const addr of addrs) {
         const chain = mapAddressTypeToChain(addr.type);
         if (!chain) continue;
         apiWallets.push({
-          id: `api:${wallet.id}:${addr.id}`,
-          name: wallet.name,
+          id: `api:${w.id}:${addr.id}`,
+          name: w.name,
           address: addr.address,
           chain,
-          createdAt: Date.parse(wallet.createdAt) || Date.now(),
+          createdAt: Date.parse(w.createdAt) || Date.now(),
         });
       }
-    }
+    });
 
-    // Merge: API entries (keyed by `address|chain`) win; preserve local-only
-    // entries (legacy, not in API yet).
-    const keyOf = (w: SavedWallet) => `${w.address.toLowerCase()}|${w.chain}`;
-    const apiKeys = new Set(apiWallets.map(keyOf));
-    const localOnly = state.list.filter((w) => !apiKeys.has(keyOf(w)));
+    // Drop every stale `api:`-prefixed entry, then append the fresh ones.
+    // Local-only entries (no `api:` prefix) are pre-SaaS user additions
+    // that the legacy UI still owns; we never touch them here.
+    const localOnly = state.list.filter((w) => !w.id.startsWith("api:"));
     const merged = [...apiWallets, ...localOnly];
 
-    // No-op write if shape is already identical.
     if (sameList(state.list, merged)) return;
 
     const selectedId =
@@ -84,7 +91,15 @@ export function useWalletsHydration(): void {
         : (merged[0]?.id ?? null);
 
     replace({ list: merged, selectedId });
-  }, [list.data, state.list, state.selectedId, replace]);
+  }, [
+    accountId,
+    wallets,
+    addressesQs.map((q) => q.dataUpdatedAt).join(","),
+    allAddressesReady,
+    state.list,
+    state.selectedId,
+    replace,
+  ]);
 }
 
 function mapAddressTypeToChain(t: WalletAddress["type"]): WalletChain | null {
@@ -96,7 +111,6 @@ function mapAddressTypeToChain(t: WalletAddress["type"]): WalletChain | null {
     case "tron":
     case "btc":
     case "other":
-      // Currently unsupported in the dashboard's live loader; skip.
       return null;
     default:
       return null;
