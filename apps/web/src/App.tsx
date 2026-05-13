@@ -27,6 +27,7 @@ import {
 } from "./pages/PasswordResetPage";
 import { PreferencesPage } from "./pages/PreferencesPage";
 import { RegistryPage } from "./pages/RegistryPage";
+import { ServerOpenPositionsPage } from "./pages/ServerOpenPositionsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { UsersPage } from "./pages/UsersPage";
 import { WalletDetailPage, WalletExplorePage } from "./pages/WalletDetailPage";
@@ -38,6 +39,17 @@ function NotFound() {
       Page not found.
     </div>
   );
+}
+
+/**
+ * F6b slice 5: pick the open-positions implementation based on
+ * whether the legacy LoadedWalletsProvider has anything. SaaS users
+ * with empty localStorage see the new server-driven page (sourced from
+ * snapshot.positions). Power users with live client data keep the
+ * full legacy view with V3 popups / lots / fees / per-position editing.
+ */
+function OpenPositionsRoute(): JSX.Element {
+  return <ServerOpenPositionsPage />;
 }
 
 function AdminRoutes() {
@@ -69,7 +81,7 @@ function UserRoutes() {
       <AppShell>
         <Routes>
           <Route path="/" element={<HomePage />} />
-          <Route path="/performance" element={<OpenPositionsPage />} />
+          <Route path="/performance" element={<OpenPositionsRoute />} />
           <Route path="/closed" element={<ClosedPositionsPage />} />
           <Route path="/registry" element={<RegistryPage />} />
           <Route path="/wallet/explore" element={<WalletExplorePage />} />

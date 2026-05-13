@@ -43,6 +43,38 @@ export const snapshotMetricsSchema = z
     pnlTotalUsd: z.number().nullish(),
     pnlTotalPct: z.number().nullish(),
     startUsdEffective: z.number().nullish(),
+    // Slice 5: flat list of all open positions across every wallet.
+    positions: z
+      .array(
+        z.object({
+          id: z.string(),
+          protocolId: z.string(),
+          protocolName: z.string(),
+          chain: z.string(),
+          itemName: z.string(),
+          walletId: z.string().uuid().nullish(),
+          walletName: z.string(),
+          address: z.string(),
+          assetUsd: z.number(),
+          debtUsd: z.number(),
+          netUsd: z.number(),
+          supplyTokens: z.array(
+            z.object({
+              symbol: z.string(),
+              amount: z.number(),
+              usd: z.number(),
+            }),
+          ),
+          debtTokens: z.array(
+            z.object({
+              symbol: z.string(),
+              amount: z.number(),
+              usd: z.number(),
+            }),
+          ),
+        }),
+      )
+      .nullish(),
     // Slice 3: per-protocol breakdown for "Активы в проектах".
     // Each entry is one (protocolId × chain), deduplicated across wallets.
     protocols: z

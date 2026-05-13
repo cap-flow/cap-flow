@@ -96,6 +96,25 @@ export class PortfolioRefreshService {
         debtTokens: Map<string, { symbol: string; amount: number; usd: number }>;
       }
     >();
+    // Slice 5: per-position list. Each portfolio_item from DeBank
+    // becomes one entry. Kept WITH walletId/walletName context so the
+    // "Открытые позиции" table can render Bob's Aave vs Alice's Aave
+    // as separate rows (unlike the protocols aggregate above).
+    const positionsList: Array<{
+      id: string;
+      protocolId: string;
+      protocolName: string;
+      chain: string;
+      itemName: string;
+      walletId: string;
+      walletName: string;
+      address: string;
+      assetUsd: number;
+      debtUsd: number;
+      netUsd: number;
+      supplyTokens: Array<{ symbol: string; amount: number; usd: number }>;
+      debtTokens: Array<{ symbol: string; amount: number; usd: number }>;
+    }> = [];
     const addToken = (
       symbol: string,
       chain: string,
@@ -202,6 +221,35 @@ export class PortfolioRefreshService {
           for (const t of proto.supplyTokens) {
             addToken(t.symbol, t.chain, t.amount, t.priceUsd);
           }
+          // Slice 5: per-portfolio_item positions. Each one becomes a
+          // row on /performance. Id is stable per (address, protocol,
+          // chain, position-index) so re-running refresh doesn't shuffle
+          // React keys.
+          proto.positions.forEach((p, idx) => {
+            positionsList.push({
+              id: `${a.address}:${p.protocolId}:${p.chain}:${idx}`,
+              protocolId: p.protocolId,
+              protocolName: p.protocolName,
+              chain: p.chain,
+              itemName: p.itemName,
+              walletId: a.walletId,
+              walletName: a.walletName,
+              address: a.address,
+              assetUsd: p.assetUsd,
+              debtUsd: p.debtUsd,
+              netUsd: p.netUsd,
+              supplyTokens: p.supplyTokens.map((t) => ({
+                symbol: t.symbol.toUpperCase(),
+                amount: t.amount,
+                usd: t.amount * t.priceUsd,
+              })),
+              debtTokens: p.debtTokens.map((t) => ({
+                symbol: t.symbol.toUpperCase(),
+                amount: t.amount,
+                usd: t.amount * t.priceUsd,
+              })),
+            });
+          });
           // Per-protocol aggregation for "Активы в проектах" card.
           for (const p of proto.protocols) {
             const key = `${p.id}|${p.chain}`;
@@ -490,6 +538,8 @@ export class PortfolioRefreshService {
       pnlTotalUsd,
       pnlTotalPct,
       startUsdEffective: startEffectiveSum,
+      // ─── Slice 5: per-position rows for "Открытые позиции" ─────────
+      positions: positionsList.sort((a, b) => b.assetUsd - a.assetUsd),
       refreshedFrom: [...providersUsed],
       errors: errors.slice(0, 5),
       perAddress,

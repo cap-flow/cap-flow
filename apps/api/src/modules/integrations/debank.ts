@@ -112,6 +112,30 @@ export interface DebankProtocolsSummary {
       readonly priceUsd: number;
     }>;
   }>;
+  /** Per-position (each `portfolio_item`) rows. One Aave lending pool
+   *  with collateral + borrow is ONE entry. The "Открытые позиции" page
+   *  renders these. */
+  readonly positions: ReadonlyArray<{
+    readonly protocolId: string;
+    readonly protocolName: string;
+    readonly chain: string;
+    /** DeBank item-name string: "Lending" / "Liquidity Pool" /
+     *  "Yield" / "Farming" / "Vesting" / "Deposit" / "Locked" / etc. */
+    readonly itemName: string;
+    readonly assetUsd: number;
+    readonly debtUsd: number;
+    readonly netUsd: number;
+    readonly supplyTokens: ReadonlyArray<{
+      readonly symbol: string;
+      readonly amount: number;
+      readonly priceUsd: number;
+    }>;
+    readonly debtTokens: ReadonlyArray<{
+      readonly symbol: string;
+      readonly amount: number;
+      readonly priceUsd: number;
+    }>;
+  }>;
 }
 
 interface DeBankSupplyToken {
@@ -122,6 +146,7 @@ interface DeBankSupplyToken {
 }
 
 interface DeBankProtocolPortfolioItem {
+  readonly name?: string;
   readonly stats?: {
     readonly asset_usd_value?: number;
     readonly debt_usd_value?: number;
@@ -232,6 +257,17 @@ export class DeBankClient implements IBalanceProvider {
       supplyTokens: Array<{ symbol: string; amount: number; priceUsd: number }>;
       debtTokens: Array<{ symbol: string; amount: number; priceUsd: number }>;
     }> = [];
+    const positions: Array<{
+      protocolId: string;
+      protocolName: string;
+      chain: string;
+      itemName: string;
+      assetUsd: number;
+      debtUsd: number;
+      netUsd: number;
+      supplyTokens: Array<{ symbol: string; amount: number; priceUsd: number }>;
+      debtTokens: Array<{ symbol: string; amount: number; priceUsd: number }>;
+    }> = [];
     for (const proto of body) {
       let protoAsset = 0;
       let protoDebt = 0;
@@ -243,8 +279,12 @@ export class DeBankClient implements IBalanceProvider {
       // don't ship it (e.g. CEX integrations).
       if (proto.portfolio_item_list && proto.portfolio_item_list.length > 0) {
         for (const item of proto.portfolio_item_list) {
-          protoAsset += Number(item.stats?.asset_usd_value ?? 0);
-          protoDebt += Number(item.stats?.debt_usd_value ?? 0);
+          const itemAsset = Number(item.stats?.asset_usd_value ?? 0);
+          const itemDebt = Number(item.stats?.debt_usd_value ?? 0);
+          protoAsset += itemAsset;
+          protoDebt += itemDebt;
+          const itemSupplies: Array<{ symbol: string; amount: number; priceUsd: number }> = [];
+          const itemDebts: Array<{ symbol: string; amount: number; priceUsd: number }> = [];
           const supplies = item.detail?.supply_token_list ?? [];
           for (const t of supplies) {
             const amount = Number(t.amount ?? 0);
@@ -257,6 +297,7 @@ export class DeBankClient implements IBalanceProvider {
               chain: t.chain,
             });
             protoSupplies.push({ symbol: t.symbol, amount, priceUsd: price });
+            itemSupplies.push({ symbol: t.symbol, amount, priceUsd: price });
           }
           const borrows = item.detail?.borrow_token_list ?? [];
           for (const t of borrows) {
@@ -264,6 +305,22 @@ export class DeBankClient implements IBalanceProvider {
             const price = Number(t.price ?? 0);
             if (!t.symbol || amount <= 0 || price <= 0) continue;
             protoDebts.push({ symbol: t.symbol, amount, priceUsd: price });
+            itemDebts.push({ symbol: t.symbol, amount, priceUsd: price });
+          }
+          // Skip dust positions (< $1) — they bloat the table without
+          // adding signal.
+          if (itemAsset >= 1 || itemDebt >= 1) {
+            positions.push({
+              protocolId: proto.id,
+              protocolName: proto.name ?? proto.id,
+              chain: proto.chain,
+              itemName: item.name ?? "Position",
+              assetUsd: itemAsset,
+              debtUsd: itemDebt,
+              netUsd: itemAsset - itemDebt,
+              supplyTokens: itemSupplies,
+              debtTokens: itemDebts,
+            });
           }
         }
       } else {
@@ -290,6 +347,7 @@ export class DeBankClient implements IBalanceProvider {
       protocolsCount: protocols.length,
       supplyTokens,
       protocols,
+      positions,
     };
   }
 
