@@ -990,6 +990,29 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
   // that effect can reset it on identity change.
   const bootstrappedRef = useRef(false);
 
+  // Prune loadedById to whatever wallets.list currently contains. The
+  // wallet cache (capflow.cache.v6.wallet.<wid>) is keyed by wallet
+  // UUID and survives across user switches — without this filter, an
+  // admin who loaded vitalik's wallet would leak vitalik's ops to
+  // Alice's dashboard the moment Alice's page rehydrated from cache.
+  // Hydration scopes wallets.list per current user, so the
+  // intersection here is the right user-isolation boundary.
+  useEffect(() => {
+    const currentIds = new Set(wallets.list.map((w) => w.id));
+    setLoadedById((prev) => {
+      let changed = false;
+      const next: Record<string, Loaded> = {};
+      for (const [id, payload] of Object.entries(prev)) {
+        if (currentIds.has(id)) {
+          next[id] = payload;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [wallets.list]);
+
   // When the auth subject switches (admin starts/stops impersonating
   // another user, or a different user logs in on the same browser),
   // every piece of in-memory state belongs to the previous identity.

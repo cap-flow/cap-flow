@@ -10,6 +10,10 @@ export interface CreateSessionInput {
   readonly userAgent: string | null;
   readonly ip: string | null;
   readonly expiresAt: Date;
+  /** Set on impersonation sessions: the admin who initiated. Persists
+   *  across refresh rotations so the banner survives page reloads. */
+  readonly impersonatedById?: string;
+  readonly impersonationMode?: "view" | "edit";
 }
 
 export interface CreateUserInput {
@@ -108,6 +112,12 @@ export class AuthRepository implements IAuthRepository {
         userAgent: input.userAgent,
         ip: input.ip,
         expiresAt: input.expiresAt,
+        ...(input.impersonatedById
+          ? {
+              impersonatedById: input.impersonatedById,
+              impersonationMode: input.impersonationMode ?? "view",
+            }
+          : {}),
       })
       .returning();
     if (!row) throw new Error("Session insert returned no row.");

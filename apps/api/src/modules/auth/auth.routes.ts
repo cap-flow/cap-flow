@@ -104,14 +104,14 @@ export async function authRoutes(
       setRefreshCookie(reply, tokens.refreshToken, cookieCfg);
       setAccessCookie(reply, tokens.accessToken, accessCookieCfg);
 
-      // Refresh rotation always mints a fresh, non-impersonated session
-      // server-side (see auth.service.refresh — createSession is called
-      // without impersonatedById). So the post-refresh /me also has no
-      // impersonation context.
+      // Preserve impersonation context across refresh rotation. The
+      // service layer keeps impersonatedById on the new session when
+      // the original was an impersonation; we surface it on /me so the
+      // dashboard's red banner survives a page reload.
       return {
         accessToken: tokens.accessToken,
         expiresAt: tokens.accessTokenExpiresAt.toISOString(),
-        user: toMe(tokens.user, null),
+        user: toMe(tokens.user, tokens.impersonation ?? null),
       };
     }
   );

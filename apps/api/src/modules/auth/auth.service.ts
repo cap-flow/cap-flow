@@ -29,6 +29,13 @@ export interface AuthTokensBundle {
   readonly refreshToken: string;
   readonly refreshTokenExpiresAt: Date;
   readonly user: UserRow;
+  /** Present when the underlying session is an impersonation one, so
+   *  the /refresh route can keep the dashboard banner alive across
+   *  page reloads. */
+  readonly impersonation?: {
+    readonly impersonatorId: string;
+    readonly mode: "view" | "edit";
+  };
 }
 
 /** Dummy argon2 hash used to keep login response time constant when the
@@ -113,15 +120,29 @@ export class AuthService {
 
     const newRefreshToken = generateRefreshToken();
     const newRefreshTokenHash = hashToken(newRefreshToken);
-    const newRefreshExpires = new Date(
-      now.getTime() + this.config.refreshTtlDays * 24 * 60 * 60 * 1000
-    );
+    // Preserve impersonation context across rotation. Before this fix,
+    // refresh dropped impersonatedById — after the first access token
+    // expired the admin's impersonation effectively "graduated" into
+    // the target user's real session (banner gone, no way to exit,
+    // session hijack risk). For impersonation sessions we keep the
+    // same expiry as the original (limited to impersonation TTL); for
+    // normal sessions we extend to the full refresh window.
+    const isImpersonation = !!session.impersonatedById;
+    const newRefreshExpires = isImpersonation
+      ? session.expiresAt
+      : new Date(now.getTime() + this.config.refreshTtlDays * 24 * 60 * 60 * 1000);
     const newSession = await this.repo.createSession({
       userId: user.id,
       sessionTokenHash: newRefreshTokenHash,
       userAgent: meta.userAgent,
       ip: meta.ip,
       expiresAt: newRefreshExpires,
+      ...(isImpersonation && session.impersonatedById
+        ? {
+            impersonatedById: session.impersonatedById,
+            impersonationMode: session.impersonationMode ?? "view",
+          }
+        : {}),
     });
 
     const access = signAccessToken(
@@ -136,6 +157,14 @@ export class AuthService {
       refreshToken: newRefreshToken,
       refreshTokenExpiresAt: newRefreshExpires,
       user,
+      ...(isImpersonation && session.impersonatedById
+        ? {
+            impersonation: {
+              impersonatorId: session.impersonatedById,
+              mode: (session.impersonationMode ?? "view") as "view" | "edit",
+            },
+          }
+        : {}),
     };
   }
 
