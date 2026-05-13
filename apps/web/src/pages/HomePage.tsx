@@ -628,14 +628,23 @@ export function HomePage(): JSX.Element {
       />
 
       {/* Активы в проектах — на всю ширину */}
-      <ProtocolsBlock
-        metrics={m}
-        opsByWalletId={opsByWalletId}
-        locale={locale}
-        compositions={assetCompositions}
-        onConfigureComposition={openCompositionDialog}
-        aaveReserveConfigs={aaveReserveConfigs.data}
-      />
+      {m.protocols.length === 0 && snapshotMetrics?.protocols && snapshotMetrics.protocols.length > 0 ? (
+        <SnapshotProtocolsBlock
+          protocols={snapshotMetrics.protocols}
+          protocolsAssetUsd={snapshotMetrics.protocolsAssetUsd ?? 0}
+          protocolsDebtUsd={snapshotMetrics.totalDebtUsd ?? 0}
+          locale={locale}
+        />
+      ) : (
+        <ProtocolsBlock
+          metrics={m}
+          opsByWalletId={opsByWalletId}
+          locale={locale}
+          compositions={assetCompositions}
+          onConfigureComposition={openCompositionDialog}
+          aaveReserveConfigs={aaveReserveConfigs.data}
+        />
+      )}
 
       {compositionDialog && (
         <AssetCompositionDialog
@@ -3351,6 +3360,103 @@ function TokenListRow({
 }
 
 /* ============================== Protocols ================================ */
+
+/**
+ * F6b slice 3 server-driven "Активы в проектах" card. Read-only —
+ * renders when the legacy client compute (`metrics.protocols`) is empty
+ * but the worker has populated `snapshot.protocols`. Each row shows
+ * protocol + chain + asset/debt + wallets that hold the position +
+ * top supply tokens. No per-position expand yet — full PnL/APR/lots
+ * lives in a later slice once those land server-side.
+ */
+function SnapshotProtocolsBlock({
+  protocols,
+  protocolsAssetUsd,
+  protocolsDebtUsd,
+  locale,
+}: {
+  protocols: NonNullable<SnapshotMetrics["protocols"]>;
+  protocolsAssetUsd: number;
+  protocolsDebtUsd: number;
+  locale: "en" | "ru";
+}) {
+  const net = protocolsAssetUsd - protocolsDebtUsd;
+  return (
+    <Card className="self-start animate-in fade-in slide-in-from-bottom-2 duration-500">
+      <span className="pointer-events-none absolute inset-x-6 -top-px h-px bg-brand-gradient" />
+      <CardHeader className="flex flex-row items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md border border-border bg-secondary text-brand-cyan">
+            <Layers className="h-4 w-4" />
+          </div>
+          <div>
+            <CardTitle className="text-base">Активы в проектах</CardTitle>
+            <CardDescription>
+              {protocols.length} протоколов · server snapshot
+            </CardDescription>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Активы в работе
+          </div>
+          <div className="text-xl font-semibold tabular-nums text-foreground">
+            <AnimatedNumber
+              value={protocolsAssetUsd}
+              format={(v) => formatUsd(v, locale)}
+            />
+          </div>
+          {protocolsDebtUsd > 0 && (
+            <div className="text-[11px] tabular-nums text-muted-foreground">
+              −{" "}
+              <span className="text-destructive">
+                {formatUsd(protocolsDebtUsd, locale)}
+              </span>{" "}
+              долг = {formatUsd(net, locale)} нетто
+            </div>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-col gap-1.5">
+          {protocols.map((p) => (
+            <div
+              key={`${p.id}|${p.chain}`}
+              className="flex items-center justify-between gap-3 rounded-md border border-border bg-secondary/30 px-3 py-2"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-foreground">{p.name}</span>
+                  <Badge variant="muted" className="text-[9px]">
+                    {p.chain}
+                  </Badge>
+                </div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                  {p.walletNames.join(", ") || "—"} ·{" "}
+                  {p.supplyTokens
+                    .slice(0, 3)
+                    .map((t) => `${t.amount.toFixed(t.amount < 1 ? 4 : 2)} ${t.symbol}`)
+                    .join(" + ")}
+                  {p.supplyTokens.length > 3 && ` + ${p.supplyTokens.length - 3} more`}
+                </div>
+              </div>
+              <div className="text-right tabular-nums">
+                <div className="font-semibold text-foreground">
+                  {formatUsd(p.assetUsd, locale)}
+                </div>
+                {p.debtUsd > 0 && (
+                  <div className="text-[10px] text-destructive">
+                    − {formatUsd(p.debtUsd, locale)}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 function ProtocolsBlock({
   metrics,

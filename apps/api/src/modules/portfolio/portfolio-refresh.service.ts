@@ -80,6 +80,22 @@ export class PortfolioRefreshService {
       string,
       { symbol: string; chain: string; amount: number; usd: number }
     >();
+    // Per-protocol aggregation across all addresses. Same protocol on
+    // the same chain held by two wallets collapses into one row with
+    // walletNames=[a,b]. The dashboard "Активы в проектах" reads this.
+    const protoAcc = new Map<
+      string,
+      {
+        id: string;
+        chain: string;
+        name: string;
+        assetUsd: number;
+        debtUsd: number;
+        walletNames: Set<string>;
+        supplyTokens: Map<string, { symbol: string; amount: number; usd: number }>;
+        debtTokens: Map<string, { symbol: string; amount: number; usd: number }>;
+      }
+    >();
     const addToken = (
       symbol: string,
       chain: string,
@@ -185,6 +201,38 @@ export class PortfolioRefreshService {
         if (proto) {
           for (const t of proto.supplyTokens) {
             addToken(t.symbol, t.chain, t.amount, t.priceUsd);
+          }
+          // Per-protocol aggregation for "Активы в проектах" card.
+          for (const p of proto.protocols) {
+            const key = `${p.id}|${p.chain}`;
+            const ex = protoAcc.get(key) ?? {
+              id: p.id,
+              chain: p.chain,
+              name: p.name,
+              assetUsd: 0,
+              debtUsd: 0,
+              walletNames: new Set<string>(),
+              supplyTokens: new Map<string, { symbol: string; amount: number; usd: number }>(),
+              debtTokens: new Map<string, { symbol: string; amount: number; usd: number }>(),
+            };
+            ex.assetUsd += p.assetUsd;
+            ex.debtUsd += p.debtUsd;
+            ex.walletNames.add(a.walletName);
+            for (const t of p.supplyTokens) {
+              const sk = t.symbol.toUpperCase();
+              const prev = ex.supplyTokens.get(sk) ?? { symbol: sk, amount: 0, usd: 0 };
+              prev.amount += t.amount;
+              prev.usd += t.amount * t.priceUsd;
+              ex.supplyTokens.set(sk, prev);
+            }
+            for (const t of p.debtTokens) {
+              const sk = t.symbol.toUpperCase();
+              const prev = ex.debtTokens.get(sk) ?? { symbol: sk, amount: 0, usd: 0 };
+              prev.amount += t.amount;
+              prev.usd += t.amount * t.priceUsd;
+              ex.debtTokens.set(sk, prev);
+            }
+            protoAcc.set(key, ex);
           }
         }
 
@@ -365,6 +413,31 @@ export class PortfolioRefreshService {
         usd: a.usd,
       }));
 
+    // Per-protocol breakdown (Slice 3). Sorted DESC by assetUsd. Each
+    // entry is one (protocolId × chain) — wallets that share the same
+    // protocol are collapsed and the walletNames set kept on the row.
+    const dedupedProtocols = Array.from(protoAcc.values())
+      .filter((p) => p.assetUsd > 0 || p.debtUsd > 0)
+      .sort((a, b) => b.assetUsd - a.assetUsd)
+      .map((p) => ({
+        id: p.id,
+        chain: p.chain,
+        name: p.name,
+        assetUsd: p.assetUsd,
+        debtUsd: p.debtUsd,
+        netUsd: p.assetUsd - p.debtUsd,
+        walletNames: Array.from(p.walletNames),
+        supplyTokens: Array.from(p.supplyTokens.values())
+          .filter((t) => t.usd > 0)
+          .sort((a, b) => b.usd - a.usd),
+        debtTokens: Array.from(p.debtTokens.values())
+          .filter((t) => t.usd > 0)
+          .sort((a, b) => b.usd - a.usd),
+      }));
+    // Override per-address protocolsCount sum with the deduped value:
+    // 2 wallets in Aave should read as "1 protocol", not 2.
+    protocolsCount = dedupedProtocols.length;
+
     const ts = new Date();
     const dateStr = ts.toISOString().slice(0, 10);
     const legacyId = `auto-${args.trigger}-${ts.getTime()}`;
@@ -386,6 +459,8 @@ export class PortfolioRefreshService {
       chainsCount: uniqueChains.size,
       // ─── Slice 2: token allocation for the donut ─────────────────
       allocation,
+      // ─── Slice 3: per-protocol breakdown for "Активы в проектах" ──
+      protocols: dedupedProtocols,
       refreshedFrom: [...providersUsed],
       errors: errors.slice(0, 5),
       perAddress,

@@ -90,6 +90,28 @@ export interface DebankProtocolsSummary {
     readonly priceUsd: number;
     readonly chain: string;
   }>;
+  /** Per-protocol aggregates across all positions for ONE address. The
+   *  worker further groups these across addresses by (protocolId, chain)
+   *  to feed metrics.protocols on the dashboard. */
+  readonly protocols: ReadonlyArray<{
+    readonly id: string;
+    readonly chain: string;
+    readonly name: string;
+    readonly assetUsd: number;
+    readonly debtUsd: number;
+    /** Tokens user is supplying inside this protocol — symbol+amount+price. */
+    readonly supplyTokens: ReadonlyArray<{
+      readonly symbol: string;
+      readonly amount: number;
+      readonly priceUsd: number;
+    }>;
+    /** Tokens user is borrowing inside this protocol. */
+    readonly debtTokens: ReadonlyArray<{
+      readonly symbol: string;
+      readonly amount: number;
+      readonly priceUsd: number;
+    }>;
+  }>;
 }
 
 interface DeBankSupplyToken {
@@ -107,12 +129,14 @@ interface DeBankProtocolPortfolioItem {
   };
   readonly detail?: {
     readonly supply_token_list?: ReadonlyArray<DeBankSupplyToken>;
+    readonly borrow_token_list?: ReadonlyArray<DeBankSupplyToken>;
   };
 }
 
 interface DeBankComplexProtocol {
   readonly id: string;
   readonly chain: string;
+  readonly name?: string;
   readonly portfolio_item_list?: ReadonlyArray<DeBankProtocolPortfolioItem>;
   readonly net_usd_value?: number;
   readonly asset_usd_value?: number;
@@ -199,15 +223,28 @@ export class DeBankClient implements IBalanceProvider {
       priceUsd: number;
       chain: string;
     }> = [];
+    const protocols: Array<{
+      id: string;
+      chain: string;
+      name: string;
+      assetUsd: number;
+      debtUsd: number;
+      supplyTokens: Array<{ symbol: string; amount: number; priceUsd: number }>;
+      debtTokens: Array<{ symbol: string; amount: number; priceUsd: number }>;
+    }> = [];
     for (const proto of body) {
+      let protoAsset = 0;
+      let protoDebt = 0;
+      const protoSupplies: Array<{ symbol: string; amount: number; priceUsd: number }> = [];
+      const protoDebts: Array<{ symbol: string; amount: number; priceUsd: number }> = [];
       // Some protocols expose top-level asset/debt; others only the
       // portfolio_item_list breakdown. Prefer the granular path because
       // it's authoritative; fall back to top-level for protocols that
       // don't ship it (e.g. CEX integrations).
       if (proto.portfolio_item_list && proto.portfolio_item_list.length > 0) {
         for (const item of proto.portfolio_item_list) {
-          asset += Number(item.stats?.asset_usd_value ?? 0);
-          debt += Number(item.stats?.debt_usd_value ?? 0);
+          protoAsset += Number(item.stats?.asset_usd_value ?? 0);
+          protoDebt += Number(item.stats?.debt_usd_value ?? 0);
           const supplies = item.detail?.supply_token_list ?? [];
           for (const t of supplies) {
             const amount = Number(t.amount ?? 0);
@@ -219,18 +256,40 @@ export class DeBankClient implements IBalanceProvider {
               priceUsd: price,
               chain: t.chain,
             });
+            protoSupplies.push({ symbol: t.symbol, amount, priceUsd: price });
+          }
+          const borrows = item.detail?.borrow_token_list ?? [];
+          for (const t of borrows) {
+            const amount = Number(t.amount ?? 0);
+            const price = Number(t.price ?? 0);
+            if (!t.symbol || amount <= 0 || price <= 0) continue;
+            protoDebts.push({ symbol: t.symbol, amount, priceUsd: price });
           }
         }
       } else {
-        asset += Number(proto.asset_usd_value ?? 0);
-        debt += Number(proto.debt_usd_value ?? 0);
+        protoAsset = Number(proto.asset_usd_value ?? 0);
+        protoDebt = Number(proto.debt_usd_value ?? 0);
+      }
+      asset += protoAsset;
+      debt += protoDebt;
+      if (protoAsset > 0 || protoDebt > 0) {
+        protocols.push({
+          id: proto.id,
+          chain: proto.chain,
+          name: proto.name ?? proto.id,
+          assetUsd: protoAsset,
+          debtUsd: protoDebt,
+          supplyTokens: protoSupplies,
+          debtTokens: protoDebts,
+        });
       }
     }
     return {
       protocolsAssetUsd: asset,
       totalDebtUsd: debt,
-      protocolsCount: body.length,
+      protocolsCount: protocols.length,
       supplyTokens,
+      protocols,
     };
   }
 

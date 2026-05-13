@@ -37,6 +37,35 @@ export const snapshotMetricsSchema = z
         }),
       )
       .nullish(),
+    // Slice 3: per-protocol breakdown for "Активы в проектах".
+    // Each entry is one (protocolId × chain), deduplicated across wallets.
+    protocols: z
+      .array(
+        z.object({
+          id: z.string(),
+          chain: z.string(),
+          name: z.string(),
+          assetUsd: z.number(),
+          debtUsd: z.number(),
+          netUsd: z.number(),
+          walletNames: z.array(z.string()),
+          supplyTokens: z.array(
+            z.object({
+              symbol: z.string(),
+              amount: z.number(),
+              usd: z.number(),
+            }),
+          ),
+          debtTokens: z.array(
+            z.object({
+              symbol: z.string(),
+              amount: z.number(),
+              usd: z.number(),
+            }),
+          ),
+        }),
+      )
+      .nullish(),
     perAddress: z
       .array(
         z.object({
