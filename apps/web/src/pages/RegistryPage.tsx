@@ -1492,39 +1492,25 @@ function useRegistryApiSync(
   migrating: boolean;
 } {
   const primary = usePrimaryAccount();
-  const [migrating, setMigrating] = useState(false);
-  const migratedRef = useRef(false);
-
-  useEffect(() => {
-    if (!primary || migratedRef.current) return;
-    const legacy = wallets.list.filter((w) => !w.id.startsWith("api:"));
-    if (legacy.length === 0) return;
-    migratedRef.current = true;
-    setMigrating(true);
-    (async () => {
-      for (const w of legacy) {
-        try {
-          const apiW = await walletsApi.create(primary.id, {
-            name: w.name,
-            kind: "external",
-          });
-          await walletsApi.addAddress(primary.id, apiW.id, {
-            address: w.address,
-            type: walletChainToType(w.chain),
-            chains: w.chain === "evm" ? EVM_DEFAULT_CHAINS : [],
-          });
-          wallets.remove(w.id);
-        } catch (err) {
-          console.warn("[registry-migrate] failed", w.name, err);
-        }
-      }
-      setMigrating(false);
-    })();
-  }, [primary, wallets]);
+  // Migration was a one-time bridge from pre-SaaS localStorage entries
+  // to the API. After Hydration switched to server-only mode, legacy
+  // entries are dropped on the next render, so the migration loop only
+  // double-created. Removed.
 
   const onAdd = useCallback(
     async (input: { name: string; address: string; chain: WalletChain; connectionId?: string }) => {
-      if (!primary) return wallets.add(input);
+      if (!primary) {
+        // No primary account — degrade gracefully, the dashboard's
+        // hydration will catch up when the account boot resolves.
+        return wallets.add(input);
+      }
+      // Dedupe by address against current API-sourced entries before
+      // creating to prevent double-add races (form submit + hydration
+      // refetch arriving close together).
+      const lower = input.address.trim().toLowerCase();
+      if (wallets.list.some((w) => w.address.toLowerCase() === lower)) {
+        return null;
+      }
       try {
         const apiW = await walletsApi.create(primary.id, {
           name: input.name,
@@ -1537,8 +1523,8 @@ function useRegistryApiSync(
         });
         return null;
       } catch (err) {
-        console.error("[registry] api create failed, falling back to local", err);
-        return wallets.add(input);
+        console.error("[registry] api create failed", err);
+        throw err;
       }
     },
     [primary, wallets],
@@ -1546,6 +1532,9 @@ function useRegistryApiSync(
 
   const onRemove = useCallback(
     async (localId: string) => {
+      // After the server-only hydration switch every wallet id should
+      // be `api:<wid>:<aid>`. Local-only ids no longer survive past
+      // hydration, but we keep the fallback for safety.
       if (localId.startsWith("api:") && primary) {
         const apiWalletId = localId.split(":")[1];
         if (apiWalletId) {
@@ -1562,7 +1551,7 @@ function useRegistryApiSync(
     [primary, wallets],
   );
 
-  return { onAdd, onRemove, migrating };
+  return { onAdd, onRemove, migrating: false };
 }
 
 const EVM_DEFAULT_CHAINS = [1, 42161, 8453, 10, 137, 56];

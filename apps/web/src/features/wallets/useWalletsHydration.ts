@@ -22,12 +22,14 @@ import {
  * this effect, so localStorage stays in lockstep with the API without
  * a page reload.
  *
- * Merge policy: every wallet sourced from the API is keyed `api:<wid>:<aid>`.
- * On each hydration we **drop all stale `api:`-prefixed entries** and
- * rewrite them from fresh API data. Local-only entries (legacy from
- * pre-SaaS) are preserved — those exit only via explicit user action
- * inside the legacy UI. This is the only way to make UI deletes
- * propagate back into the dashboard reliably.
+ * Merge policy (post-SaaS): localStorage is a **mirror** of the API,
+ * not its own source. On each hydration we **rewrite the entire list**
+ * from API data (`api:<wid>:<aid>` ids). Legacy non-`api:` entries are
+ * dropped as orphan — they predate the SaaS pivot and there's no path
+ * to bring them back into the API ownership chain without the user
+ * re-adding them explicitly. Keeping them caused Alice's Реестр to
+ * show 4 wallets when DB had 3 (and similar mismatches when an
+ * impersonation cycle leaked a previous admin's entry).
  *
  * The bridge is one-way (server → local). New wallets created via the
  * SaaS `/wallets` page hit the API and then the hydration syncs them
@@ -77,11 +79,12 @@ export function useWalletsHydration(): void {
       }
     });
 
-    // Drop every stale `api:`-prefixed entry, then append the fresh ones.
-    // Local-only entries (no `api:` prefix) are pre-SaaS user additions
-    // that the legacy UI still owns; we never touch them here.
-    const localOnly = state.list.filter((w) => !w.id.startsWith("api:"));
-    const merged = [...apiWallets, ...localOnly];
+    // Server is the source of truth. Replace the entire list with
+    // freshly-built api:<wid>:<aid> entries. Legacy non-api: entries
+    // are dropped as orphans — they have no API counterpart, so the
+    // dashboard can't refresh / classify them anyway. Keeping them
+    // around caused phantom 4th wallet in Alice's Реестр when DB had 3.
+    const merged = apiWallets;
 
     if (sameList(state.list, merged)) return;
 
