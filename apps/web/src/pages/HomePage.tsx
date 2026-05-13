@@ -378,9 +378,9 @@ export function HomePage(): JSX.Element {
   const canSplitOwnCredit = startEffective > 0;
 
   // Что вы реально заработали на ваших деньгах = ownCapital − стартовый капитал.
-  const pnlOwnUsd = canSplitOwnCredit ? m.ownCapitalUsd - startEffective : 0;
-  const pnlOwnPct = canSplitOwnCredit
-    ? (pnlOwnUsd / startEffective) * 100
+  const clientPnlOwnUsd = canSplitOwnCredit ? m.ownCapitalUsd - startEffective : 0;
+  const clientPnlOwnPct = canSplitOwnCredit
+    ? (clientPnlOwnUsd / startEffective) * 100
     : null;
 
   // ---- PNL на кредитный капитал ----
@@ -406,12 +406,37 @@ export function HomePage(): JSX.Element {
       ? (pnlCreditUsd / creditTotalDebtUsd) * 100
       : null;
 
+  // F6b slice 4: prefer server-side PNL when the client's cost-basis
+  // chain (LoadedWalletsProvider → m.startUsdEffective) is empty but
+  // the worker snapshot has computed it from the operations ledger.
+  const pnlOwnUsd =
+    clientPnlOwnUsd === 0 && typeof snapshotMetrics?.pnlOwnUsd === "number"
+      ? snapshotMetrics.pnlOwnUsd
+      : clientPnlOwnUsd;
+  const pnlOwnPct =
+    clientPnlOwnPct === null && typeof snapshotMetrics?.pnlOwnPct === "number"
+      ? snapshotMetrics.pnlOwnPct
+      : clientPnlOwnPct;
+
   // ---- PNL на общий капитал (собственный + кредитный) ----
-  const pnlTotalUsd = pnlOwnUsd + pnlCreditUsd;
-  const pnlTotalPct =
+  const clientPnlTotalUsd = clientPnlOwnUsd + pnlCreditUsd;
+  const clientPnlTotalPct =
     canSplitOwnCredit && totalInvestedAll > 0
-      ? (pnlTotalUsd / totalInvestedAll) * 100
+      ? (clientPnlTotalUsd / totalInvestedAll) * 100
       : null;
+
+  // F6b slice 4: when client compute is null (no LoadedWalletsProvider
+  // data) but the server snapshot has a real cost-basis-derived PNL,
+  // prefer server values. The dashboard cards stay synced with what
+  // the worker stored.
+  const pnlTotalUsd =
+    clientPnlTotalUsd === 0 && typeof snapshotMetrics?.pnlTotalUsd === "number"
+      ? snapshotMetrics.pnlTotalUsd
+      : clientPnlTotalUsd;
+  const pnlTotalPct =
+    clientPnlTotalPct === null && typeof snapshotMetrics?.pnlTotalPct === "number"
+      ? snapshotMetrics.pnlTotalPct
+      : clientPnlTotalPct;
 
   // APR — аннуализация по сроку с самой ранней пометки.
   // Минимум 30 дней до аннуализации: иначе compound-формула даёт миллионы %

@@ -37,6 +37,12 @@ export const snapshotMetricsSchema = z
         }),
       )
       .nullish(),
+    // Slice 4: PNL (unrealized).
+    pnlOwnUsd: z.number().nullish(),
+    pnlOwnPct: z.number().nullish(),
+    pnlTotalUsd: z.number().nullish(),
+    pnlTotalPct: z.number().nullish(),
+    startUsdEffective: z.number().nullish(),
     // Slice 3: per-protocol breakdown for "Активы в проектах".
     // Each entry is one (protocolId × chain), deduplicated across wallets.
     protocols: z

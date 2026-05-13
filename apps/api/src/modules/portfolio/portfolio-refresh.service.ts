@@ -438,6 +438,29 @@ export class PortfolioRefreshService {
     // 2 wallets in Aave should read as "1 protocol", not 2.
     protocolsCount = dedupedProtocols.length;
 
+    // ─── Slice 4: PNL (unrealized only — Realized waits for the
+    // closed-positions builder server-side). Two cases:
+    //
+    //  - startEffective > 0 (ops ledger has cost basis): real PNL =
+    //    ownCapital − startEffective. percent = pnl / start * 100.
+    //
+    //  - startEffective = 0 (no ops yet): PNL is conceptually
+    //    undefined. We return zeros so the dashboard renders a "—"
+    //    placeholder; the existing CTA "Добавь операции в Реестр"
+    //    is the right next step for the user.
+    const startEffectiveSum = costBasis.reduce(
+      (s, c) => s + (c.totalPaidUsd || 0),
+      0,
+    );
+    const pnlOwnUsd = startEffectiveSum > 0 ? ownCapitalUsd - startEffectiveSum : 0;
+    const pnlOwnPct =
+      startEffectiveSum > 0 ? (pnlOwnUsd / startEffectiveSum) * 100 : null;
+    // Credit PNL stays 0 for now — full credit-split requires per-
+    // position debt/asset attribution (slice 5). Total PNL = own PNL
+    // until then.
+    const pnlTotalUsd = pnlOwnUsd;
+    const pnlTotalPct = pnlOwnPct;
+
     const ts = new Date();
     const dateStr = ts.toISOString().slice(0, 10);
     const legacyId = `auto-${args.trigger}-${ts.getTime()}`;
@@ -461,6 +484,12 @@ export class PortfolioRefreshService {
       allocation,
       // ─── Slice 3: per-protocol breakdown for "Активы в проектах" ──
       protocols: dedupedProtocols,
+      // ─── Slice 4: unrealized PNL on own capital ────────────────────
+      pnlOwnUsd,
+      pnlOwnPct,
+      pnlTotalUsd,
+      pnlTotalPct,
+      startUsdEffective: startEffectiveSum,
       refreshedFrom: [...providersUsed],
       errors: errors.slice(0, 5),
       perAddress,
