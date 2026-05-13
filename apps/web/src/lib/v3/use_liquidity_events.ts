@@ -58,7 +58,10 @@ const DECREASE_LIQ_TOPIC =
  */
 // v2: переключение на pool slot0 цены (с DefiLlama hist на slot0 + USD anchor).
 // v1 кэш не валиден потому что USD-значения отличаются на 0.1-0.5%.
-const CACHE_KEY = "capflow.cache.v3liq.v2";
+// v2 → v3: добавлен DefiLlama historical-price fallback для exotic
+// non-stable + non-anchor пар (WBTC/PAXG и т.п.). Старые v2 entries
+// для таких пар содержали `netCostBasisUsd = 0` — нужно пересчитать.
+const CACHE_KEY = "capflow.cache.v3liq.v3";
 const moduleCache = new Map<string, V3CostBasisResult>();
 
 /**
