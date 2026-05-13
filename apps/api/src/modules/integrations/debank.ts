@@ -80,6 +80,23 @@ export interface DebankProtocolsSummary {
   readonly totalDebtUsd: number;
   /** Source-of-truth list for `metrics.protocolsCount` etc. */
   readonly protocolsCount: number;
+  /** Flattened supply tokens across every DeFi position. Used by the
+   *  dashboard's allocation donut to attribute DeFi-locked value back
+   *  to its underlying tokens (e.g. USDC supplied to Aave → bucket "USDC").
+   *  Excludes debt tokens — those net against the supply side. */
+  readonly supplyTokens: ReadonlyArray<{
+    readonly symbol: string;
+    readonly amount: number;
+    readonly priceUsd: number;
+    readonly chain: string;
+  }>;
+}
+
+interface DeBankSupplyToken {
+  readonly symbol: string;
+  readonly chain: string;
+  readonly amount: number;
+  readonly price: number;
 }
 
 interface DeBankProtocolPortfolioItem {
@@ -87,6 +104,9 @@ interface DeBankProtocolPortfolioItem {
     readonly asset_usd_value?: number;
     readonly debt_usd_value?: number;
     readonly net_usd_value?: number;
+  };
+  readonly detail?: {
+    readonly supply_token_list?: ReadonlyArray<DeBankSupplyToken>;
   };
 }
 
@@ -173,6 +193,12 @@ export class DeBankClient implements IBalanceProvider {
 
     let asset = 0;
     let debt = 0;
+    const supplyTokens: Array<{
+      symbol: string;
+      amount: number;
+      priceUsd: number;
+      chain: string;
+    }> = [];
     for (const proto of body) {
       // Some protocols expose top-level asset/debt; others only the
       // portfolio_item_list breakdown. Prefer the granular path because
@@ -182,6 +208,18 @@ export class DeBankClient implements IBalanceProvider {
         for (const item of proto.portfolio_item_list) {
           asset += Number(item.stats?.asset_usd_value ?? 0);
           debt += Number(item.stats?.debt_usd_value ?? 0);
+          const supplies = item.detail?.supply_token_list ?? [];
+          for (const t of supplies) {
+            const amount = Number(t.amount ?? 0);
+            const price = Number(t.price ?? 0);
+            if (!t.symbol || amount <= 0 || price <= 0) continue;
+            supplyTokens.push({
+              symbol: t.symbol,
+              amount,
+              priceUsd: price,
+              chain: t.chain,
+            });
+          }
         }
       } else {
         asset += Number(proto.asset_usd_value ?? 0);
@@ -192,6 +230,7 @@ export class DeBankClient implements IBalanceProvider {
       protocolsAssetUsd: asset,
       totalDebtUsd: debt,
       protocolsCount: body.length,
+      supplyTokens,
     };
   }
 

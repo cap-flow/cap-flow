@@ -24,6 +24,19 @@ export const snapshotMetricsSchema = z
     // Counts for CAP-WALLET header.
     walletsCount: z.number().nullish(),
     chainsCount: z.number().nullish(),
+    // Slice 2: per-symbol allocation across all addresses + DeFi
+    // supplies. Sorted DESC by usd. Receipt tokens already filtered
+    // server-side via isProtocolToken().
+    allocation: z
+      .array(
+        z.object({
+          symbol: z.string(),
+          chain: z.string(),
+          amount: z.number(),
+          usd: z.number(),
+        }),
+      )
+      .nullish(),
     perAddress: z
       .array(
         z.object({

@@ -506,7 +506,22 @@ export function HomePage(): JSX.Element {
         }
       }
     }
-    const total = m.totalAssetsUsd;
+    // F6b slice 2: when the client compute produced no groups (typical
+    // for SaaS users without LoadedWalletsProvider cache), fold the
+    // server snapshot's `allocation` into the same group-by-symbol
+    // structure. portfolioGroupOf() lives client-side and owns the
+    // semantic grouping (ETH/WETH/wstETH → "ETH" bucket etc.); server
+    // stays "raw symbol".
+    if (groups.size === 0 && snapshotMetrics?.allocation) {
+      for (const a of snapshotMetrics.allocation) {
+        addRaw(a.symbol, a.usd);
+      }
+    }
+    const totalFromSnapshot =
+      typeof snapshotMetrics?.totalUsd === "number" && snapshotMetrics.totalUsd > 0
+        ? snapshotMetrics.totalUsd
+        : 0;
+    const total = m.totalAssetsUsd > 0 ? m.totalAssetsUsd : totalFromSnapshot;
     return [...groups.values()]
       .map((g) => ({
         symbol: g.label,
@@ -522,7 +537,7 @@ export function HomePage(): JSX.Element {
           .sort((a, b) => b.usd - a.usd),
       }))
       .sort((a, b) => b.usd - a.usd);
-  }, [loadedList, m.protocols, m.totalAssetsUsd, assetCompositions]);
+  }, [loadedList, m.protocols, m.totalAssetsUsd, assetCompositions, snapshotMetrics]);
 
   // Известные символы — для autocomplete в диалоге состава.
   const knownSymbols = useMemo(() => {

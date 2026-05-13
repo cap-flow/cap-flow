@@ -1,5 +1,6 @@
 import type { AuditService } from "../audit/audit.service.js";
 import type { ChainClassifierService } from "../classifier/chain_classifier.service.js";
+import { isProtocolToken } from "../classifier/protocols.js";
 import { computeCostBasis } from "../cost-basis/cost-basis.js";
 import type { DeBankClient } from "../integrations/debank.js";
 import type { HeliusClient } from "../integrations/helius.js";
@@ -69,6 +70,39 @@ export class PortfolioRefreshService {
     let protocolsAssetUsd = 0;
     let totalDebtUsd = 0;
     let protocolsCount = 0;
+    // Token allocation buckets — for the dashboard's "Структура портфеля"
+    // donut. Symbol normalised upper-case; chain kept on each entry so a
+    // multi-chain token (USDC eth vs USDC arb) doesn't collapse into one
+    // bucket on the donut row tooltips. The dashboard does its own
+    // semantic grouping (ETH / USDC-stablecoins) client-side via
+    // portfolioGroupOf — server stays "raw symbol".
+    const allocationAcc = new Map<
+      string,
+      { symbol: string; chain: string; amount: number; usd: number }
+    >();
+    const addToken = (
+      symbol: string,
+      chain: string,
+      amount: number,
+      priceUsd: number,
+    ) => {
+      const usd = amount * priceUsd;
+      if (!symbol || usd < 0.5) return;
+      // Drop receipt / wrapper tokens — they double-count the underlying
+      // asset, which arrives through the protocol supply_token_list path
+      // already.
+      if (isProtocolToken(symbol)) return;
+      const key = `${symbol.toUpperCase()}|${chain}`;
+      const ex = allocationAcc.get(key) ?? {
+        symbol: symbol.toUpperCase(),
+        chain,
+        amount: 0,
+        usd: 0,
+      };
+      ex.amount += amount;
+      ex.usd += usd;
+      allocationAcc.set(key, ex);
+    };
     const perAddress: Array<{
       address: string;
       walletName: string;
@@ -93,7 +127,12 @@ export class PortfolioRefreshService {
         // "fetch failed" (Node undici TypeError that loses upstream
         // status info).
         let bal: { totalUsdValue: number; chains: Array<{ id: string; usdValue: number }> } | null = null;
-        let proto: { protocolsAssetUsd: number; totalDebtUsd: number; protocolsCount: number } | null = null;
+        let proto: {
+          protocolsAssetUsd: number;
+          totalDebtUsd: number;
+          protocolsCount: number;
+          supplyTokens: ReadonlyArray<{ symbol: string; amount: number; priceUsd: number; chain: string }>;
+        } | null = null;
 
         const t0 = Date.now();
         try {
@@ -119,6 +158,34 @@ export class PortfolioRefreshService {
             : String(err);
           errors.push(`${a.address} protocols: ${msg.slice(0, 200)}`);
           await this.logUsage("debank", "user/all_complex_protocol_list", 0, t1, args.accountId, msg);
+        }
+
+        // Wallet tokens (for the donut "Структура портфеля"). 1 extra
+        // DeBank credit per address — fail-soft: missing wallet tokens
+        // just shrink the donut to DeFi-only.
+        const t2 = Date.now();
+        try {
+          const tokens = await this.debank.getAllTokens(a.address);
+          providersUsed.add("debank");
+          for (const t of tokens) {
+            addToken(t.symbol, t.chain, t.amount, t.priceUsd);
+          }
+          await this.logUsage("debank", "user/all_token_list", 200, t2, args.accountId);
+        } catch (err) {
+          const msg = err instanceof Error
+            ? `${err.message}${(err as { cause?: { code?: string } }).cause?.code ? ` (${(err as { cause: { code: string } }).cause.code})` : ""}`
+            : String(err);
+          errors.push(`${a.address} tokens: ${msg.slice(0, 200)}`);
+          await this.logUsage("debank", "user/all_token_list", 0, t2, args.accountId, msg);
+        }
+
+        // Fold DeFi supply tokens into the same allocation buckets so
+        // that USDC supplied to Aave counts as "USDC" on the donut,
+        // not as receipt-token spam.
+        if (proto) {
+          for (const t of proto.supplyTokens) {
+            addToken(t.symbol, t.chain, t.amount, t.priceUsd);
+          }
         }
 
         if (!bal && !proto) {
@@ -285,6 +352,19 @@ export class PortfolioRefreshService {
     // we keep them — the UI shows the sign explicitly.
     const ownCapitalUsd = totalUsd - totalDebtUsd;
 
+    // Flatten the allocation map for storage. Sorted DESC by USD so a
+    // client UI can just take the first N for the donut and not bother
+    // re-sorting.
+    const allocation = Array.from(allocationAcc.values())
+      .filter((a) => a.usd > 0)
+      .sort((a, b) => b.usd - a.usd)
+      .map((a) => ({
+        symbol: a.symbol,
+        chain: a.chain,
+        amount: a.amount,
+        usd: a.usd,
+      }));
+
     const ts = new Date();
     const dateStr = ts.toISOString().slice(0, 10);
     const legacyId = `auto-${args.trigger}-${ts.getTime()}`;
@@ -304,6 +384,8 @@ export class PortfolioRefreshService {
       addressesSkipped: otherSkipped.length,
       walletsCount: uniqueWalletIds.size,
       chainsCount: uniqueChains.size,
+      // ─── Slice 2: token allocation for the donut ─────────────────
+      allocation,
       refreshedFrom: [...providersUsed],
       errors: errors.slice(0, 5),
       perAddress,
