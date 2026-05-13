@@ -62,11 +62,21 @@ export class PortfolioRefreshService {
     );
 
     let totalUsd = 0;
+    // Capital split (Phase F6b): total = wallet + protocols.asset - protocols.debt
+    // DeBank's `total_usd_value` already nets debt out, so:
+    //   walletUsd_per_addr = total_balance.total - (protocols.asset - protocols.debt)
+    let walletUsd = 0;
+    let protocolsAssetUsd = 0;
+    let totalDebtUsd = 0;
+    let protocolsCount = 0;
     const perAddress: Array<{
       address: string;
       walletName: string;
       kind: "evm" | "solana";
       totalUsd: number;
+      walletUsd?: number;
+      protocolsAssetUsd?: number;
+      totalDebtUsd?: number;
       chains: Array<{ id: string; usdValue: number }>;
       tokens?: number;
       error?: string;
@@ -77,39 +87,78 @@ export class PortfolioRefreshService {
     // ─── EVM via DeBank ────────────────────────────────────────────
     if (this.debank.isLive) {
       for (const a of evmAddrs) {
+        // Sequential, not Promise.all: DeBank Cloud throttles parallel
+        // calls from the same key; we'd rather pay an extra 200-300ms
+        // than have one of the two endpoints fail with a generic
+        // "fetch failed" (Node undici TypeError that loses upstream
+        // status info).
+        let bal: { totalUsdValue: number; chains: Array<{ id: string; usdValue: number }> } | null = null;
+        let proto: { protocolsAssetUsd: number; totalDebtUsd: number; protocolsCount: number } | null = null;
+
         const t0 = Date.now();
         try {
-          const bal = await this.debank.getTotalBalance(a.address);
+          bal = await this.debank.getTotalBalance(a.address);
           providersUsed.add("debank");
-          totalUsd += bal.totalUsdValue;
-          perAddress.push({
-            address: a.address,
-            walletName: a.walletName,
-            kind: "evm",
-            totalUsd: bal.totalUsdValue,
-            chains: bal.chains,
-          });
           await this.logUsage("debank", "user/total_balance", 200, t0, args.accountId);
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          errors.push(`${a.address}: ${msg.slice(0, 200)}`);
+          const msg = err instanceof Error
+            ? `${err.message}${(err as { cause?: { code?: string } }).cause?.code ? ` (${(err as { cause: { code: string } }).cause.code})` : ""}`
+            : String(err);
+          errors.push(`${a.address} total_balance: ${msg.slice(0, 200)}`);
+          await this.logUsage("debank", "user/total_balance", 0, t0, args.accountId, msg);
+        }
+
+        const t1 = Date.now();
+        try {
+          proto = await this.debank.getProtocolsSummary(a.address);
+          providersUsed.add("debank");
+          await this.logUsage("debank", "user/all_complex_protocol_list", 200, t1, args.accountId);
+        } catch (err) {
+          const msg = err instanceof Error
+            ? `${err.message}${(err as { cause?: { code?: string } }).cause?.code ? ` (${(err as { cause: { code: string } }).cause.code})` : ""}`
+            : String(err);
+          errors.push(`${a.address} protocols: ${msg.slice(0, 200)}`);
+          await this.logUsage("debank", "user/all_complex_protocol_list", 0, t1, args.accountId, msg);
+        }
+
+        if (!bal && !proto) {
+          // Both calls dropped — record an error entry, skip this address.
           perAddress.push({
             address: a.address,
             walletName: a.walletName,
             kind: "evm",
             totalUsd: 0,
             chains: [],
-            error: msg.slice(0, 200),
+            error: "fetch failed (both endpoints)",
           });
-          await this.logUsage(
-            "debank",
-            "user/total_balance",
-            0,
-            t0,
-            args.accountId,
-            msg
-          );
+          continue;
         }
+
+        const balTotal = bal?.totalUsdValue ?? 0;
+        const balChains = bal?.chains ?? [];
+        const pAsset = proto?.protocolsAssetUsd ?? 0;
+        const pDebt = proto?.totalDebtUsd ?? 0;
+        const pCount = proto?.protocolsCount ?? 0;
+        const netProtocolsUsd = pAsset - pDebt;
+        // walletUsd only makes sense when we have bal — otherwise it
+        // would be a phantom negative.
+        const walletOnlyUsd = bal ? balTotal - netProtocolsUsd : 0;
+
+        totalUsd += balTotal;
+        walletUsd += walletOnlyUsd;
+        protocolsAssetUsd += pAsset;
+        totalDebtUsd += pDebt;
+        protocolsCount += pCount;
+        perAddress.push({
+          address: a.address,
+          walletName: a.walletName,
+          kind: "evm",
+          totalUsd: balTotal,
+          walletUsd: walletOnlyUsd,
+          protocolsAssetUsd: pAsset,
+          totalDebtUsd: pDebt,
+          chains: balChains,
+        });
       }
     }
 
@@ -221,6 +270,21 @@ export class PortfolioRefreshService {
         err instanceof Error ? err.message.slice(0, 200) : String(err);
     }
 
+    // Aggregate counts for the dashboard CAP-WALLET header. We dedupe
+    // chain ids across addresses (so 3 wallets all on Ethereum still
+    // counts as 1 chain) and count unique wallet rows.
+    const uniqueChains = new Set<string>();
+    for (const pa of perAddress) {
+      for (const c of pa.chains) {
+        if (c.usdValue > 0) uniqueChains.add(c.id);
+      }
+    }
+    const uniqueWalletIds = new Set(addresses.map((a) => a.walletId));
+    // ownCapitalUsd is the "what's yours after paying off debt" line.
+    // Even if DeBank returns negative numbers for an underwater account,
+    // we keep them — the UI shows the sign explicitly.
+    const ownCapitalUsd = totalUsd - totalDebtUsd;
+
     const ts = new Date();
     const dateStr = ts.toISOString().slice(0, 10);
     const legacyId = `auto-${args.trigger}-${ts.getTime()}`;
@@ -228,9 +292,18 @@ export class PortfolioRefreshService {
       stub: providersUsed.size === 0,
       trigger: args.trigger,
       totalUsd,
+      // ─── Capital split (Phase F6b slice 1) ─────────────────────────
+      walletUsd,
+      protocolsAssetUsd,
+      totalDebtUsd,
+      ownCapitalUsd,
+      protocolsCount,
+      // ─── Counts for CAP-WALLET header ─────────────────────────────
       addressesEvm: evmAddrs.length,
       addressesSolana: solAddrs.length,
       addressesSkipped: otherSkipped.length,
+      walletsCount: uniqueWalletIds.size,
+      chainsCount: uniqueChains.size,
       refreshedFrom: [...providersUsed],
       errors: errors.slice(0, 5),
       perAddress,

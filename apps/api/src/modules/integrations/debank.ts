@@ -63,6 +63,43 @@ interface DeBankUserToken {
 }
 
 /**
+ * Aggregated DeFi position summary across all protocols. Lets the
+ * dashboard split a wallet's value into 3 buckets:
+ *   - walletUsd       — bare tokens lying in the wallet, not committed
+ *                       to any DeFi protocol.
+ *   - protocolsAssetUsd — Σ supply-side USD across all positions
+ *                       (collateral, liquidity, vault deposits, …).
+ *   - totalDebtUsd    — Σ borrow-side USD across all positions
+ *                       (Aave/Compound/Morpho debt).
+ *
+ * Derived from `/v1/user/all_complex_protocol_list`: one DeBank credit
+ * per call, returns *all* protocols across *all* chains for one address.
+ */
+export interface DebankProtocolsSummary {
+  readonly protocolsAssetUsd: number;
+  readonly totalDebtUsd: number;
+  /** Source-of-truth list for `metrics.protocolsCount` etc. */
+  readonly protocolsCount: number;
+}
+
+interface DeBankProtocolPortfolioItem {
+  readonly stats?: {
+    readonly asset_usd_value?: number;
+    readonly debt_usd_value?: number;
+    readonly net_usd_value?: number;
+  };
+}
+
+interface DeBankComplexProtocol {
+  readonly id: string;
+  readonly chain: string;
+  readonly portfolio_item_list?: ReadonlyArray<DeBankProtocolPortfolioItem>;
+  readonly net_usd_value?: number;
+  readonly asset_usd_value?: number;
+  readonly debt_usd_value?: number;
+}
+
+/**
  * Subset of DeBank's `/v1/user/all_history_list` response, kept loose
  * (`unknown` per inner record) so this client doesn't reshape the
  * provider's payload. The chain classifier owns the strict types and
@@ -120,6 +157,42 @@ export class DeBankClient implements IBalanceProvider {
       priceUsd: Number(t.price ?? 0),
       contractAddress: /^0x[a-fA-F0-9]{40}$/.test(t.id) ? t.id : null,
     }));
+  }
+
+  /**
+   * Sum up supply/borrow USD across every DeFi protocol the address
+   * participates in. One DeBank credit per call. Returns zeroed result
+   * (not error) on missing fields so a partial response from DeBank
+   * doesn't fail the whole refresh.
+   */
+  async getProtocolsSummary(address: string): Promise<DebankProtocolsSummary> {
+    if (!this.isLive) throw new ProviderNotConfiguredError("debank");
+    const url = new URL(`${this.base}/v1/user/all_complex_protocol_list`);
+    url.searchParams.set("id", address);
+    const body = await this.fetchJson<DeBankComplexProtocol[]>(url);
+
+    let asset = 0;
+    let debt = 0;
+    for (const proto of body) {
+      // Some protocols expose top-level asset/debt; others only the
+      // portfolio_item_list breakdown. Prefer the granular path because
+      // it's authoritative; fall back to top-level for protocols that
+      // don't ship it (e.g. CEX integrations).
+      if (proto.portfolio_item_list && proto.portfolio_item_list.length > 0) {
+        for (const item of proto.portfolio_item_list) {
+          asset += Number(item.stats?.asset_usd_value ?? 0);
+          debt += Number(item.stats?.debt_usd_value ?? 0);
+        }
+      } else {
+        asset += Number(proto.asset_usd_value ?? 0);
+        debt += Number(proto.debt_usd_value ?? 0);
+      }
+    }
+    return {
+      protocolsAssetUsd: asset,
+      totalDebtUsd: debt,
+      protocolsCount: body.length,
+    };
   }
 
   /**

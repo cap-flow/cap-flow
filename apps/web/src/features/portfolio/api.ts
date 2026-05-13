@@ -15,6 +15,15 @@ import { api } from "@/lib/api/client";
 export const snapshotMetricsSchema = z
   .object({
     totalUsd: z.number().nullish(),
+    // Phase F6b slice 1: capital split — DeFi vs bare wallet.
+    walletUsd: z.number().nullish(),
+    protocolsAssetUsd: z.number().nullish(),
+    totalDebtUsd: z.number().nullish(),
+    ownCapitalUsd: z.number().nullish(),
+    protocolsCount: z.number().nullish(),
+    // Counts for CAP-WALLET header.
+    walletsCount: z.number().nullish(),
+    chainsCount: z.number().nullish(),
     perAddress: z
       .array(
         z.object({
@@ -22,6 +31,9 @@ export const snapshotMetricsSchema = z
           kind: z.enum(["evm", "solana", "coinstats", "tron", "other"]),
           walletName: z.string().nullish(),
           totalUsd: z.number().nullish(),
+          walletUsd: z.number().nullish(),
+          protocolsAssetUsd: z.number().nullish(),
+          totalDebtUsd: z.number().nullish(),
           chains: z
             .array(
               z.object({

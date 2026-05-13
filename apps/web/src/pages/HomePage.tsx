@@ -577,6 +577,14 @@ export function HomePage(): JSX.Element {
             usdRub={usdRub}
             locale={locale}
             compact
+            snapshotCounts={
+              snapshotMetrics
+                ? {
+                    walletsCount: snapshotMetrics.walletsCount ?? 0,
+                    chainsCount: snapshotMetrics.chainsCount ?? 0,
+                  }
+                : undefined
+            }
           />
         </div>
       </div>
@@ -737,6 +745,21 @@ function CapitalHero({
     snapshotStartUsd !== null && snapshotStartUsd > 0 && m.startUsdEffective === 0
       ? snapshotStartUsd
       : m.startUsdEffective;
+  // F6b slice 1: own capital + debt come directly from snapshot when
+  // the client compute is empty. Server-side these are derived from
+  // DeBank's complex_protocol_list (asset/debt per protocol).
+  const snapshotOwnCapitalUsd =
+    typeof snapshot?.ownCapitalUsd === "number" ? snapshot.ownCapitalUsd : null;
+  const snapshotDebtUsd =
+    typeof snapshot?.totalDebtUsd === "number" ? snapshot.totalDebtUsd : null;
+  const ownCapitalToShow =
+    snapshotOwnCapitalUsd !== null && m.ownCapitalUsd === 0
+      ? snapshotOwnCapitalUsd
+      : m.ownCapitalUsd;
+  const debtToShow =
+    snapshotDebtUsd !== null && m.totalDebtUsd === 0
+      ? snapshotDebtUsd
+      : m.totalDebtUsd;
 
   // Топ-5 групп + "Прочее" для donut'а.
   const allocSegments = useMemo(() => {
@@ -814,23 +837,25 @@ function CapitalHero({
         />
         <BigKpi
           label="Собственный капитал"
-          value={formatUsd(m.ownCapitalUsd, locale)}
-          delta={`≈ ${formatRub(m.ownCapitalUsd * usdRub, locale)}`}
-          deltaPositive={m.ownCapitalUsd >= 0}
+          value={formatUsd(ownCapitalToShow, locale)}
+          delta={`≈ ${formatRub(ownCapitalToShow * usdRub, locale)}`}
+          deltaPositive={ownCapitalToShow >= 0}
           deltaIcon
           accent="success"
           tooltip="Текущий капитал − Совокупный долг. Что реально ваше после погашения всех займов."
         />
         <BigKpi
           label="Совокупный долг"
-          value={formatUsd(m.totalDebtUsd, locale)}
+          value={formatUsd(debtToShow, locale)}
           delta={
-            m.totalDebtUsd > 0
-              ? `+${formatUsd(m.accruedInterestUsd, locale)} накопл. % · APR ${m.borrowAprPct?.toFixed(2) ?? "—"}%`
+            debtToShow > 0
+              ? m.totalDebtUsd > 0
+                ? `+${formatUsd(m.accruedInterestUsd, locale)} накопл. % · APR ${m.borrowAprPct?.toFixed(2) ?? "—"}%`
+                : `≈ ${formatRub(debtToShow * usdRub, locale)}`
               : "займов нет"
           }
           deltaPositive={false}
-          accent={m.totalDebtUsd > 0 ? "destructive" : "muted"}
+          accent={debtToShow > 0 ? "destructive" : "muted"}
           tooltip="Σ borrow в DeFi + Σ ручных «кредит». Накопл. % = current_debt − net_borrowed × тек. цена."
         />
         <BigKpi
@@ -2353,6 +2378,7 @@ function WalletBalancesBlock({
   usdRub,
   locale,
   compact = false,
+  snapshotCounts,
 }: {
   loadedList: Loaded[];
   totalUsd: number;
@@ -2360,6 +2386,12 @@ function WalletBalancesBlock({
   locale: "en" | "ru";
   /** Компактный размер (для top-right widget). */
   compact?: boolean;
+  /** Server snapshot counts — used when the legacy client compute is
+   *  empty (SaaS users without LoadedWalletsProvider cache). */
+  snapshotCounts?: {
+    readonly walletsCount: number;
+    readonly chainsCount: number;
+  };
 }) {
   // Aggregate by (chain, symbol) — раздельно по сетям, чтобы в UI было
   // видно: «Ethereum: $X», «Arbitrum: $Y», «Solana: $Z», «Sui: $W».
@@ -2536,10 +2568,20 @@ function WalletBalancesBlock({
   // Auto-close отключён — пользователь сам управляет состоянием через клик
   // на заголовок (ранее автозакрывался через 5 сек, что мешало просмотру
   // длинного списка балансов).
-  const walletsCount = useMemo(
+  const clientWalletsCount = useMemo(
     () => new Set(loadedList.map((l) => l.wallet.id)).size,
     [loadedList],
   );
+  // Phase F6b: prefer server snapshot counts when the client compute
+  // is empty (SaaS users without LoadedWalletsProvider cache).
+  const walletsCount =
+    clientWalletsCount === 0 && snapshotCounts
+      ? snapshotCounts.walletsCount
+      : clientWalletsCount;
+  const chainsCount =
+    byChain.length === 0 && snapshotCounts
+      ? snapshotCounts.chainsCount
+      : byChain.length;
   const { loadAll, busyId } = useLoadedWallets();
   const navigate = useNavigate();
   const isEmpty = walletsCount === 0;
@@ -2572,8 +2614,8 @@ function WalletBalancesBlock({
               <div className="truncate text-[11px] font-semibold tracking-tight">
                 {walletsCount}{" "}
                 {walletsCount === 1 ? "кошелёк" : "кошельков"} ·{" "}
-                {byChain.length}{" "}
-                {compact ? "сетей" : byChain.length === 1 ? "сеть" : "сетей"} ·{" "}
+                {chainsCount}{" "}
+                {compact ? "сетей" : chainsCount === 1 ? "сеть" : "сетей"} ·{" "}
                 {totalTokensCount}{" "}
                 {compact ? "т." : "токенов"}
               </div>
