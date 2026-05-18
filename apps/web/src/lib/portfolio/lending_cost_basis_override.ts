@@ -47,6 +47,19 @@ export function applyLendingCostBasisOverride(
     const ops = opsByWallet.get(p.walletId);
     if (!ops || ops.length === 0) continue;
 
+    // UCB C7: skip когда buildSupplyToken's LotTracker SoT path уже отработал.
+    // Indicator: `priceSource === "cost_basis"` AND `startUsd > 0`. Это
+    // означает что main LotTracker walker (computePositionConsumedCostFromLots)
+    // дал accurate per-supply WAC × amount result. Запуск parallel tracker
+    // (`position_lot_cost_basis`) с другой методологией перетёр бы корректное
+    // значение на legacy WAC computation. Носимость: если все supplyTokens
+    // помечены cost_basis source, верим builder'у. Иначе override может
+    // улучшить (например при unknown source).
+    const allFromCostBasis =
+      p.supplyTokens.length > 0 &&
+      p.supplyTokens.every((t) => t.priceSource === "cost_basis");
+    if (allFromCostBasis && p.startUsd > 0) continue;
+
     // Реально задепонированные токены (для receipt-token позиций — это
     // GLV/aToken/cToken, а не decomposed underlying WETH+USDC). Если их
     // нет — fallback на DeBank supplyTokens.

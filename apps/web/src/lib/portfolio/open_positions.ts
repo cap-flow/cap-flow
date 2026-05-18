@@ -965,11 +965,22 @@ function computePositionConsumedCostFromLots(
   const incrementalOps: ClassifiedOp[] = [];
   for (const op of sorted) {
     // Check if THIS op is a target supply into our position.
+    // UCB C7: opMatchesLpMarket strict check works for V3 LP (with proper
+    // lpTokenId in movement protocol-token), но для lending позиций где
+    // DeBank pool.id (e.g. Fluid vault address 0x324c5dc1...) != receipt
+    // token id (fVLT), strict check filters out ALL supplies → walker
+    // returns 0. Solution: для lend_supply / lp_add / stake, accept op
+    // by (protocol, chain, symbol) match even without explicit lpTokenId
+    // match. opMatchesLpMarket остаётся strict для cross-position filter
+    // в других callsites (V3 multi-position pair).
+    const isSupplyEvent =
+      op.type === "lend_supply" || op.type === "lp_add" || op.type === "stake";
+    const lpMatched = isSupplyEvent || opMatchesLpMarket(op, lpTokenId);
     const isTargetSupply =
       op.protocol?.id === protocolId &&
       op.chain === chain &&
       op.type !== "claim_rewards" &&
-      opMatchesLpMarket(op, lpTokenId) &&
+      lpMatched &&
       (openedAt == null || op.time >= openedAt) &&
       op.movement.some(
         (m) =>
