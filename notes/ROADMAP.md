@@ -1,11 +1,293 @@
 ---
-updated: 2026-05-12
+updated: 2026-05-18 (Open positions startUsd → LotTracker SoT)
 ---
 
 
 # ROADMAP
 
+## 🔧 Open positions startUsd → LotTracker single source of truth (2026-05-18)
+
+Trigger: Vladimir POS-002 Fluid Lending показывал inconsistent startUsd —
+column sum в "История покупок underlying" = **$36,779.19**, но position
+summary = **$33,930.96**. Root cause — три параллельных cost basis
+движка работали независимо:
+
+1. `CostBasisTracker` — видит только swap-from-stable, не видит
+   `transfer_in`/`deposit_fiat`/`claim_rewards`/`bridge_in`
+2. `LotTracker` (lots/build.ts) — видит все acquisitions с D3/A4
+   overrides и WAC drift fix (M3)
+3. `position_lot_cost_basis` (PurchaseHistoryPopup) — отдельный путь
+
+`buildSupplyToken` приоритезировала `cycleDeposit.usd` (market price at
+supply time) над `avgAtOpen × s.amount`. При swap overpay (DEX
+slippage/MEV) или transfer_in с CEX trail (D3) cycleDeposit
+underestimates cost. UCB-инвариант: cost basis = actual paid, не market
+value at any point. LotTracker WAC IS the truth.
+
+**Fix**: новый helper `computePositionConsumedCostFromLots` — step-by-step
+walker. Для каждого supply op БЕЗ consume строит incremental tracker от
+ops ранее, читает `wacAt(walletId, symbol, op.time)`, аккумулирует
+`amount × wac`. Priority order в `buildSupplyToken`: **lotConsumed (new)
+> cycleDeposit > avgAtOpen × s.amount > fallback**. D3/A4 overrides
+прокинуты через `costBasisOverrideByHash` от OpenPositionsPage и
+PositionDetailPage в `buildOpenPositions`.
+
+Применимо ко всем single-asset позициям: Aave/Fluid/Compound (lending),
+GMX V2 (GM/GLV bought на stable), V3 LP NFT (через openHash). Принцип:
+*всегда отслеживать в каком активе позиция открыта и как мы его
+получили, как считает LotTracker*.
+
+| File | Change | Tests |
+|---|---|:-:|
+| `open_positions.ts` | + `computePositionConsumedCostFromLots` (step-by-step walker reads WAC before each consume); + `lotsByWallet` и `costBasisOverrideByHash` в BuildOptions; priority shift в `buildSupplyToken` | — |
+| `open_positions.swap-overpay.test.ts` | Vladimir POS-002 scenario: swap overpay → expect $10,769 (was $7250). D3 override: transfer_in $4500 → expect $9500 (was $7000) | 2/2 ✅ |
+| `OpenPositionsPage.tsx` · `PositionDetailPage.tsx` | прокинуть `costBasisOverrideByHash` из useLoadedWallets | — |
+
+**Cumulative**: 198/198 portfolio tests green · tsc clean.
+
+## 🧭 Ядро методологии — UCB (Universal Cost Basis)
+
+> **Locked, 2026-05-15.** UCB — это **архитектурный примитив всего
+> сервиса**, не отдельная фича. Все будущие модули (PnL, доходность,
+> налоговая отчётность, ребалансировка, рекомендации) опираются на
+> результат UCB-пайплайна, а не строят cost basis параллельно.
+>
+> Принципы:
+> 1. Cost basis — инвариант, который течёт по графу всех движений
+>    пользователя (on-chain swaps + cross-wallet transfers + CEX
+>    deposits/trades/withdrawals + P2P + manual annotation).
+> 2. **No silent extrapolation** — если cost basis неизвестен, он
+>    помечается как unattributed, а не подменяется `amount × current`.
+> 3. **Single source of truth** — один UCB-пайплайн, все производные
+>    метрики читают его.
+> 4. **Provenance preserved** — для каждого attributed-amount хранится
+>    цепочка событий «откуда $ пришли».
+> 5. **Manual escape hatch** — пользователь может ввести cost basis
+>    вручную если автоматика не нашла.
+>
+> Полное обоснование, текущее состояние, ограничения:
+> [decisions/ucb-universal-cost-basis.md](decisions/ucb-universal-cost-basis.md).
+
+## 🧪 Bob hardening pass (2026-05-17)
+
+Полный integration test UCB-модели против реальных данных аккаунта
+bob@example.com (606 chain ops · 567 CEX trades · 41 transfers · 2 wallets · 2 CEX).
+Найденные пробелы и их fix-ы:
+
+| # | Bug / Gap | Fix | Tests |
+|---|---|---|:-:|
+| **#1** | `syncTransfers` строил `errors[]` но никогда не вызывал `markSyncError` → `cex_accounts.last_sync_error` оставался NULL → Sync Coverage UI показывал "OK" silently при partial failures | Добавлен явный `markSyncSuccess`/`markSyncError` в конце `syncTransfers`. Errors now surface в UI | 2/2 ✅ |
+| **#3** | Internal transfers (B3) требовали manual click "Sync internal" — большинство users не знали. `last_internal_transfers_sync_at` NULL для всех bob's accounts | `syncTransfers` opportunistically chains `syncInternalTransfers` (fail-soft, errors не блокируют parent sync — `last_internal_transfers_sync_error` ловится в свой namespace) | 1/1 ✅ |
+| **#5** | Невозможно detect когда asset продан/выведен больше, чем приобретён → tax export overstates gains. Bob: LTC 11.87× gap, EOS/BBSOL 100% gap (no acquisitions tracked) | Новый pure `detectCexAssetGaps(flows)` + service `CexAssetGapService.detectForUser` + REST `/v1/cex/me/asset-gaps` + UI warning card на `/coverage`. Stable assets skipped. Severity warn/error. | 12 + 6 ✅ |
+| **#4** | Untracked CEX withdrawal destinations невидимы для user. Bob: 27 из 41 withdrawals ушли на адреса вне Capflow → broken cost basis trail | `detectUntrackedDestinations(wds, trackedSet)` + `ChainOpsService.findUntrackedDestinations` + extended `/graph/internal-transfers` response field. Frontend `useGraphInternalTransfers` zod schema | 9/9 ✅ |
+| **#6** | 500 Internal Server Error на `/admin/users` page. `db.execute<T>()` raw SQL возвращал timestamp поля как string (vs Date через ORM `.select()`), `toAdminUserResponse(u).createdAt.toISOString()` крашился | Defensive `toDate(v)` coercion для всех timestamp полей в `AdminUsersService.listUsers` | 5/5 ✅ |
+
+**Cumulative**: 33 новых tests · **801/801 API** · 196/196 web portfolio · typecheck clean.
+
+**Verified на Bob's data**:
+- Asset gap detector found **3 problematic assets**: LTC (11.87× ratio, +2430 missing), EOS (no acquisitions, 124 sold), BBSOL (no acquisitions, 21.5 sold)
+- Untracked destinations detector flagged **27 of 41 withdrawals** as untracked
+- Both Fix #1 и Fix #3 — code-level, проявят себя на next sync run
+
+### Onboarding polish (2026-05-17)
+- Убрана строчка "Спросим про твою налоговую юрисдикцию" из welcome step `/onboarding` (по запросу пользователя — упрощение first-touch flow).
+
+### Backlog после Bob hardening (low-priority polish)
+
+| # | Что | Severity | Когда делать |
+|---|---|:-:|---|
+| Manual P2P import UI recovery flow | Если bob купил LTC через BingX P2P — нужен UI чтобы добавить запись. Сейчас detector flag есть, recovery path нет | 🟡 P1 | Когда первый user попросит recovery |
+| Sentry / log aggregation | Admin не получит alert на CCXT sync failure пока сам не зайдёт в `/admin/health` | 🟡 P1 | Перед public launch |
+| Memecoin price source warning | FARTCOIN/PUMP/etc — DefiLlama may not have prices, fallback искажает lot tracker. Low severity для bob (CEX trade.cost = USDT, не зависит от DefiLlama) | 🟢 P2 | После 100+ users |
+
+---
+
+## ⏳ В работе / план — расширенный порядок B → B5 → A → C → D → E → F
+
+**Gate «UCB Complete»:** все ❌/⚠ из слоёв 1, 3, 4 + correctness (D) закрыты.
+
+**Сделано 2026-05-15** (off-list bonuses): B1.5 full-history chunked 3-year
+trades sync, B2.5 per-coin iteration Bybit/BingX, B6 CSV/XLSX import +
+multi-file + BingX timezone fix, B7 honest startUsd (без extrapolation),
+proxy tester, Sync All button, position_coverage aggregator,
+applyCexInheritanceCostBasisOverride.
+
+Полные обоснования и подзадачи: [decisions/ucb-universal-cost-basis.md](decisions/ucb-universal-cost-basis.md).
+
+### Этап B — Sync data integrity (остаток)
+
+| # | Задача |
+|---|--------|
+| **B3** ✅ | CEX internal transfers (Spot↔Funding↔Earn↔Sub-account) через CCXT `fetchTransfers`. Migration 0018 + `cex_internal_transfers` table + repo/service/routes + normalizer (8/8 tests) + "Sync internal" button в Coverage UI. Cost-basis не затрагивает (balance-neutral). Shipped 2026-05-16 |
+| **B4** ✅ | Sync coverage page `/coverage` — таблица wallets (ops_count, last sync, errors) + таблица CEX (trades/transfers/internal/p2p counts, last sync per data-type) — shipped 2026-05-16 |
+
+### Этап B5 — Server-side on-chain ops persistence ✅ **SHIPPED 2026-05-15/16**
+
+| # | Задача | Статус |
+|---|--------|:------:|
+| **B5.1** | `chain_operations` table + `ChainOpsRepository` + 16 unit tests | ✅ |
+| **B5.2** | `ChainOpsService` (ownership + audit) + REST routes (POST sync / GET list / GET status) | ✅ |
+| **B5.3.P1** | Fire-and-forget push в `LoadedWalletsProvider.load()` (verified: 605 ops в БД) | ✅ |
+| **B5.3.P2** | Server-side primary cache hydration перед DeBank pull (inline in `load()`) | ✅ |
+| **B5.4** | Delta-refresh: `knownHashes` + `latestOpTime` как stop-criterion для DeBank pagination | ✅ |
+| **B5.5** ✅ | Server-side autonomous chain_operations persistence: `ChainClassifierService.analyzeAccount` теперь возвращает `opsByAddress`; `PortfolioRefreshService` через existing cron BullMQ worker upsert'ит ops в chain_operations + markSyncSuccess per wallet. **Юзер больше не должен жать "Обновить"** — cron каждый час подтянет свежие ops автоматически. Fail-soft через `markSyncError`. 9/9 classifier tests pass. Shipped 2026-05-16 |
+
+### Этап A — Cross-wallet on-chain + manual annotation ✅ **A1-A4 SHIPPED 2026-05-16**
+
+| # | Задача | Статус |
+|---|--------|:------:|
+| **A1** | Layer 1 cross-wallet same-chain через tx_hash join (`findCrossWalletSameHashPairs`); REST `GET /v1/chain-ops/graph/internal-transfers` (`pairs`); 6 pairs found в bob | ✅ |
+| **A2** | Layer 2 cross-chain fuzzy heuristic ported на server (`internal-transfer-matcher.ts` + 15 unit tests); REST response расширен `crossChainPairs` | ✅ |
+| **A3** | Per-op annotations: `chain_operation_annotations` table + REST CRUD + composite-key upsert; UI: ✎ pencil → dialog (force-internal / op_type / cost basis / note); e2e verified | ✅ |
+| **A4.1** | `manualOpType` override применён в `apply_annotations.ts` ПЕРЕД `buildLotsAndPositions` | ✅ |
+| **A4.2** | `manualCostBasisUsd` override применён в `handleSwap` / `handleTransferIn` / `handleBridgeIn` cross_protocol handlers | ✅ |
+| **A5** ✅ | Cycle-detection: `detectSelfBridgeCycles(pairs)` находит A→B→A self-bridge петли (origin wallet → hop wallet → back to origin) в окне ±7d. Source: уже-detected L2 `MatchedCrossChainPair[]`. Greedy match по family + reversed walletIds + chronological order. Возвращает `SelfBridgeCycle[]` с legA / legB / totalFeeUsd / durationSec. Service: `findSelfBridgeCycles(userId)`. REST: расширил `GET /graph/internal-transfers` полем `selfBridgeCycles[]` (optional, backward compat). Frontend zod schema добавил `graphSelfBridgeCycleSchema`. 7/7 cycle tests + 38/38 chain-ops + 714/714 API. Shipped 2026-05-16 |
+| **A5.2** ✅ | Multi-hop cycle detector: `detectMultiHopCycles(pairs)` — N-leg loops A→B→C→...→A через DFS на adjacency graph. Window 14d, max 6 legs (DDoS guard). Greedy pair-usage. `ChainOpsService.findMultiHopCycles` + REST extension с `multiHopCycles[]` field. Frontend zod `graphMultiHopCycleSchema`. 9/9 tests. Shipped 2026-05-16 |
+
+### Этап C — Полный граф через все источники
+
+| # | Задача |
+|---|--------|
+| **C1** ✅ | On-chain → CEX deposit seeding (5 TDD stages): S1 schema (migration 0020 `cex_deposit_seeds`) + repository (10 tests) → S2 service layer с batch validation, audit, `resolveCostBasisByHash` (11 tests) → S3 `CexCostBasisService.applyDeposit` accepts optional seeds map, pre-fetches batch ДО event loop, hits = exact USD via source='fiat-direct' (5 cost-basis + 185 CEX) → S4 REST `POST/GET/DELETE /v1/cex/deposit-seeds*` wired в app.ts (740/740 API) → S5 client `computeDepositSeedsFromOps` (incremental WAC tracker — fixes consume-mutation issue) + `useUpsertDepositSeeds` + auto-upload effect в LoadedWalletsProvider (debounced 3s) (7 + 158 portfolio). End-to-end: client считает WAC×amount → POST → server applyDeposit reads → CEX pool inherits → subsequent withdrawal обратно on-chain имеет правильный cost. Shipped 2026-05-16 |
+| **C2** ✅ | CEX A → CEX B hop chains (2 TDD stages): S1 pure `detectCexHopChains(inbound, outbound)` — greedy chronological matching by walletId + tokenFamily, window ≤30d, idempotent (10 tests). S2 `ChainOpsService.findCexHopChains` — pulls CEX transfers with hash + on-chain transfer/bridge ops, joins by lowercase tx_hash, classifies as inbound (CEX wd → wallet) или outbound (wallet → CEX dep), runs detector + audit log. REST: `/v1/chain-ops/graph/internal-transfers` extended с `cexHopChains[]` (optional, backward compat). Frontend zod `graphCexHopChainSchema` + `GraphCexHopChain` type. 750/750 API + 158/158 web. End-to-end C1+C2: client считает WAC через D3-seeded lots → POSTs seed → applyDeposit recognizes → wallet inherits cost basis → next withdraw chains back. Shipped 2026-05-16 |
+| **C3** ✅ | Global timeline UI: новая страница `/timeline` + nav item "Лента событий" (RU/EN i18n). Merge'ит ops через все loaded wallets, sort по времени desc, лимит 100/page с "load more". Filters: chain / wallet / op type / search (hash/wallet/symbol). Toggle "show excluded" (D8). Per-row: time / wallet link / chain badge / op type badge (с цветом per OpType + ✎ если manual override) / movements chips (+/− amount symbol USD) / netUsd / shortened hash + $ indicator если manual cost basis. 4 KPI stats: total / filtered / excluded / manual overrides. Excluded ops серые + line-through. 151/151 portfolio tests + typecheck clean. Shipped 2026-05-16 |
+| **C3.2** ✅ | CEX-side events на timeline: discriminated union `UnifiedFeedItem = OnChainFeedItem \| CexFeedItem`. CexFeedItem источники: `useCexTaxEvents` (sale/exchange/income) + `useCexTransfersWithHash` (deposit/withdrawal). Renders на purple-tinted row, exchange badge вместо wallet. Toggle "Включить CEX events" + counter. Backward compat: filters chain/wallet не применяются к CEX rows. Shipped 2026-05-16 |
+| **C4** ✅ | Provenance trail UI: PositionDetailPage расширен секцией "Cost basis provenance" — per supply-token показывает lot breakdown через `newTrackers.lotsByWallet.get(walletId).getLots(walletId, symbol)`. Summary: разноцветные badges группированные по `acquiredVia` (Buy / Swap / Transfer / Reward / Bridge / LP close / …) с % share от total cost. Detailed lot table: date / source badge / amount / cost per unit / total cost (+ FMV badge для D6 reward lots) / shortened tx hash. 11 acquiredVia variants с unique цветом + tooltip объясняющим методологию. UCB D6 reward лоты явно помечены как cost=0 + FMV preserved. 151/151 portfolio tests, typecheck clean. Shipped 2026-05-16 |
+| **C5** ✅ | UCB pipeline orchestrator `ucb_pipeline.ts`: `runUcbPipelineForWallet(input)` — single entry point с fixed step order (1. applyAnnotations+D8 → 2. buildLots(+Positions если walletNameById) → 3. computeRealizedPnlByFamily → 4. computeRewardIncomeByFamily). C5.2: `runUcbPipeline(inputs[])` cross-wallet aggregator (realizedByFamily / rewardIncomeByFamily / totalExclusions). C5.3: AssetsPage переключён на `runUcbPipeline` — раньше realized PnL не уважал D8 exclusions (bug fix). C5.4: `LoadedWalletsProvider.newTrackers` мигрирован — `buildLotsAndPositions` + manual cost basis annotation merging теперь живут внутри orchestrator. Provider expose'нул `annotationsByKey` + `costBasisOverrideByHash` для downstream consumers. Поддержан `walletIdForAnnotations` чтобы handle composite-id (api:UUID:addr) ≠ UUID asymmetry. 15/15 ucb_pipeline tests + 151/151 portfolio. Shipped 2026-05-16 |
+
+### Этап D — Correctness (точность учёта)
+
+| # | Задача |
+|---|--------|
+| **D1** ✅ | Withdrawal fees split: server-side `applyWithdrawal` теперь consume'ит `amount + feeAmount` из pool (когда feeCurrency == asset) или из two pools (cross-currency fee, e.g. BNB fee for BTC withdrawal). `WithdrawalCostBasis` расширен полями `feeLossUsd / feeAsset / feeAmount` (realized loss at withdrawal). Stable-fee approximation 1:1 для случая когда fee pool пуст (fresh deposit). Frontend zod schema добавил optional fields (backward compat). Invariant `costBasisUsd + feeLossUsd = totalCostRemoved` enforced в tests. 8/8 cost-basis tests + 707/707 API + 129/129 portfolio. Shipped 2026-05-16 |
+| **D2** ✅ | Historical FX RUB/EUR→USD для P2P в non-USD фиате. `HistoricalFxService` reuses `historical_prices` table (symbol = ISO-4217), source = exchangerate.host (free, no key), batch-fetch перед applyP2p чтобы compute loop оставался sync. Fallback на stable-1:1 если upstream down или нет данных. 8/8 unit tests, no cost-basis regression. Shipped 2026-05-16 (forward-looking — bob не имеет non-USD P2P, но SaaS robustness для EUR/RUB users) |
+| **D3** ✅ | Receipt-token UCB integration: server-derived CEX inheritance cost basis (`cexCostBasisByHash`) теперь feed'ится в `buildLotsAndPositions` через `costBasisOverrideByHash`. Lot tracker строит aWBTC/aETH/aUSDC лоты с правильным cost вместо derived market price. Manual A4 annotations имеют precedence над server-derived. Shipped 2026-05-16 |
+| **D4** ✅ | Wrapped tokens & LSTs chain-aware: `tokenFamily()` теперь фолдит 16 ETH LSTs (stETH/wstETH/rETH/cbETH/eETH/weETH/ezETH/wbETH/oETH/swETH/ankrETH/osETH/mETH/rswETH/rsETH/sfrxETH+frxETH) → ETH и 11 BTC variants (LBTC/EBTC/FBTC/MBTC/solvBTC/stBTC/pumpBTC/uniBTC/...) → BTC. Savings stables: sDAI → DAI, sUSDS → USDS. Lot-tracker `normalizeSymbol` НЕ затронут (WETH→ETH only) — каждый LST хранит свой precise cost basis отдельно, фолдинг работает только на display layer (E1 AssetsPage, realized PnL aggregation). API tokenFamily оставлен узким (без LST folding) чтобы не False-match'ить internal transfers. 52/52 new + 129/129 portfolio + 703/703 API tests. Shipped 2026-05-16 |
+| **D5** ✅ | Cross-chain bridges: `lastBridgeOutWac` state propagates pre-consume WAC из bridge_out в matching bridge_in. Both build.ts и cross_protocol.ts handlers. Bridge fee автоматически списывается через consume на out-side с старой WAC. 4/4 unit tests, 45/45 portfolio tests. Shipped 2026-05-16 |
+| **D6** ✅ | Yield/staking rewards classification: новый `AcquiredVia: "received_as_reward"`, reward лоты создаются с `costPerUnitUsd = 0` (UCB-correct), FMV at receipt сохраняется в `Lot.fmvAtAcquisitionUsd` для income reporting. Sale reward'а → full proceeds как realized gain (убран `consumed.totalCostUsd > 0` guard в realized_pnl swap-handler). Новый aggregator `computeRewardIncomeByFamily` + 5-я KPI карточка "Reward income" на AssetsPage (амбер). `applyRebaseYield` тоже переехал на `received_as_reward`. 20/20 D6 tests + 77/77 portfolio + 703/703 API. Shipped 2026-05-16 |
+| **D7** ✅ | Net cost basis для lending с borrow: `OpenPosition.netStartUsd` = startUsd − borrow proceeds + repay outlay. Computed via `computeBorrowProceedsUsd(ops, protocolId, chain)`. UI: позиции с meaningful borrow gap (>1%) показывают "net $X · L×" под gross startUsd. 5/5 unit tests. Shipped 2026-05-16 |
+| **D8** ✅ | Manual corrections / soft-delete UCB-aware: migration 0019 добавил `excluded BOOLEAN NOT NULL DEFAULT false` в `chain_operation_annotations` + partial index `WHERE excluded = TRUE`. Annotations repo/service/routes пробрасывают поле. Frontend zod schema + AnnotationUpsertBody добавили optional `excluded` (backward compat). `applyAnnotationsToOps` теперь фильтрует ops где `excluded=true` ДО `buildLotTrackerFromOps` — op исчезает из UCB pipeline (lots tracker, position tracker, asset rollup, realized PnL). `OpAnnotationDialog` имеет красный checkbox "Исключить из UCB-pipeline (soft-delete)". 7/7 apply_annotations tests + 136/136 portfolio + 707/707 API. Shipped 2026-05-16 |
+| **D9** ✅ | Historical price fallback: `priceFromMapNearest` ищет ближайший bucket ±7d того же coin когда exact-bucket miss. Wired в `movementUsd` (build.ts) + `tokenUsdHist` (cross_protocol.ts). Sparse hist-data for редких токенов теперь даёт approximate cost basis вместо 0. 7/7 unit tests, 57/57 portfolio tests. Shipped 2026-05-16 |
+
+### Этап E — UX-долг
+
+| # | Задача |
+|---|--------|
+| **E1** ✅ | Unified asset view: `/assets` page + nav link "Активы". `buildAssetRollup(loadedById, lotsByWallet)` aggregates по `tokenFamily` across all wallets. Per-row показывает total amount / WAC / cost basis / current USD / unrealized PnL %. Click-to-expand breakdown per (wallet × chain). Filters protocol receipts (aUSDC/GLV) и dust < $1. CEX-side в backlog (потребует server-side balance aggregation). 7/7 unit tests + i18n RU/EN. Shipped 2026-05-16 |
+| **E2** ✅ | Standalone position breakdown page: новый route `/positions/:positionId` + `PositionDetailPage.tsx`. Layout: header (protocol/chain/kind/age), KPI strip (cost basis с leverage badge / current / unrealized PnL / fees lifetime APR), supply tokens table с avg buy + per-token PnL, debt tokens (для lending) + health rate, V3 details (deposit / HODL / current / IL / PnL), fees claimed history table (date / tokens / USD / period APR / PnL since prev), provenance card (wallet link / opened tx / credit funded). Position id в /performance теперь Link к detail page. Грациозный 404 если позиция закрылась. 151/151 portfolio tests. Shipped 2026-05-16 |
+| **E3** ✅ | Realized vs unrealized PnL: `computeRealizedPnlByFamily(ops, walletId, overrides)` детектирует sale events (non-stable→stable swap + withdraw_fiat) и считает realized USD по семействам. Wired into AssetsPage: 4-я KPI карточка "Realized PnL" + новая колонка "Realized" в таблице. Token→token swaps НЕ реализуются (rebasis), transfer_out/bridge_out — тоже не реализация. 8/8 unit tests, 65/65 portfolio. Shipped 2026-05-16 |
+
+### Этап F — Operational stability
+
+| # | Задача |
+|---|--------|
+| **F1** ✅ | Production deploy: systemd units (`capflow-api.service`, `capflow-worker.service`) с hardening (NoNewPrivileges, ProtectSystem, RestrictNamespaces). `infra/scripts/backup-postgres.sh` + `capflow-backup.timer` (daily 03:00 UTC + retention + S3/rclone). `infra/scripts/healthcheck.sh` для external monitors. `notes/DEPLOY.md` § 9 расширен bare-metal runbook + pre-launch checklist (DNS / TLS / JWT / CORS / backup / smoke test). Shipped 2026-05-16 |
+| **F2** ✅ | Onboarding flow: 4-step wizard (`/onboarding`): welcome → jurisdiction selector → wallet connect CTA → CEX connect CTA. localStorage flag `capflow.onboarding.completed.v1` prevents re-prompt. `HomePage` auto-redirect новых users. Jurisdiction preference сохраняется для TaxPage default. Shipped 2026-05-16 |
+| **F3** ✅ | Health dashboard: server endpoint `GET /v1/admin/health` aggregates DB pool stats + Redis ping + BullMQ queue counts + wallets/CEX sync state, fail-soft per section. Admin page `/admin/health` с auto-refresh 15s, color-coded sections (ok/warn/error), overall status banner, uptime + node version. 766/766 API tests. Shipped 2026-05-16 |
+| **F-sync-hardening** ✅ | Bob hardening pass (4 fix'ов): #1 `syncTransfers` error persistence (markSyncError on partial failure), #3 auto-trigger B3 internal transfers (opportunistic chain в `syncTransfers`), #4 untracked destinations detector + REST graph extension, #5 CEX asset gap detector (`/v1/cex/me/asset-gaps`) + UI warning card на `/coverage`. 28 new tests · 796/796 API. Verified на bob's real data — нашёл 3 problematic assets (LTC 11.87× gap, EOS/BBSOL no-acquisitions) + 27/41 untracked destinations. Shipped 2026-05-17 |
+| **F-admin-fix** ✅ | Bug fix: 500 Internal Server Error на `/admin/users` page. Root cause: `db.execute<T>()` raw SQL возвращал `timestamptz` поля как **string** (vs Date в ORM `.select()`) — type parameter был только TS hint, не runtime parser. Затем `toAdminUserResponse(u).createdAt.toISOString()` крашился (string не имеет `.toISOString()`). Fix: defensive `toDate(v)` helper coerce'ит все timestamp поля (`created_at`, `updated_at`, `email_verified_at`, `last_login_at`, `last_snapshot_at`) в Date перед mapping. 5 new unit tests · 801/801 API. Shipped 2026-05-17 |
+
+### Этап Tax (после UCB Complete)
+
+| # | Задача |
+|---|--------|
+| **T1** ✅ | Per-lot `TaxEvent` generator: `generateTaxEvents(ops, walletId)` walk'ает chronologically, emit'ит events per disposition (sale=stable-out, exchange=token-to-token, income=reward). Per-lot detail via `LotTracker.consume()`. US-style term threshold ≥365d → 'long'. 11/11 tests. |
+| **T2** ✅ | CSV exporter: `exportTaxEventsToCsv(events)` — RFC 4180-compliant, ISO 8601 UTC dates, USD 2 decimals + amount 8 decimals. Plus `summarizeTaxEvents` aggregator (short/long gain, income, totals). 10/10 tests. |
+| **T3** ✅ | `/tax` page + nav item (RU/EN): 6 summary cards (events / short-term / long-term / income / proceeds / cost basis), filters (year / event type), filterable events table, CSV download button. Methodology disclaimer card. Annotations applied (D8 excluded, A3 overrides). 179/179 portfolio. Shipped 2026-05-16 |
+| **T1.1** ✅ | FIFO / LIFO / HIFO method selector. `LotMethodology` расширен 'HIFO' (consume highest cost first → tax-optimal). `generateTaxEvents(ops, walletId, method)` принимает 4 methodology. UI dropdown в `/tax` page. Tests: bear scenario verifies HIFO ≤ FIFO/LIFO/WAC. 16/16 tax_events tests. Shipped 2026-05-16 |
+| **T4** ✅ | CEX-side events merge: `CexTaxEventsService` (server) walks p2p + trades chronologically с WAC pool. Emit'ит sale (P2P sell crypto→fiat, trade non-stable→stable) + exchange (trade non-stable→non-stable). REST `GET /v1/cex/me/tax-events`. Client hook `useCexTaxEvents` + toggle "Include CEX events" в TaxPage. Synthetic txHash для CSV: `cex:<exchange>:<source>:<id>`. 7/7 service tests + 757/757 API + 184/184 web. Shipped 2026-05-16 |
+| **T5** ✅ | Per-jurisdiction rules: `JURISDICTIONS = ["US", "EU", "RU", "UK"]` с per-jurisdiction `longTermThresholdDays` (US/EU 365d, RU 1095d, UK Infinity), `allowedMethodologies` (US full, EU WAC/FIFO, RU FIFO/LIFO, UK WAC-only Section 104), `tokenToTokenTaxable`, `notes`. `generateTaxEvents` accept jurisdiction. UI dropdown auto-resets method если current не allowed. Jurisdiction-notes card. CSV filename `capflow-tax-<jur>-<method>-<year>.csv`. 12/12 jurisdictions tests + 16/16 tax_events + 196/196 web. Shipped 2026-05-16 |
+| Backlog | Audit log of recalcs, performance optimization |
+
+---
+
 ## ✅ Сделано
+
+### UCB Layer-2 — Position coverage aggregator (2026-05-15)
+
+Первый шаг UCB на клиенте: для каждой позиции (например POS-007 Aave
+V3 WBTC) собирается покрытие cost basis из 3 источников и считается
+blended WAC для `startUsd`.
+
+**Модули:**
+- `apps/web/src/lib/portfolio/position_coverage.ts` —
+  `computePositionCoverage()` раскладывает amount позиции на:
+  - `directBuy` — `affectsWac=true` events
+    (swap_from_stable/swap_from_token/fiat_buy)
+  - `cexInheritance` — `transfer_in` matched к CEX-withdrawal
+    (по lowercase tx-hash + asset match с WETH↔ETH normalization)
+  - `lpUnwind` — `lp_close_attribution` с inherited cost
+  - `unknown` — transfer_in без атрибуции
+  + `enrichPurchaseEventsForCoverage()` — обогащает события для popup'а
+  (с `costSource` пометкой; `includeUnmatched` режим для debug)
+- `apps/web/src/lib/portfolio/cex_inheritance_cost_basis_override.ts` —
+  `applyCexInheritanceCostBasisOverride()`: для позиций где direct buy
+  покрывает <95% — подменяет startUsd на `amount × blendedWac` (WAC по
+  всем известным источникам).
+- Cascade в `OpenPositionsPage`: V3 override → Lending FIFO override →
+  CEX inheritance override.
+- Popup `PurchaseHistoryPopup` теперь показывает все 3 источника + debug
+  «Перевод без атрибуции» для unmatched (с tooltip-инструкцией).
+
+**Vitest добавлен в apps/web** — `pnpm test` / `pnpm test:watch`. 41
+кейс по 2 модулям GREEN.
+
+**Что не покрыто:** cross-wallet transfer (этап A), on-chain → CEX
+deposit seeding (этап C). Если withdrawal с CEX, у которой пустой
+WAC-пул (как BingX без trade-permission у Bob), возвращается
+`source=unknown, costBasisUsd=0` — popup показывает «С биржи (нет
+cost)» с инструкцией пользователю.
+
+### CEX integrations (CCXT) — Bybit / OKX / Bitget / MEXC (2026-05-14)
+
+Подключение CEX-бирж API-ключом для синхронизации балансов и сделок.
+
+**Архитектура:**
+- **`apps/api/src/modules/cex/`** — модуль с тонкой обёрткой над CCXT.
+  - `cex.types.ts` — whitelisted `SUPPORTED_EXCHANGES` (bybit, okx, bitget, mexc),
+    типы `CexCredentials`, `CexPermissions`, `CexBalanceLine`, `CexTradeLine`.
+  - `cex.client.ts` — `createCexClient()` строит CCXT с `enableRateLimit=true`,
+    30s timeout, требует passphrase для OKX/Bitget. `probePermissions()`
+    делает behavioral-probe через `fetchBalance()` (CCXT не вытаскивает
+    permissions напрямую). `normalizeBalance()` flatten'ит nested-shape,
+    skip'ает meta-fields (info, free, used, total, debt). `normalizeTrade()`
+    синтезирует `cost = amount × price` если CCXT не вернул.
+  - `cex.service.ts` — `connect()`/`list()`/`disconnect()`/`sync()`. Probe'ит
+    read-perm, отказывает без него. Шифрует ключи AES-256-GCM (reuse
+    cipher из B5/`admin-integrations/secret-cipher.ts`, prefix `enc:v1:`).
+    `sync()` пишет balance snapshot (один row per asset per sync) +
+    upsert trades (idempotent по (cex_account_id, exchange_trade_id)).
+    Auth/network failures → `markSyncError`, returns `{ok:false}`.
+  - `cex.repository.ts` — Drizzle, три таблицы.
+  - `cex.routes.ts` — REST под `/api/v1/cex/` с JWT auth, Zod-валидацией.
+- **Migration `0010_cex_accounts.sql`** — `cex_accounts` (encrypted blobs +
+  permissions jsonb), `cex_balances` (snapshots с `(cex_account_id,
+  snapshot_at)` index), `cex_trades` (unique `(cex_account_id,
+  exchange_trade_id)` для идемпотентности re-sync).
+
+**Frontend:**
+- **`apps/web/src/features/cex/{api,hooks}.ts`** — Zod-schemas + 4 React
+  Query хука (list/connect/disconnect/sync).
+- **`apps/web/src/components/cex/CexExchangesPanel.tsx`** — встроен в
+  RegistryPage сразу после WalletList. Карточки подключённых бирж со
+  статусом lastSync/lastSyncError + кнопкой "Синхронизировать". Форма
+  подключения с per-exchange инструкциями ("как создать read-only ключ
+  на Bybit/OKX/Bitget/MEXC"). OKX/Bitget автоматически требуют поле
+  passphrase. UX следует паттернам WalletList — Card/CardHeader/
+  CollapsibleForm.
+
+**Безопасность:**
+- Ключи шифруются на сервере (AES-256-GCM с auth-tag), в БД хранятся
+  как `enc:v1:<iv>:<tag>:<ct>`. Plaintext не покидает память на
+  encrypt/decrypt path.
+- Connect-time probe требует `read`-permission; при `read=false`
+  отказываем БЕЗ insert'а в БД (нет смысла хранить мёртвый ключ).
+- `list()` strip'ает `apiKey/Secret/PassphraseEnc` до отправки клиенту.
+- Soft-delete (`archived_at`) — для audit-trail, при удалении ключи
+  остаются в БД но не светятся в `list()`/`sync()`.
+
+**Tests:** 26 проходит (17 cex.client + 9 cex.service). FakeRepo + DI
+factory позволяют тестировать без живых exchange'ей.
 
 ### Phase F6a — Dashboard reads from server snapshot (2026-05-13)
 

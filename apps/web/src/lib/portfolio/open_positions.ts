@@ -54,6 +54,8 @@ import { isStableSymbol } from "./protocols";
 import { isReceiptLessProtocol, isReceiptOfProtocol } from "./token_roles";
 import { supplyAmountsHash } from "./position_overrides";
 import { buildCostBasisTracker, CostBasisTracker } from "./cost_basis_tracker";
+import { buildLotTrackerFromOps } from "./lots/build";
+import type { LotTracker } from "./lots/lot_tracker";
 import { readPipelineSettings } from "./pipeline_settings";
 import type { LiveSnapshot, LiveProtocolPosition } from "./live";
 import type { ClassifiedOp, ProtocolInfo, TokenMovement } from "./types";
@@ -176,8 +178,23 @@ export interface OpenPosition {
   /** Токены в borrow (для lending). */
   debtTokens: { symbol: string; amount: number; usd: number }[];
 
-  /** Σ usd по supplyTokens.startUsd — сумма входа. */
+  /** Σ usd по supplyTokens.startUsd — сумма входа (gross collateral cost). */
   startUsd: number;
+  /**
+   * UCB D7: NET cash, который user реально вложил в позицию = startUsd −
+   * borrow proceeds at origin + repay outlay at origin. Для leveraged
+   * lending: supply $10k WETH + borrow $5k USDC → netStartUsd ≈ $5k
+   * (user'у было $5k извлечено через borrow). Для no-borrow позиций
+   * netStartUsd === startUsd.
+   *
+   * Источник: сумма borrow.inTokens.usd − repay.outTokens.usd по всем
+   * position events. USD считается по hist-price на момент события.
+   *
+   * Display layer показывает обе цифры: "Gross $10k · Net $5k (2× leverage)".
+   * APR/ROI calc'и могут опционально использовать netStartUsd для отражения
+   * leverage'а.
+   */
+  netStartUsd: number;
   /** Σ usd по supplyTokens.currentUsd — текущая стоимость залога. */
   currentUsd: number;
   /** Σ usd по debtTokens — текущий долг. */
@@ -377,6 +394,23 @@ interface BuildOptions {
       timestamp: number;
     }
   >;
+  /**
+   * UCB single-source-of-truth: per-wallet `LotTracker` from `lots/build.ts`.
+   * Когда передан — `buildSupplyToken` использует консумированные лоты для
+   * `startUsd`. Это устраняет расхождение между Lot-by-lot display и
+   * position summary.
+   */
+  lotsByWallet?: Map<string, import("./lots").LotTracker>;
+  /**
+   * Cost basis overrides keyed by tx hash (shared across wallets).
+   * Источник:
+   *   - UCB D3 (CEX inheritance cost basis from server)
+   *   - UCB A4 (manual `manualCostBasisUsd` annotations)
+   * Передаётся в fresh LotTracker replay внутри
+   * `computePositionConsumedCostFromLots` чтобы получить те же cost-per-unit
+   * как и в `newTrackers.lotsByWallet` (single source of truth).
+   */
+  costBasisOverrideByHash?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -800,15 +834,18 @@ function currentCycleDepositForSymbol(
   /** См. комментарий у findFirstOpen — фильтр по конкретному LP-маркету. */
   lpTokenId?: string,
   /**
-   * Исторические цены DefiLlama (часовой bucket). Если переданы — используем
-   * `amount × historical_price(time)` вместо `m.usd` (которое = `amount ×
-   * current_price` от DeBank, искажает старые ops).
-   *
-   * КРИТИЧНО: без этого позиция открытая 6 мес назад при ETH=$1500 считается
-   * сегодня при ETH=$4000 → startUsd инфлирована в 2.6× (баг новых кошельков
-   * 2026-05-09).
+   * Исторические цены DefiLlama (часовой bucket). Fallback когда tracker не
+   * имеет WAC для (symbol, time).
    */
   histPrices?: Map<string, number>,
+  /**
+   * UCB cost-basis tracker (cumulative WAC из swap-from-stable истории).
+   * ПРИОРИТЕТ при подсчёте USD per supply event. Это закрывает баг
+   * "swap overpay" (Vladimir POS-002): user заплатил $7000 за 2.2286 ETH
+   * (WAC $3141), market price был $2114 — старая логика брала $4713
+   * (market), теперь берёт $7000 (real cost). См. cost_basis_tracker.ts.
+   */
+  tracker?: CostBasisTracker,
 ): { amount: number; usd: number } {
   const target = normalizeSymbol(symbol);
   let amount = 0;
@@ -819,34 +856,39 @@ function currentCycleDepositForSymbol(
     if (!op.protocol || op.protocol.id !== protocolId) continue;
     if (op.chain !== chain) continue;
     if (openedAt != null && op.time < openedAt) continue;
-    // НЕ требуем OPEN_TYPES — берём любые out-движения с symbol которые
-    // ушли в адрес этого протокола (даже если op = "swap" / "unknown").
-    // Исключаем claim_rewards (это inbound rewards, не deposit).
     if (op.type === "claim_rewards") continue;
     if (!opMatchesLpMarket(op, lpTokenId)) continue;
     for (const m of op.movement) {
       if (m.direction !== "out" || m.amount <= 0) continue;
       if (normalizeSymbol(m.symbol) !== target) continue;
       amount += m.amount;
-      // Приоритет: historical price (DefiLlama hourly) > m.usd fallback.
+
+      // ─── price priority ────────────────────────────────────────────
+      // 1. **UCB cost basis** — tracker.avgAt(symbol, op.time): что user
+      //    реально заплатил за эти токены через swap-from-stable.
+      //    Это TRUE cost basis по UCB-инварианту.
+      // 2. Historical price (DefiLlama hourly): market price на момент
+      //    op — fallback когда tracker пуст (e.g. tokens получены
+      //    transfer_in / deposit_fiat без swap trail).
+      // 3. m.usd: DeBank's current spot (worst, often misleading
+      //    для старых ops).
       let priceAtTx: number | null = null;
-      if (histPrices && histPrices.size > 0) {
-        if (isStableSymbol(m.symbol)) {
-          priceAtTx = 1;
-        } else {
-          const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
-          if (coin) {
-            const hp = priceFromMap(histPrices, coin, op.time);
-            if (hp != null && hp > 0) priceAtTx = hp;
-          }
+      if (isStableSymbol(m.symbol)) {
+        priceAtTx = 1;
+      } else if (tracker) {
+        const wac = tracker.avgAt(m.symbol, op.time);
+        if (wac != null && wac > 0) priceAtTx = wac;
+      }
+      if (priceAtTx == null && histPrices && histPrices.size > 0) {
+        const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
+        if (coin) {
+          const hp = priceFromMap(histPrices, coin, op.time);
+          if (hp != null && hp > 0) priceAtTx = hp;
         }
       }
       if (priceAtTx != null) {
         usd += m.amount * priceAtTx;
       } else if (m.usd != null && m.usd > 0) {
-        // Diagnostic: warn в console когда падаем на DeBank current price.
-        // Это означает что DefiLlama не вернула historical для этого
-        // (chain, token, time) — startUsd позиции искажён.
         if (typeof window !== "undefined") {
           const ageDays = Math.floor((Date.now() / 1000 - op.time) / 86400);
           if (ageDays > 7) {
@@ -862,6 +904,119 @@ function currentCycleDepositForSymbol(
     }
   }
   return { amount, usd };
+}
+
+/**
+ * UCB single-source-of-truth: считает cost basis позиции через **fresh
+ * LotTracker replay**. Подходит для ВСЕХ типов позиций где underlying
+ * актив отдаётся в протокол:
+ *   - Lending (Aave / Fluid / Compound / Morpho / Spark)
+ *   - LP (Uniswap V3, Sushi, Curve, GMX V2 / GLV)
+ *   - Staking / Restaking (Lido, EigenLayer, Pendle)
+ *   - Vaults / Yearn-style
+ *
+ * Принцип: для каждой `lend_supply`, `lp_add`, `stake` op в этой позиции —
+ * выполняется `tracker.consume(symbol, amount, time)` на FRESH lot tracker,
+ * который accumulates ВСЕ acquisitions (swap-from-stable, transfer_in,
+ * deposit_fiat, claim_rewards, bridge_in) с правильным cost basis через
+ * D3 / A4 / D5 / D6 overrides из `costBasisOverrideByHash`.
+ *
+ * Возвращает суммарный consumed cost из всех lend_supply ops по этому
+ * (protocolId, chain, symbol) ИЛИ marketKey (lpTokenId если задан).
+ *
+ * Это даёт **точное соответствие** lot-by-lot display'ю в UI: сумма
+ * Σ (consumed.amount × consumed.costPerUnitUsd) = position.startUsd.
+ *
+ * Используется как preferred path в `buildSupplyToken`, fallback на
+ * legacy `currentCycleDepositForSymbol` если lot tracker не доступен.
+ */
+function computePositionConsumedCostFromLots(
+  ops: ClassifiedOp[],
+  walletId: string,
+  protocolId: string,
+  chain: string,
+  symbol: string,
+  openedAt: number | null,
+  lpTokenId: string | undefined,
+  histPrices: Map<string, number>,
+  costBasisOverrideByHash?: ReadonlyMap<string, number>,
+): { amount: number; usd: number } {
+  // Step-by-step walker: для каждого supply op в эту позицию ловим WAC
+  // в момент supply (BEFORE consume removes lots). Это даёт TRUE historical
+  // cost basis — устойчиво к full consume / pre-existing balance.
+  //
+  // Стратегия:
+  //   1. Sort ops chronologically.
+  //   2. Maintain incrementally-built LotTracker.
+  //   3. На каждый op:
+  //      a. ЕСЛИ это target supply (matched protocol/chain/symbol/marketKey)
+  //         → ДО consume читаем `tracker.wacAt(symbol, op.time)`,
+  //         сохраняем consumed cost = amount × wac.
+  //      b. Apply op to tracker (acquire / consume / etc.).
+  //   4. Return Σ consumed amounts/usd.
+  const target = normalizeSymbol(symbol);
+  const sorted = [...ops]
+    .filter((o) => o.status !== "failed" && !isJunkOp(o))
+    .sort((a, b) => a.time - b.time);
+
+  let totalAmount = 0;
+  let totalUsd = 0;
+
+  const incrementalOps: ClassifiedOp[] = [];
+  for (const op of sorted) {
+    // Check if THIS op is a target supply into our position.
+    const isTargetSupply =
+      op.protocol?.id === protocolId &&
+      op.chain === chain &&
+      op.type !== "claim_rewards" &&
+      opMatchesLpMarket(op, lpTokenId) &&
+      (openedAt == null || op.time >= openedAt) &&
+      op.movement.some(
+        (m) =>
+          m.direction === "out" &&
+          m.amount > 0 &&
+          normalizeSymbol(m.symbol) === target,
+      );
+
+    if (isTargetSupply) {
+      // BEFORE applying this op, build tracker через incremental ops so far.
+      const trackerNow = buildLotTrackerFromOps(incrementalOps, {
+        walletId,
+        histPrices,
+        ...(costBasisOverrideByHash &&
+          costBasisOverrideByHash.size > 0 && {
+            costBasisOverrideByHash: new Map(costBasisOverrideByHash),
+          }),
+      });
+      const wac = trackerNow.wacAt(walletId, symbol, op.time);
+
+      for (const m of op.movement) {
+        if (m.direction !== "out" || m.amount <= 0) continue;
+        if (normalizeSymbol(m.symbol) !== target) continue;
+        totalAmount += m.amount;
+        if (wac != null && wac > 0) {
+          totalUsd += m.amount * wac;
+        } else {
+          // Fallback: no tracker data → historical price → m.usd.
+          const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
+          let priceAtTx: number | null = null;
+          if (coin) {
+            const hp = priceFromMap(histPrices, coin, op.time);
+            if (hp != null && hp > 0) priceAtTx = hp;
+          }
+          if (priceAtTx != null) {
+            totalUsd += m.amount * priceAtTx;
+          } else if (m.usd != null && m.usd > 0) {
+            totalUsd += m.usd;
+          }
+        }
+      }
+    }
+
+    incrementalOps.push(op);
+  }
+
+  return { amount: totalAmount, usd: totalUsd };
 }
 
 /**
@@ -910,26 +1065,63 @@ function stripChainPrefix(id: string): string {
 }
 
 /**
- * Σ всех out-движений токена в адрес протокола за всю историю — нужен
- * для расчёта supply-yield лендинга: `current_amount − Σ deposited`.
+ * **Net** deposited amount = Σ out (deposits) − Σ in (withdrawals) for a
+ * (protocol, symbol) pair. Нужен для расчёта supply-yield лендинга:
+ *   `accrued = current_supply − net_deposited`
+ *
+ * **Историческая проблема (2026-05-14)**: ранее функция считала только
+ * `Σ out` (без минуса withdraw'ов). Для long-running позиции с deposit→
+ * withdraw→redeposit циклами `Σ deposited` уезжал выше `current_supply`,
+ * `accrued` получался отрицательным → `computeFees` возвращал null →
+ * UI показывал «набежавшие fee = 0» (POS-003 via.irk@gmail.com).
+ *
+ * Также фильтруем by op type: только supply/withdraw, чтобы случайный
+ * swap токена в Uniswap'е и т.п. не считался депозитом в Aave/Compound.
  */
 function depositAmountSum(
   ops: ClassifiedOp[],
   protocolId: string,
   symbol: string,
+  /**
+   * H8 (2026-05-14): chain filter.
+   *
+   * DeBank exposes Aave V3 on Polygon, Arbitrum, Mainnet etc. under the
+   * SAME `protocol.id` (e.g. "aave3"). Without filtering by chain,
+   * a multi-chain user with $100 deposited on Arbitrum + $200 on
+   * Mainnet would have a total `deposited = 300` and `live.supply
+   * = 100` on the Arbitrum row → `accrued = 100 - 300 = -200` →
+   * computeFees returns null → "набежавшие fee = 0" in UI.
+   *
+   * Made required (not optional) to prevent silent multi-chain bugs
+   * — callers MUST pass the chain.
+   */
+  chain: string,
 ): number {
-  let sum = 0;
+  const target = normalizeSymbol(symbol);
+  let deposited = 0;
+  let withdrawn = 0;
   for (const op of ops) {
     if (op.status === "failed") continue;
     if (isJunkOp(op)) continue;
     if (!op.protocol || op.protocol.id !== protocolId) continue;
+    if (op.chain !== chain) continue;
+    const isSupply =
+      op.type === "lend_supply" ||
+      op.type === "lp_add" ||
+      op.type === "stake";
+    const isWithdraw =
+      op.type === "lend_withdraw" ||
+      op.type === "lp_remove" ||
+      op.type === "unstake";
+    if (!isSupply && !isWithdraw) continue;
     for (const m of op.movement) {
-      if (m.direction !== "out" || m.amount <= 0) continue;
-      if (normalizeSymbol(m.symbol) !== normalizeSymbol(symbol)) continue;
-      sum += m.amount;
+      if (m.amount <= 0) continue;
+      if (normalizeSymbol(m.symbol) !== target) continue;
+      if (isSupply && m.direction === "out") deposited += m.amount;
+      else if (isWithdraw && m.direction === "in") withdrawn += m.amount;
     }
   }
-  return sum;
+  return Math.max(0, deposited - withdrawn);
 }
 
 /**
@@ -951,7 +1143,21 @@ function computeFees(
 } | null {
   if (isV3LpProtocol(lp.protocolName)) {
     const usd = lp.rewards.reduce((s, r) => s + r.usd, 0);
-    if (usd <= 0) return null;
+    if (usd <= 0) {
+      // Диагностика: V3 позиция должна иметь rewards в DeBank
+      // (`portfolio_item.detail.reward_token_list`), но пришло пусто.
+      // Возможные причины: DeBank ещё не индексировал, или DeBank
+      // вообще не отдаёт rewards для этого NFT (баг на их стороне).
+      if (typeof window !== "undefined") {
+        console.warn(
+          `[computeFees] V3 ${lp.protocolName}/${lp.chain} rewards empty ` +
+            `(supply=${lp.supply.map((s) => `${s.amount.toFixed(4)} ${s.symbol}`).join("+")}). ` +
+            `DeBank may not have indexed pending fees for this NFT yet — ` +
+            `try Refresh in 15-30 min.`,
+        );
+      }
+      return null;
+    }
     const byToken: OpenPosition["feesByToken"] = lp.rewards
       .filter((r) => r.amount > 0)
       .map((r) => ({
@@ -962,12 +1168,24 @@ function computeFees(
       }));
     return { feesUsd: usd, source: "v3_rewards", byToken };
   }
-  // Lending — yield по supply.
-  if (lp.category.toLowerCase().includes("lend")) {
+  // Rebase-style supply yield: aToken/cToken/fToken/etc. — amount растёт
+  // со временем благодаря начислению процентов. Покрываем lending +
+  // некоторые yield-protoколы где receipt тоже rebase-style.
+  const catLc = lp.category.toLowerCase();
+  const isRebaseStyle =
+    catLc.includes("lend") ||
+    catLc.includes("restaking") ||
+    // Liquid staking receipts (stETH, rETH) тоже растут rebase-style.
+    catLc.includes("staking");
+  if (isRebaseStyle) {
     let yieldUsd = 0;
     const byToken: OpenPosition["feesByToken"] = [];
+    const accruedDiag: string[] = [];
     for (const s of lp.supply) {
-      const deposited = depositAmountSum(ops, lp.protocolId, s.symbol);
+      const deposited = depositAmountSum(ops, lp.protocolId, s.symbol, lp.chain);
+      accruedDiag.push(
+        `${s.symbol}: current=${s.amount.toFixed(4)} net_deposited=${deposited.toFixed(4)}`,
+      );
       if (deposited <= 0) continue;
       const accrued = s.amount - deposited;
       if (accrued <= 0) continue;
@@ -982,7 +1200,18 @@ function computeFees(
           : null;
       byToken.push({ symbol: s.symbol, amount: accrued, usd, nativeApr });
     }
-    if (yieldUsd <= 0) return null;
+    if (yieldUsd <= 0) {
+      // Диагностика: положенно ждать accrual, но он 0 или отрицательный.
+      if (typeof window !== "undefined") {
+        console.warn(
+          `[computeFees] ${lp.protocolName}/${lp.chain} supply-yield = 0 ` +
+            `for category="${lp.category}". Per-symbol: ${accruedDiag.join("; ") || "(no supply)"}. ` +
+            `If current ≈ net_deposited, проценты ещё не накопились ИЛИ ` +
+            `protocol_id mismatch между live (${lp.protocolId}) и ops history.`,
+        );
+      }
+      return null;
+    }
     return { feesUsd: yieldUsd, source: "supply_yield", byToken };
   }
   return null;
@@ -1224,6 +1453,7 @@ export function buildOpenPositions(
         v3MintPoolPrices,
         v3MintCgPrices,
         consumedSet,
+        options?.costBasisOverrideByHash,
       );
       if (built) all.push(built);
     }
@@ -1423,7 +1653,8 @@ export function buildOpenPositions(
             t.startUsd = (t.startUsd / oldStartUsd) * newStartUsd;
           }
         }
-        p.netPnlUsd = p.currentUsd - p.startUsd - p.currentDebtUsd;
+        // H6: collateral-side PnL only.
+        p.netPnlUsd = p.currentUsd - p.startUsd;
         p.netPnlPct =
           p.startUsd > 0 ? (p.netPnlUsd / p.startUsd) * 100 : 0;
       }
@@ -1499,6 +1730,12 @@ function buildOne(
    * исключил (предотвращает дубль cost basis для unmatched NFT).
    */
   consumedMintHashes?: ReadonlySet<string>,
+  /**
+   * UCB single-source-of-truth: cost basis overrides from D3/A4. Передаётся
+   * в `computePositionConsumedCostFromLots` для построения accurate fresh
+   * LotTracker (с теми же overrides как `newTrackers.lotsByWallet`).
+   */
+  costBasisOverrideByHash?: ReadonlyMap<string, number>,
 ): OpenPosition | null {
   const { wallet, ops } = loaded;
   if (lp.supply.length === 0) return null;
@@ -1596,6 +1833,44 @@ function buildOne(
       };
     }
   }
+
+  // Диагностика: live позиция есть, но `opened` остался null после всех
+  // попыток. Это означает что в `ops` нет ни одного matching lp_add /
+  // lend_supply / stake / perp_open. Самые частые причины:
+  //   1) История DeBank /history усечена (превысили maxPages=50) — самый
+  //      ранний mint остался за пределами окна. Решение — увеличить
+  //      maxPages или fetch by chain.
+  //   2) NFT/receipt пришли через transfer от другого адреса — никакого
+  //      mint в этом кошельке не было. Решение — авто-detect такого случая.
+  //   3) protocol.id mismatch между live (`lp.protocolId`) и историей
+  //      (`op.protocol.id`). Логируем самплы для verification.
+  //   4) Cross-chain (live на L2, mint был на L1).
+  // Лог печатается ОДИН раз на позицию в dev-console, чтобы можно было
+  // быстро понять причину для конкретного POS-XXX.
+  if (!opened && typeof window !== "undefined") {
+    const sameProtoOps = ops.filter(
+      (o) =>
+        o.protocol?.id === lp.protocolId &&
+        o.chain === lp.chain &&
+        o.status !== "failed",
+    );
+    const opsByType = sameProtoOps.reduce<Record<string, number>>((acc, o) => {
+      acc[o.type] = (acc[o.type] ?? 0) + 1;
+      return acc;
+    }, {});
+    const allProtoIds = new Set(
+      ops.map((o) => o.protocol?.id).filter(Boolean),
+    );
+    console.warn(
+      `[open_positions] no opened-event for live ${lp.protocolName}/${lp.chain} ` +
+        `(${[...targetSyms].join("+")}) on wallet ${wallet.name}. ` +
+        `lp.protocolId="${lp.protocolId}" lp.lpTokenId="${lp.lpTokenId ?? ""}". ` +
+        `Same protoId+chain ops: ${sameProtoOps.length} (by type: ${JSON.stringify(opsByType)}). ` +
+        `Total ops on wallet: ${ops.length}. ` +
+        `Distinct protoIds present in ops: ${[...allProtoIds].slice(0, 20).join(",") || "(none)"}.`,
+    );
+  }
+
   const tracker = trackerByWallet.get(wallet.id);
 
   // V3-style concentrated liquidity → отдельная механика с IL.
@@ -1644,6 +1919,7 @@ function buildOne(
       s.symbol,
       filterLpTokenId,
       histPrices,
+      tracker, // Bob/Vladimir fix: pass cost-basis tracker для per-supply WAC
     );
     // Fallback без фильтра, если по конкретному маркету ничего не нашли
     // (DeBank pool.id не совпал с linkedLpTokenId / линкер не свёл пары).
@@ -1656,27 +1932,65 @@ function buildOne(
         s.symbol,
         undefined,
         histPrices,
+        tracker,
       );
     }
 
     let startUsd: number;
     let priceSource: OpenPositionToken["priceSource"];
 
+    // UCB single-source-of-truth (Vladimir POS-002 fix):
+    //
+    // **ПРИОРИТЕТ 1**: LotTracker-based — replays ops через fresh tracker
+    // с D3/A4/D5 overrides и захватывает cost basis консумированных лотов
+    // для lend_supply / lp_add ops в эту позицию. Это даёт ТОТ ЖЕ результат
+    // что lot-by-lot view в Purchase History popup — устраняет inconsistency
+    // между column sum и position summary.
+    //
+    // Lending (Aave / Fluid / Compound / Morpho / Spark), V3 LP, GMX V2 /
+    // GLV — ВСЕ позиции где underlying actively supplied используют этот path.
+    //
+    // **ПРИОРИТЕТ 2**: legacy cycleDeposit (WAC через CostBasisTracker) —
+    // fallback когда LotTracker replay вернул 0 (e.g. позиция в protocol
+    // без proper ops match).
+    //
+    // **ПРИОРИТЕТ 3**: avgAtOpen × s.amount — last-resort если ни один
+    // tracker не has data.
+    const overrideByHash = costBasisOverrideByHash;
+    const lotConsumed = isStable
+      ? { amount: 0, usd: 0 }
+      : computePositionConsumedCostFromLots(
+          ops,
+          wallet.id,
+          lp.protocolId,
+          lp.chain,
+          s.symbol,
+          opened?.time ?? null,
+          filterLpTokenId,
+          histPrices,
+          overrideByHash,
+        );
+
     if (
+      lotConsumed.usd > 0 &&
+      lotConsumed.amount > 0 &&
+      s.amount >= lotConsumed.amount * 0.5
+    ) {
+      if (s.amount >= lotConsumed.amount * 0.95) {
+        startUsd = lotConsumed.usd;
+      } else {
+        // Партиальный withdraw — пропорционально оставшейся доле.
+        startUsd = lotConsumed.usd * (s.amount / lotConsumed.amount);
+      }
+      priceSource = "cost_basis";
+    } else if (
       cycleDeposit.usd > 0 &&
       cycleDeposit.amount > 0 &&
-      // Позиция должна сохранять минимум 50% депозита — иначе была
-      // частичная выгрузка и нужно скейлить пропорционально.
       s.amount >= cycleDeposit.amount * 0.5
     ) {
-      // Если live.amount ≈ deposit.amount или больше — берём ровно ту USD,
-      // которая была вложена. Yield (live > deposit × 1.05) НЕ влияет на
-      // startUsd — он попадёт в "current − start" как priceOnlyPnl.
-      // Если live.amount меньше deposit (был частичный withdraw) — скейлим.
       if (s.amount >= cycleDeposit.amount * 0.95) {
         startUsd = cycleDeposit.usd;
       } else {
-        // Частичный withdraw — startUsd пропорционально оставшейся доле.
         startUsd = cycleDeposit.usd * (s.amount / cycleDeposit.amount);
       }
       priceSource = "cost_basis";
@@ -1895,6 +2209,12 @@ function buildOne(
       usd: b.usd,
     })),
     startUsd,
+    // UCB D7: net cost basis с учётом borrow leg. Для no-borrow позиций
+    // netStartUsd === startUsd.
+    netStartUsd: Math.max(
+      0,
+      startUsd - computeBorrowProceedsUsd(ops, lp.protocolId, lp.chain),
+    ),
     currentUsd,
     currentDebtUsd,
     healthRate: lp.healthRate ?? null,
@@ -1911,6 +2231,49 @@ function buildOne(
     creditFundedUsd: 0,
     ...(v3 ? { v3 } : {}),
   };
+}
+
+/**
+ * UCB D7: компонент net cost basis — Σ borrow proceeds минус Σ repay
+ * outlay для одной позиции (protocolId × chain). USD берётся из
+ * движения (m.usd) на момент события — это approximate market value
+ * заёма / погашения когда оно произошло.
+ *
+ * netStartUsd = startUsd (collateral cost) − borrowProceedsUsd
+ *
+ * Семантика: для leveraged lending user'у было extract'ed $X cash через
+ * borrow (минус то, что вернул через repay) — это уменьшает реальную
+ * "сумму вложения" в позицию. После full repay borrowProceedsUsd → 0
+ * и net == gross.
+ *
+ * Clamp Math.max(0, …) защитит от inverted ситуаций (repay > borrow,
+ * редко но возможно когда borrow начал ранее observable window).
+ */
+export function computeBorrowProceedsUsd(
+  ops: ClassifiedOp[],
+  protocolId: string,
+  chain: string,
+): number {
+  let net = 0;
+  for (const op of ops) {
+    if (op.status === "failed") continue;
+    if (!op.protocol || op.protocol.id !== protocolId) continue;
+    if (op.chain !== chain) continue;
+    if (op.type === "borrow") {
+      for (const m of op.movement) {
+        if (m.direction === "in" && m.amount > 0 && (m.usd ?? 0) > 0) {
+          net += m.usd ?? 0;
+        }
+      }
+    } else if (op.type === "repay") {
+      for (const m of op.movement) {
+        if (m.direction === "out" && m.amount > 0 && (m.usd ?? 0) > 0) {
+          net -= m.usd ?? 0;
+        }
+      }
+    }
+  }
+  return Math.max(0, net);
 }
 
 /**
@@ -2291,6 +2654,8 @@ function buildInferredPositions(
         supplyTokens,
         debtTokens: [],
         startUsd,
+        // UCB D7: inferred-history positions без debt — net == gross.
+        netStartUsd: startUsd,
         currentUsd,
         currentDebtUsd: 0,
         healthRate: null,
