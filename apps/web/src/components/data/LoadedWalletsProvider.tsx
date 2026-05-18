@@ -47,7 +47,7 @@ import type { LiveSnapshot } from "@/lib/portfolio/live";
 import { SOL_NATIVE_MINT } from "@/lib/portfolio/spl_tokens";
 import { classifyHistory } from "@/lib/portfolio/classifier";
 import { linkAsyncDeposits } from "@/lib/portfolio/async_deposit_linker";
-import { buildLotsAndPositions } from "@/lib/portfolio/positions";
+import { runUcbPipelineForWallet } from "@/lib/portfolio/ucb_pipeline";
 import type { LotTracker } from "@/lib/portfolio/lots";
 import type { PositionTracker } from "@/lib/portfolio/positions";
 import { classifyHeliusHistory } from "@/lib/portfolio/solana_classifier";
@@ -59,13 +59,26 @@ import type {
 import { useIntegrations } from "@/lib/integrations";
 import { useWallets, type SavedWallet, type WalletChain } from "@/lib/wallets";
 import { useAuth } from "@/features/auth/AuthProvider";
+import { chainOpsApi, type ChainOpInput } from "@/features/chain-ops/api";
+import {
+  useAnnotations,
+  useGraphInternalTransfers,
+} from "@/features/chain-ops/hooks";
 import {
   deleteWalletCache,
   readAllWalletCacheIds,
   readWalletCache,
+  setCacheUserScope,
   writeWalletCache,
 } from "@/lib/cache";
 import { findInternalTransferPairs } from "@/lib/portfolio/internal_transfers";
+import { computeFiatHopCostBasisOverrides } from "@/lib/portfolio/lots/fiat_hop_cost_basis";
+import {
+  useCexTransfersWithHash,
+  useCexWithdrawalCostBasis,
+  useUpsertDepositSeeds,
+} from "@/features/cex/hooks";
+import { computeDepositSeedsFromOps } from "@/lib/portfolio/deposit_seeds";
 import { fetchJupiterTokenMetaBatch } from "@/lib/jupiter_tokens";
 import { fetchDexScreenerTokenBatch } from "@/lib/dexscreener";
 import {
@@ -128,6 +141,23 @@ interface Ctx {
     >;
   };
   /**
+   * UCB C5.3: composite-key annotations map (`${walletId}|${txHash}|${logIndex}`)
+   * exposed for downstream consumers (AssetsPage и т.д.), которым нужно
+   * прогнать собственные UCB-аналитики через `runUcbPipeline`.
+   *
+   * Передаётся как-есть — каждый consumer сам решает что фильтровать.
+   * D8 exclusions гарантированно работают везде где этот map используется.
+   */
+  annotationsByKey: ReadonlyMap<string, import("@/features/chain-ops/api").ResolvedAnnotation>;
+  /**
+   * UCB C5.3: merged cost basis overrides по tx hash. Содержит CEX
+   * inheritance (D3) + manual annotations (A4.2). НЕ содержит bridge WAC
+   * (D5 computed inside lot tracker через state). По умолчанию это
+   * shared map — все wallets читают из одного places. Consumer'у нужно
+   * самому фильтровать per-wallet если нужно.
+   */
+  costBasisOverrideByHash: ReadonlyMap<string, number>;
+  /**
    * Загрузить кошелёк. По умолчанию — incremental: подтягивает только новые
    * операции, появившиеся после последней синхронизации (если кэш есть).
    * Передай `{ full: true }`, чтобы переподтянуть всё с нуля.
@@ -161,18 +191,18 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
   const wallets = useWallets();
   const { user } = useAuth();
 
-  // Гидратация из localStorage при первом рендере: данные уже загруженных
-  // кошельков восстанавливаются мгновенно, без API-запросов.
-  const [loadedById, setLoadedById] = useState<Record<string, Loaded>>(() => {
-    if (typeof window === "undefined") return {};
-    const ids = readAllWalletCacheIds();
-    const restored: Record<string, Loaded> = {};
-    for (const id of ids) {
-      const v = readWalletCache<Loaded>(id);
-      if (v) restored[id] = v;
-    }
-    return restored;
-  });
+  // Гидратация из localStorage — мы НЕ можем сделать её в useState
+  // инициализаторе, потому что `readAllWalletCacheIds` зависит от
+  // `currentUserId` в lib/cache.ts, а тот выставляется через
+  // `setCacheUserScope` в useEffect ниже (после первого рендера).
+  // Initializer бы возвращал пустой объект → bootstrap-effect видел
+  // пустой `loadedById` → запускал full sync через DeBank каждый
+  // page reload (M-2026-05-14 bug: пропадал баланс + жглись API-кредиты).
+  //
+  // Поэтому гидрация делается в useEffect-е ниже, который сначала
+  // ставит scope, потом читает кэш. Bootstrap ждёт через `hydrationDone`.
+  const [loadedById, setLoadedById] = useState<Record<string, Loaded>>({});
+  const [hydrationDone, setHydrationDone] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [progress, setProgress] = useState<LoadProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -208,8 +238,46 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
 
       // Инкрементальный режим: если кэш есть и full не запрошен — берём
       // только новые операции (после самой свежей в кэше).
-      const cached = options?.full ? null : loadedById[wallet.id];
+      let cached = options?.full ? null : loadedById[wallet.id];
+
+      // UCB B5.3 Phase 2 (inline): если client cache пуст (fresh device,
+      // первый заход после login, или RegistryPage auto-load для wallet'а
+      // которого bootstrap ещё не успел тронуть), пробуем server-side
+      // cache СИНХРОННО внутри load(). Это даёт:
+      //   1. Instant paint — UI получает ops до того как DeBank успеет
+      //      ответить (Phase 2 hydration goal).
+      //   2. knownHashes для delta-refresh — DeBank pull сразу стопится
+      //      на первой known op вместо full re-pull (B5.4).
+      //   3. Защиту от race с bootstrap effect (RegistryPage может дёрнуть
+      //      load до того как bootstrap эту wallet выберет).
+      if (!cached && !options?.full) {
+        const fromServer = await tryHydrateFromServer(wallet).catch(() => null);
+        if (fromServer && fromServer.ops.length > 0) {
+          cached = fromServer;
+          // Instant paint: ставим server-ops в loadedById сразу, до того как
+          // DeBank/Helius/CEX дернутся. UI отрисует cost basis / историю
+          // мгновенно — live tokens долетят позже в этом же `load()`.
+          setLoadedById((prev) =>
+            prev[wallet.id] ? prev : { ...prev, [wallet.id]: fromServer },
+          );
+        }
+      }
+
       const knownHashes = cached ? new Set(cached.ops.map((o) => o.hash)) : null;
+
+      // UCB B5.4: delta-refresh через server `latestOpTime`. Срабатывает
+      // только если ни client cache ни server-hydration не дали данных
+      // (всё пусто / explore-wallet / новый wallet). Это тонкий safety-net:
+      // даже если `tryHydrateFromServer` ничего не вернул, `latestOpTime`
+      // мог быть установлен из предыдущего sync без `raw` payload (legacy).
+      let serverLatestOpTime: number | null = null;
+      if (!cached && !options?.full) {
+        try {
+          serverLatestOpTime = await fetchServerLatestOpTime(wallet.id);
+        } catch {
+          serverLatestOpTime = null;
+        }
+      }
 
       try {
         let newOps: ClassifiedOp[];
@@ -250,8 +318,20 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
                   loaded: allHistory.length,
                 });
               },
-              ...(knownHashes && {
-                stopWhen: (it: DeBankHistoryItem) => knownHashes.has(it.id),
+              ...((knownHashes || serverLatestOpTime !== null) && {
+                stopWhen: (it: DeBankHistoryItem) => {
+                  // hash-based stop: дешёвый — точное совпадение по id.
+                  if (knownHashes && knownHashes.has(it.id)) return true;
+                  // time-based stop (B5.4): records `time_at <= latestOpTime`
+                  // уже синканы на сервере, дальше pagination бессмыслен.
+                  if (
+                    serverLatestOpTime !== null &&
+                    it.time_at <= serverLatestOpTime
+                  ) {
+                    return true;
+                  }
+                  return false;
+                },
               }),
             },
             ctrl.signal,
@@ -919,6 +999,17 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
         // следующем открытии.
         if (!wallet.id.startsWith("explore::")) {
           writeWalletCache(wallet.id, payload);
+          // UCB B5.3: fire-and-forget push ops в server-side cache. Это
+          // backup для cross-device access и foundation для server-side
+          // primary cache в Phase 2 (server reading instead of DeBank
+          // на каждый reload). Errors silently swallowed — client cache
+          // всё ещё работает как до B5.
+          pushOpsToServer(wallet.id, ops).catch((e) => {
+            console.warn(
+              `[chain-ops] backup to server failed for ${wallet.id}:`,
+              (e as Error).message,
+            );
+          });
         }
         return payload;
       } catch (e) {
@@ -1019,25 +1110,62 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
   // Hard-reset everything so Bob can't see Vladimir's loaded wallets,
   // and so the bootstrap effect below re-runs against the new user's
   // wallet list.
+  //
+  // ALSO does first-mount cache hydration here (after setCacheUserScope
+  // is called) — see comment on the useState declaration above for why
+  // we can't hydrate in the initializer.
   const lastUserIdRef = useRef<string | null>(null);
   useEffect(() => {
     const id = user?.id ?? null;
-    if (lastUserIdRef.current === id) return;
-    // Skip the very first transition (null → first user) — no stale
-    // state to drop, and we want bootstrap to run on initial load.
-    if (lastUserIdRef.current !== null) {
+    // Set per-user cache scope BEFORE any read/write — all wallet-cache
+    // functions short-circuit when no scope is set.
+    setCacheUserScope(id);
+    const isUserSwitch =
+      lastUserIdRef.current !== null && lastUserIdRef.current !== id;
+    if (isUserSwitch) {
+      // Drop previous user's data so Bob can't see Vladimir's wallets.
       for (const cid of readAllWalletCacheIds()) deleteWalletCache(cid);
       setLoadedById({});
       bootstrappedRef.current = false;
+      setHydrationDone(false);
     }
     lastUserIdRef.current = id;
-  }, [user?.id]);
+    // Hydrate from localStorage now that scope is set. Skip when no
+    // user (logged out) — there's nothing to read with no scope.
+    if (id !== null && !hydrationDone) {
+      const currentIds = new Set(wallets.list.map((w) => w.id));
+      const restored: Record<string, Loaded> = {};
+      for (const cid of readAllWalletCacheIds()) {
+        if (!currentIds.has(cid)) {
+          // Orphan cache entry from a previous user / removed wallet.
+          deleteWalletCache(cid);
+          continue;
+        }
+        const v = readWalletCache<Loaded>(cid);
+        if (v) restored[cid] = v;
+      }
+      if (Object.keys(restored).length > 0) {
+        setLoadedById((prev) => ({ ...restored, ...prev }));
+      }
+      // Mark hydrated only after we've seen at least one wallet — if
+      // wallets.list is still empty (server hydration in flight), wait
+      // for it before allowing bootstrap to fire. Without this guard
+      // bootstrap would run on the empty list, decide "nothing to do",
+      // and then never get a chance to use the cache once wallets arrive.
+      if (wallets.list.length > 0) {
+        setHydrationDone(true);
+      }
+    }
+  }, [user?.id, wallets.list, hydrationDone]);
 
   // Bootstrap: автоматически грузим только те кошельки, для которых нет кэша.
   // Если все уже в кэше — не делаем НИ ОДНОГО запроса.
-  // Пользователь увидит данные мгновенно, обновляться будет только по
-  // явной кнопке "Обновить".
+  //
+  // CRITICAL: ждём `hydrationDone` — иначе bootstrap бы запустился
+  // против пустого `loadedById` (initial state), даже если кэш в
+  // localStorage есть, и сжёг бы DeBank-кредиты на каждый reload.
   useEffect(() => {
+    if (!hydrationDone) return;
     if (bootstrappedRef.current) return;
     if (wallets.list.length === 0) return;
     bootstrappedRef.current = true;
@@ -1047,23 +1175,134 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
     void (async () => {
       for (const w of missing) {
         if (!keyFor(w.chain)) continue;
+        // UCB B5.3 Phase 2: пробуем server-side primary cache ДО DeBank
+        // pull. На fresh devices (или после `localStorage.clear()`) это
+        // даёт мгновенную гидратацию без жжения DeBank-кредитов.
+        // Errors silently swallowed — fall through к full `load()`.
+        const fromServer = await tryHydrateFromServer(w).catch(() => null);
+        if (fromServer) {
+          setLoadedById((prev) =>
+            prev[w.id] ? prev : { ...prev, [w.id]: fromServer },
+          );
+          // Кэшируем server-полученные ops в localStorage чтобы следующий
+          // reload был оффлайн-фастом без любого network round-trip.
+          if (!w.id.startsWith("explore::")) writeWalletCache(w.id, fromServer);
+          continue;
+        }
         await load(w);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallets.list]);
+  }, [wallets.list, hydrationDone]);
+
+  // UCB A1: server-side same-chain self-transfer pairs (Layer 1 — exact
+  // tx_hash match через chain_operations table). Загружается параллельно
+  // с client-side detector'ом, мерж'ится ниже. Подтягивается ТОЛЬКО когда
+  // user logged in и есть хотя бы 2 wallet'а — иначе нет смысла querying.
+  const graphQuery = useGraphInternalTransfers(
+    !!user?.id && wallets.list.length >= 2,
+  );
+  const serverInternalPairs = graphQuery.data?.pairs ?? [];
+  const serverCrossChainPairs = graphQuery.data?.crossChainPairs ?? [];
+
+  // UCB A3: user annotations — per-op overrides classifier'а / pair detector'а.
+  // Загружаем bulk + кэшируем 1min (мутации invalidate'ят). Применяем
+  // к `internalHashes` ниже и к `manualOpType`/`manualCostBasisUsd` —
+  // в downstream cost-basis pipeline (опциональная фича).
+  const annotationsQuery = useAnnotations(!!user?.id);
+  const annotations = annotationsQuery.data?.annotations ?? [];
+
+  // UCB D3: server-derived CEX inheritance cost basis per tx_hash.
+  // P2P fiat → trades → withdrawal → on-chain transfer_in: server считает
+  // WAC через всю CEX-цепочку и отдаёт `costBasisUsd` для каждого tx_hash.
+  // Эти данные feed'аются в LotTracker как cost basis override (handlers
+  // используют их вместо derived market price), что фиксит cost basis
+  // для всех downstream lending/LP позиций (POS-007 WBTC и т.п.).
+  const cexCostBasisQ = useCexWithdrawalCostBasis();
+  const cexCostBasisByHash = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of cexCostBasisQ.data ?? []) {
+      if (c.costBasisUsd > 0) {
+        m.set(c.txHash.toLowerCase(), c.costBasisUsd);
+      }
+    }
+    return m;
+  }, [cexCostBasisQ.data]);
 
   // Cross-wallet detection: пары internal-transfers между своими кошельками.
   // Пересчитывается мгновенно при любом изменении loadedById.
+  //
+  // Стратегия мержа с A1 server pairs:
+  //   1. Server pairs (Layer 1: exact tx_hash) — DETERMINISTIC, добавляем
+  //      первыми. Они работают cross-device — даже если client cache
+  //      хранит только один из двух wallets, server знает оба.
+  //   2. Client heuristic (Layer 2: time+amount fuzzy) — ловит cross-chain
+  //      bridges. Добавляем сверху, исключая hashes уже найденные L1.
   const internalPairs = useMemo(() => {
+    const merged: import("@/lib/portfolio/internal_transfers").InternalPair[] = [];
+    const seenHashes = new Set<string>();
+
+    // L1: server-side exact tx_hash pairs. Из `raw` восстанавливаем
+    // movement.amount / symbol для UI markers.
+    for (const p of serverInternalPairs) {
+      const outRaw = p.outRaw as ClassifiedOp | null;
+      const inRaw = p.inRaw as ClassifiedOp | null;
+      if (!outRaw || !inRaw) continue;
+      // Найдём первое out- и in-movement подходящих знаков
+      const outMov = outRaw.movement?.find((m) => m.direction === "out");
+      const inMov = inRaw.movement?.find((m) => m.direction === "in");
+      if (!outMov || !inMov) continue;
+      merged.push({
+        outHash: p.txHash,
+        inHash: p.txHash, // L1: один и тот же tx_hash on both sides
+        symbol: outMov.symbol,
+        outAmount: outMov.amount,
+        inAmount: inMov.amount,
+        fromWalletId: p.outWalletId,
+        toWalletId: p.inWalletId,
+        feeApprox: 0, // L1 same-chain → fee уже в gas, не в delta amount
+      });
+      seenHashes.add(p.txHash);
+    }
+
+    // L2 server (UCB A2): cross-chain fuzzy match через server `chain_operations`.
+    // Работает кросс-девайсно и не зависит от того, какие wallets гидратированы
+    // в текущей сессии. Преимущество перед client-heuristic — отрабатывает
+    // ДО первого browser-side `findInternalTransferPairs` запуска.
+    for (const p of serverCrossChainPairs) {
+      if (seenHashes.has(p.outTxHash) || seenHashes.has(p.inTxHash)) continue;
+      merged.push({
+        outHash: p.outTxHash,
+        inHash: p.inTxHash,
+        symbol: p.symbol,
+        outAmount: p.outAmount,
+        inAmount: p.inAmount,
+        fromWalletId: p.outWalletId,
+        toWalletId: p.inWalletId,
+        feeApprox: p.feeUsd,
+      });
+      seenHashes.add(p.outTxHash);
+      seenHashes.add(p.inTxHash);
+    }
+
+    // L2 client fallback: client heuristic для wallets / ops, которые
+    // ещё не попали на сервер (свежий load до того как Phase 1 push
+    // завершился). Skip pairs уже найденные server-side.
     const items: { op: ClassifiedOp; walletId: string }[] = [];
     for (const id of Object.keys(loadedById)) {
       const l = loadedById[id]!;
       for (const op of l.ops) items.push({ op, walletId: l.wallet.id });
     }
-    if (items.length === 0) return [];
-    return findInternalTransferPairs(items).pairs;
-  }, [loadedById]);
+    if (items.length > 0) {
+      const localPairs = findInternalTransferPairs(items).pairs;
+      for (const p of localPairs) {
+        if (seenHashes.has(p.outHash) || seenHashes.has(p.inHash)) continue;
+        merged.push(p);
+      }
+    }
+
+    return merged;
+  }, [loadedById, serverInternalPairs, serverCrossChainPairs]);
 
   const internalHashes = useMemo(() => {
     const set = new Set<string>();
@@ -1071,11 +1310,60 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
       set.add(p.outHash);
       set.add(p.inHash);
     }
+    // UCB A3: применяем user annotations поверх detector'а:
+    //   - `isInternalTransfer === true`  → ДОБАВЛЯЕМ op в set (override "no")
+    //   - `isInternalTransfer === false` → УДАЛЯЕМ op из set (override "yes")
+    //   - null/undefined → не трогаем (detector управляет)
+    for (const a of annotations) {
+      if (a.isInternalTransfer === true) set.add(a.txHash);
+      else if (a.isInternalTransfer === false) set.delete(a.txHash);
+    }
     return set;
-  }, [internalPairs]);
+  }, [internalPairs, annotations]);
 
-  // Этап 12: параллельный run новых LotTracker/PositionTracker per wallet.
-  // Пересчитывается при изменении loadedById. На existing UI не влияет.
+  // UCB A4: composite-key map для apply_annotations. Composite frontend
+  // wallet id (`api:<walletId>:<addressId>`) → wallet UUID; матчинг с
+  // resolved annotations идёт по wallet UUID.
+  const annotationsByKey = useMemo(() => {
+    const m = new Map<string, import("@/features/chain-ops/api").ResolvedAnnotation>();
+    for (const a of annotations) {
+      m.set(`${a.walletId}|${a.txHash.toLowerCase()}|${a.logIndex}`, a);
+    }
+    return m;
+  }, [annotations]);
+
+  // UCB C2: fiat-hop cost basis inheritance — закрывает gap для
+  // on-chain → CEX → on-chain циклов (withdraw_fiat ↔ deposit_fiat pairs).
+  // Существующий A2 internal-transfer matcher skip'аeт same-wallet и
+  // не propagate cost basis в любом случае. CEX D3 покрывает только
+  // случаи когда у user'а подключен CEX account. C2 — local pure-function
+  // детектор для всех остальных случаев.
+  //
+  // Priority при merge:
+  //   A4 manual (runUcbPipelineForWallet) > D3 CEX (server) > C2 fiat-hop (local).
+  // Server-validated CEX inheritance бьёт local heuristic; manual бьёт всё.
+  const fiatHopCostBasisByHash = useMemo(() => {
+    const opsByWallet = new Map<string, ClassifiedOp[]>();
+    for (const id of Object.keys(loadedById)) {
+      const l = loadedById[id]!;
+      const realWalletId = l.wallet.id.startsWith("api:")
+        ? (l.wallet.id.split(":")[1] ?? l.wallet.id)
+        : l.wallet.id;
+      opsByWallet.set(realWalletId, l.ops);
+    }
+    return computeFiatHopCostBasisOverrides(opsByWallet, cexCostBasisByHash);
+  }, [loadedById, cexCostBasisByHash]);
+
+  const mergedCostBasisByHash = useMemo(() => {
+    const m = new Map<string, number>(fiatHopCostBasisByHash);
+    for (const [k, v] of cexCostBasisByHash) m.set(k, v); // CEX overwrites fiat-hop
+    return m;
+  }, [fiatHopCostBasisByHash, cexCostBasisByHash]);
+
+  // UCB C5.4: per-wallet lot+position trackers через orchestrator.
+  // Раньше эта useMemo сама делала applyAnnotations → merge cost-basis →
+  // buildLotsAndPositions. Теперь весь pipeline за `runUcbPipelineForWallet`
+  // (single source of truth с D8 / A3 / A4 / D3 / C2 / D5 invariants).
   const newTrackers = useMemo(() => {
     const lotsByWallet = new Map<string, LotTracker>();
     const positionsByWallet = new Map<string, PositionTracker>();
@@ -1085,14 +1373,25 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
     }
     for (const id of Object.keys(loadedById)) {
       const l = loadedById[id]!;
+      // Composite frontend id (api:<uuid>:<address>) → wallet UUID для
+      // annotation matching. Lot/Position trackers keyed по composite id.
+      const realWalletId = l.wallet.id.startsWith("api:")
+        ? (l.wallet.id.split(":")[1] ?? l.wallet.id)
+        : l.wallet.id;
       try {
-        const { lots, positions } = buildLotsAndPositions(
-          l.ops,
-          l.wallet.id,
-          { walletNameById },
-        );
-        lotsByWallet.set(l.wallet.id, lots);
-        positionsByWallet.set(l.wallet.id, positions);
+        const result = runUcbPipelineForWallet({
+          walletId: l.wallet.id,
+          walletIdForAnnotations: realWalletId,
+          ops: l.ops,
+          annotationsByKey,
+          costBasisOverrideByHash: mergedCostBasisByHash,
+          resolvedAnnotations: annotations,
+          walletNameById,
+        });
+        lotsByWallet.set(l.wallet.id, result.lotTracker);
+        if (result.positionTracker) {
+          positionsByWallet.set(l.wallet.id, result.positionTracker);
+        }
       } catch (err) {
         console.warn(`[newTrackers] failed for wallet ${id}:`, err);
       }
@@ -1114,7 +1413,68 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
       };
     }
     return { lotsByWallet, positionsByWallet };
-  }, [loadedById]);
+  }, [loadedById, annotationsByKey, mergedCostBasisByHash, annotations]);
+
+  // ─── UCB C1: auto-upload deposit seeds ──────────────────────────────
+  // После того как `newTrackers` готов И мы знаем CEX deposit hashes —
+  // считаем cost basis для каждого matching transfer_out и батчем POSTим
+  // на server. Server использует их в `applyDeposit` чтобы CEX-side
+  // pool получил правильный cost basis вместо $0 / amount.
+  //
+  // Debounced 3s чтобы не штамповать requests на каждый рerender. Idempotent:
+  // повторный POST с теми же hash перезаписывает row через ON CONFLICT.
+  const cexTransfersQ = useCexTransfersWithHash();
+  const upsertSeeds = useUpsertDepositSeeds();
+  const cexDepositHashes = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of cexTransfersQ.data ?? []) {
+      if (t.direction === "deposit" && t.txHash) {
+        s.add(t.txHash.toLowerCase());
+      }
+    }
+    return s;
+  }, [cexTransfersQ.data]);
+
+  useEffect(() => {
+    if (cexDepositHashes.size === 0) return;
+    if (Object.keys(loadedById).length === 0) return;
+    // Debounce — wait for stable data before posting.
+    const tm = window.setTimeout(() => {
+      const allSeeds: Array<{
+        txHash: string;
+        chain: string;
+        costBasisUsd: number;
+        walletId: string | null;
+        note: string | null;
+      }> = [];
+      for (const l of Object.values(loadedById)) {
+        const realWalletId = l.wallet.id.startsWith("api:")
+          ? (l.wallet.id.split(":")[1] ?? l.wallet.id)
+          : l.wallet.id;
+        const tracker = newTrackers.lotsByWallet.get(l.wallet.id);
+        if (!tracker) continue;
+        const chain =
+          l.wallet.chain === "coinstats" ? "eth" : l.wallet.chain;
+        const seeds = computeDepositSeedsFromOps(
+          l.ops,
+          l.wallet.id,
+          chain,
+          tracker,
+          cexDepositHashes,
+        );
+        // Override walletId с real UUID (server uses it for provenance link).
+        for (const s of seeds) {
+          allSeeds.push({ ...s, walletId: realWalletId });
+        }
+      }
+      if (allSeeds.length === 0) return;
+      // Fire-and-forget; на error UI не блокируется (worst case — cost
+      // basis fallback на legacy).
+      upsertSeeds.mutate(allSeeds);
+    }, 3000);
+    return () => window.clearTimeout(tm);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadedById, cexDepositHashes, newTrackers.lotsByWallet]);
 
   const value = useMemo<Ctx>(
     () => ({
@@ -1131,6 +1491,8 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
       internalPairs,
       internalHashes,
       newTrackers,
+      annotationsByKey,
+      costBasisOverrideByHash: mergedCostBasisByHash,
     }),
     [
       loadedById,
@@ -1145,6 +1507,8 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
       internalPairs,
       internalHashes,
       newTrackers,
+      annotationsByKey,
+      mergedCostBasisByHash,
     ],
   );
 
@@ -1274,4 +1638,151 @@ export function enrichTokensWithCostBasis(
     tk.pnlUsd = pnlUsd;
     tk.pnlPct = pnlPct;
   }
+}
+
+/**
+ * UCB B5.3: батчевый push classified ops в server-side cache.
+ *
+ * Конвертирует `ClassifiedOp` (client shape) → `ChainOpInput` (transport
+ * shape для `POST /v1/chain-ops/:walletId/sync`). Каждый op идёт с
+ * `raw` = весь ClassifiedOp как frozen snapshot для server-side
+ * re-replay (graph traversal в этапе A1, orchestrator C5).
+ *
+ * Большие batches (>2000) разбиваются — у server max validation = 10000,
+ * но network/JSON-parse overhead заметный. 2000 — sweet spot для
+ * payload-size vs round-trips.
+ */
+const SYNC_BATCH_SIZE = 2_000;
+
+async function pushOpsToServer(
+  compositeId: string,
+  ops: readonly { hash: string; chain: string; time: number; type: string; status: string }[],
+): Promise<void> {
+  if (ops.length === 0) return;
+
+  // Frontend wallet ids are composite: `api:<walletId>:<addressId>` (см.
+  // useWalletsHydration.ts). Server `wallet_id` FK = `wallets(id)`, поэтому
+  // вытаскиваем walletId — это второй сегмент. Explore-wallets (`explore::…`)
+  // и legacy non-`api:` ids уже отфильтрованы на стороне caller'а, но на
+  // всякий случай проверяем формат.
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let walletId: string;
+  if (compositeId.startsWith("api:")) {
+    const parts = compositeId.split(":");
+    if (parts.length < 2) return;
+    walletId = parts[1] ?? "";
+  } else {
+    walletId = compositeId;
+  }
+  if (!uuidRe.test(walletId)) return;
+
+  const inputs: ChainOpInput[] = ops.map((op) => ({
+    chain: op.chain,
+    txHash: op.hash,
+    logIndex: 0,
+    opType: op.type,
+    opTime: Math.floor(op.time),
+    status: op.status || "ok",
+    raw: op,
+  }));
+
+  for (let i = 0; i < inputs.length; i += SYNC_BATCH_SIZE) {
+    const batch = inputs.slice(i, i + SYNC_BATCH_SIZE);
+    await chainOpsApi.syncBatch(walletId, batch);
+  }
+}
+
+/**
+ * UCB B5.4: возвращает `latestOpTime` из server-side cache в unix-seconds,
+ * или `null` если wallet ни разу не синканся (или composite id невалиден).
+ *
+ * Используется в `load()` как дополнительный stop-criterion для DeBank
+ * pagination когда client cache пуст. Скрывает все ошибки (network /
+ * 401 / композитный id explore::) — вызывающий просто пропускает
+ * delta-refresh и делает полный pull.
+ */
+async function fetchServerLatestOpTime(
+  compositeId: string,
+): Promise<number | null> {
+  if (compositeId.startsWith("explore::")) return null;
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let walletId: string;
+  if (compositeId.startsWith("api:")) {
+    const parts = compositeId.split(":");
+    if (parts.length < 2) return null;
+    walletId = parts[1] ?? "";
+  } else {
+    walletId = compositeId;
+  }
+  if (!uuidRe.test(walletId)) return null;
+
+  const s = await chainOpsApi.status(walletId);
+  if (!s.latestOpTime) return null;
+  const ms = Date.parse(s.latestOpTime);
+  if (!Number.isFinite(ms)) return null;
+  return Math.floor(ms / 1000);
+}
+
+/**
+ * UCB B5.3 Phase 2: server-side primary cache.
+ *
+ * Возвращает Loaded payload, восстановленный из `chain_operations` БД —
+ * используется в bootstrap effect перед тем, как звонить DeBank/Helius.
+ *
+ * Когда применимо:
+ *   - Fresh device: localStorage пуст, user logged in, server уже знает ops.
+ *   - После явного `localStorage.clear()` (Reset App).
+ *   - Multi-tab: первый tab пушит, остальные подхватывают без повторного pull.
+ *
+ * Возвращает `null` если:
+ *   - composite id не парсится (`explore::…` или legacy non-`api:` entry).
+ *   - Server вернул пустой массив (wallet ни разу не синхронился).
+ *   - Запрос упал (network/server error) — caller fallthroughs к full load().
+ *
+ * `live` НЕ восстанавливаем — на старте у нас нет live balance из БД (это
+ * UCB-агенда D8 / E1: state-cache). Поэтому UI до явного Refresh покажет
+ * историю и cost basis, но live баланс будет пустым.
+ */
+async function tryHydrateFromServer(
+  wallet: SavedWallet,
+): Promise<Loaded | null> {
+  if (wallet.id.startsWith("explore::")) return null;
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let walletId: string;
+  if (wallet.id.startsWith("api:")) {
+    const parts = wallet.id.split(":");
+    if (parts.length < 2) return null;
+    walletId = parts[1] ?? "";
+  } else {
+    walletId = wallet.id;
+  }
+  if (!uuidRe.test(walletId)) return null;
+
+  const rows = await chainOpsApi.list(walletId);
+  if (rows.length === 0) return null;
+
+  // `raw` хранится как JSONB — у нас там лежит полный ClassifiedOp
+  // (см. pushOpsToServer:raw: op). Восстанавливаем напрямую, без
+  // ре-классификации (источник правды — то, что классификатор сохранил
+  // во время первого pull). Если raw === null/missing (старые записи
+  // до Phase 1), пропускаем.
+  const ops: ClassifiedOp[] = [];
+  for (const r of rows) {
+    if (r.raw && typeof r.raw === "object") {
+      ops.push(r.raw as ClassifiedOp);
+    }
+  }
+  if (ops.length === 0) return null;
+
+  // Newest first для consistency с DeBank-pull-order (это важно для
+  // mergeOps / stop-on-known-hash логики).
+  ops.sort((a, b) => b.time - a.time);
+
+  const snapshot = buildSnapshot(wallet.id, wallet.address, ops);
+  return {
+    wallet,
+    ops,
+    snapshot,
+    loadedAt: Date.now(),
+  };
 }

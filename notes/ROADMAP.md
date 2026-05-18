@@ -1,9 +1,63 @@
 ---
-updated: 2026-05-18 (Open positions startUsd → LotTracker SoT)
+updated: 2026-05-18 (UCB C2 fiat-hop cost basis inheritance)
 ---
 
 
 # ROADMAP
+
+## 🔧 UCB C2 — fiat-hop cost basis inheritance (2026-05-18)
+
+**Systemic gap**: когда user снимает крипту с on-chain wallet'а на CEX
+(`withdraw_fiat`) и возвращает на другой chain / wallet (`deposit_fiat`),
+cost basis trail терялся. Existing A2 `findInternalTransferPairs` skip'аeт
+same-wallet pairs (создан для cross-wallet bridges), CEX D3 покрывает
+только подключенные CEX accounts. Между этими двумя — дыра.
+
+**Real case (via.irk@gmail.com Aug 12 2025)**:
+- 09:17 (eth) cowswap 9646 USDC → 2.149 ETH (WAC $4488)
+- 09:24 (eth) `withdraw_fiat` -2.163 ETH (to CEX)
+- 09:45 (arb) `deposit_fiat` +2.165 ETH (from CEX)
+- 10:02 (arb) `lend_supply` 2.154 ETH → Fluid
+
+После refactor'а LotTracker SoT (предыдущий fix) этот deposit_fiat
+получал cost = market m.usd ($2114/ETH × 2.165 = $4578). Реально user
+заплатил ~$9646 за эти ETH. Расхождение по POS-002 — $4488 × 2.165 vs
+$2114 × 2.165 = +$5140 cost basis недоучёта.
+
+**Fix**: `computeFiatHopCostBasisOverrides(opsByWallet, preExisting)` —
+pure function в `lots/fiat_hop_cost_basis.ts`:
+1. Собирает все `withdraw_fiat` (OUT) и `deposit_fiat` (IN) ops
+2. Матчит pairs: token family (`tokenFamily` → ETH/WETH=ETH), amount
+   tolerance ±5%/10%, time window ±6h, withdraw must precede deposit
+3. Greedy nearest-time: один withdraw → один deposit (closest match wins)
+4. Same-wallet AND cross-wallet оба валидны (CEX hop не различает)
+5. Для каждого match — строит fresh LotTracker на source ops EXCLUDING
+   этот withdraw_fiat (чтобы wacAt видел pre-consume state), читает
+   WAC at withdraw.time, возвращает `WAC × deposit.amount`
+6. Применяет уже-известные A4/D3 overrides при построении source tracker'а
+   — кост basis течёт через multi-hop chains
+
+Precedence в `LoadedWalletsProvider`: **A4 manual > D3 CEX (server) > C2
+fiat-hop (local)**. CEX D3 (server-validated через P2P trail) бьёт local
+heuristic; manual бьёт всё.
+
+| File | Change | Tests |
+|---|---|:-:|
+| `lots/fiat_hop_cost_basis.ts` | New module: `computeFiatHopCostBasisOverrides` | — |
+| `lots/fiat_hop_cost_basis.test.ts` | 7 TDD scenarios: Vladimir POS-002, cross-wallet, time-window, amount tolerance, dedup, WETH/ETH family, A4 chained | 7/7 ✅ |
+| `LoadedWalletsProvider.tsx` | Compute `fiatHopCostBasisByHash`, merge с `cexCostBasisByHash` (CEX wins), pass merged в `runUcbPipelineForWallet` | — |
+
+**Cumulative**: 205/205 portfolio tests · tsc clean.
+
+**Caveats v1** (для backlog C2.1):
+- Single-pass: source tracker строится с pre-existing overrides only.
+  Multi-hop chains (A→B→A→C) могут терять trail на 2+ hop. Solution:
+  iterative resolution to convergence
+- Greedy nearest-time match: если user снял $5000 и независимо купил
+  $5000 (одинаковая сумма) через 1 час — heuristic свяжет ложно.
+  Решение: manual A4 override
+- ±5%/10% + 6h окно намеренно strict; expand при появлении false
+  negatives на real data
 
 ## 🔧 Open positions startUsd → LotTracker single source of truth (2026-05-18)
 
