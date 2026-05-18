@@ -738,6 +738,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         service: upstreamProxy,
         apiUsage: apiUsageRepo,
         rateLimit: upstreamRateLimit,
+        wallets: walletsRepo,
         prefix: "/upstream",
       });
       await api.register(adminBillingRoutes, {

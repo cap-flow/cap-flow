@@ -357,6 +357,27 @@ const cexTaxEventsResponse = z.object({
   events: z.array(cexTaxEventSchema),
 });
 
+/**
+ * Security-hardening (2026-05-18): heavy CEX-sync endpoints each fan out
+ * into long-running CCXT calls that consume our admin-side request budget
+ * on the exchange (Bitget / BingX retail APIs have low per-key ceilings).
+ * Cap at 5 req/min keyed by req.user.id so one impatient client cannot
+ * burn through everyone's quota by re-clicking sync.
+ *
+ * `hook: "preHandler"` is critical: @fastify/rate-limit defaults to
+ * `onRequest`, which runs BEFORE auth preHandlers — meaning req.user
+ * would be undefined and we'd fall back to IP for everyone (shared
+ * bucket behind NAT). Re-binding to preHandler puts the limiter
+ * after `app.requireAuth`, so per-user keying actually works.
+ */
+const HEAVY_SYNC_LIMIT = {
+  max: 5,
+  timeWindow: "1 minute",
+  hook: "preHandler",
+  keyGenerator: (req: { user?: { id: string }; ip?: string }) =>
+    req.user?.id ?? req.ip ?? "anon",
+} as const;
+
 export async function cexRoutes(
   app: FastifyInstance,
   opts: CexRoutesOptions
@@ -458,7 +479,10 @@ export async function cexRoutes(
    */
   route.post(
     "/:id/transfers-sync",
-    { schema: { params: idParam, response: { 200: transfersSyncResponse } } },
+    {
+      schema: { params: idParam, response: { 200: transfersSyncResponse } },
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
+    },
     async (req) => {
       const u = req.user;
       if (!u) throw new UnauthorizedError();
@@ -474,6 +498,7 @@ export async function cexRoutes(
         params: idParam,
         response: { 200: internalTransfersSyncResponse },
       },
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
     },
     async (req) => {
       const u = req.user;
@@ -490,6 +515,7 @@ export async function cexRoutes(
         params: idParam,
         response: { 200: ledgerSyncResponse },
       },
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
     },
     async (req) => {
       const u = req.user;
@@ -681,6 +707,7 @@ export async function cexRoutes(
           body: depositSeedsUpsertBody,
           response: { 200: depositSeedsUpsertResponse },
         },
+        config: { rateLimit: HEAVY_SYNC_LIMIT },
       },
       async (req) => {
         const u = req.user;
@@ -761,7 +788,10 @@ export async function cexRoutes(
   /** Pull P2P (fiat) order history. Same shape as /sync. */
   route.post(
     "/:id/p2p-sync",
-    { schema: { params: idParam, response: { 200: p2pSyncResponse } } },
+    {
+      schema: { params: idParam, response: { 200: p2pSyncResponse } },
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
+    },
     async (req) => {
       const u = req.user;
       if (!u) throw new UnauthorizedError();
@@ -914,6 +944,7 @@ export async function cexRoutes(
         body: tradesCsvImportBody,
         response: { 200: tradesCsvImportResponse },
       },
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
     },
     async (req) => {
       const u = req.user;
@@ -944,6 +975,7 @@ export async function cexRoutes(
         body: p2pCsvImportBody,
         response: { 200: p2pCsvImportResponse },
       },
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
     },
     async (req) => {
       const u = req.user;
@@ -976,6 +1008,7 @@ export async function cexRoutes(
         params: idParam,
         response: { 200: syncResponse },
       },
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
     },
     async (req) => {
       const u = req.user;
@@ -1005,6 +1038,7 @@ export async function cexRoutes(
         params: idParam,
         response: { 200: reProbeResponse },
       },
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
     },
     async (req) => {
       const u = req.user;

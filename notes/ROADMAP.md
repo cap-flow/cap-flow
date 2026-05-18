@@ -342,6 +342,21 @@ bob@example.com (606 chain ops · 567 CEX trades · 41 transfers · 2 wallets ·
 ### Onboarding polish (2026-05-17)
 - Убрана строчка "Спросим про твою налоговую юрисдикцию" из welcome step `/onboarding` (по запросу пользователя — упрощение first-touch flow).
 
+## 🔒 Security hardening pre-prod (2026-05-18)
+
+Закрыли 4 уязвимости перед SaaS launch ([decisions/security-hardening-pre-prod.md](decisions/security-hardening-pre-prod.md)):
+
+| # | Issue | Severity | Fix |
+|---|---|:-:|---|
+| **S1** | IDOR в `/v1/upstream/:provider/*` — любой залогиненный юзер мог проксировать запрос с чужим on-chain адресом через админский API-ключ DeBank/Alchemy/Helius/Etherscan | 🔴 CRITICAL | `address-guard.ts` — per-provider extractor + `decide(req, owned, isAdmin)`. Admin bypass, malformed → 400, чужой → 403, audit в `api_usage`. 19 unit-тестов |
+| **S2** | Heavy-sync endpoints (`cex/*-sync`, `chain-ops/sync`) без rate-limit — мог сжечь Bitget/BingX квоты и DB | 🔴 CRITICAL | `HEAVY_SYNC_LIMIT` { max: 5/min, hook: "preHandler", key: user.id } на 11 эндпойнтов. 2 теста (включая per-user bucket separation) |
+| **S3** | `/auth/refresh` и `/auth/logout` без rate-limit | 🟠 HIGH | refresh: 30/15min IP-keyed; logout: 20/5min user/IP-keyed. 2 теста |
+| **S4** | `portfolio.refresh` beta-test ceiling `max: 1000` | 🟡 MEDIUM | Restored `max: 10` |
+
+**Cumulative**: 23 новых tests, 796/796 API tests pass.
+
+**Что осталось** (out of scope этого раунда): глобальный rate-limit с user-keyed default, Redis-кэш owned-addresses (после нагрузочных), httpOnly cookie audit recap, CSP-header policy, линтер на `config.rateLimit` на новых POST.
+
 ### Backlog после Bob hardening (low-priority polish)
 
 | # | Что | Severity | Когда делать |
