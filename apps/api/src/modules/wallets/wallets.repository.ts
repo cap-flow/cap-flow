@@ -128,6 +128,37 @@ export class WalletsRepository {
   }
 
   /**
+   * Return all on-chain addresses owned by a given user, across all their
+   * accounts and wallets. Used by the upstream-proxy IDOR guard to ensure
+   * users can only scan their own addresses through admin-side API keys.
+   *
+   * No filtering on `archived_at` — accounts and wallets currently have
+   * no archival on the wallet side; if archived accounts surface later
+   * we want users to still be able to read history for their own
+   * addresses. The guard cares about authorization, not active-state.
+   */
+  async listAddressesByOwner(
+    ownerId: string
+  ): Promise<Array<{ address: string; type: WalletAddressRow["type"] }>> {
+    const rows = await this.db
+      .select({
+        address: schema.walletAddresses.address,
+        type: schema.walletAddresses.type,
+      })
+      .from(schema.walletAddresses)
+      .innerJoin(
+        schema.wallets,
+        eq(schema.wallets.id, schema.walletAddresses.walletId)
+      )
+      .innerJoin(
+        schema.accounts,
+        eq(schema.accounts.id, schema.wallets.accountId)
+      )
+      .where(eq(schema.accounts.ownerId, ownerId));
+    return rows;
+  }
+
+  /**
    * Resolve an address row + its wallet's account_id in one query. Used
    * by the tenant-isolation guard in routes — we never trust a raw
    * `addressId` from the URL alone.

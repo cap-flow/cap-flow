@@ -99,10 +99,13 @@ export async function portfolioRoutes(
         response: { 202: refreshResponseSchema },
       },
       config: {
-        // Beta-test mode: ceiling raised so admin/QA can hammer manual
-        // refresh while shaking out the SaaS pipeline. Restore to a
-        // tighter cap (e.g. max: 10 / 1 minute) before public launch.
-        rateLimit: { max: 1000, timeWindow: "1 minute" },
+        // Pre-prod (2026-05-18, security-hardening): restored production
+        // ceiling. Manual portfolio refresh fans out into DeBank /
+        // Alchemy / Helius calls that hit admin-paid quotas — a tight
+        // per-user cap blocks both runaway clients and intentional
+        // quota-burn. Admin/QA can still hammer via /upstream/* directly
+        // (subject to upstream-proxy rate-limit).
+        rateLimit: { max: 10, timeWindow: "1 minute" },
       },
     },
     async (req, reply) => {

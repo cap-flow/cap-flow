@@ -14,7 +14,14 @@ import type { FastifyInstance } from "fastify";
 
 import { UnauthorizedError } from "../../core/errors.js";
 import type { ApiUsageRepository } from "../api-usage/api-usage.repository.js";
+import type { WalletsRepository } from "../wallets/wallets.repository.js";
 
+import {
+  buildOwnedSet,
+  decide,
+  type OwnedAddressSet,
+  type ProxyRequestForGuard,
+} from "./address-guard.js";
 import type { UpstreamRateLimitService } from "./rate-limit.js";
 import {
   UpstreamProxyError,
@@ -26,6 +33,8 @@ interface UpstreamProxyRoutesOptions {
   readonly service: UpstreamProxyService;
   readonly apiUsage: ApiUsageRepository;
   readonly rateLimit: UpstreamRateLimitService;
+  /** IDOR guard: confirms forwarded addresses belong to caller. */
+  readonly wallets: WalletsRepository;
 }
 
 const SUPPORTED_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"] as const;
@@ -98,6 +107,52 @@ export async function upstreamProxyRoutes(
           ? { body: req.body }
           : {}),
       };
+
+      // IDOR guard — every blockchain address forwarded upstream must
+      // belong to the caller (or caller must be admin). Without this
+      // any authenticated user can scan any wallet at our quota's
+      // expense.
+      const guardReq: ProxyRequestForGuard = {
+        provider,
+        method,
+        path: upstreamPath,
+        query,
+        body: req.body,
+      };
+      // In-request memoize: a chained walker may call us multiple
+      // times in one HTTP request, but we don't want to keep hitting
+      // the DB. Stash the lazy on `req` itself.
+      const reqAny = req as unknown as {
+        __ownedSet?: Promise<OwnedAddressSet>;
+      };
+      if (!reqAny.__ownedSet) {
+        reqAny.__ownedSet = opts.wallets
+          .listAddressesByOwner(u.id)
+          .then((rows) => buildOwnedSet(rows));
+      }
+      const ownedSet = await reqAny.__ownedSet;
+      const guard = decide(guardReq, ownedSet, {
+        isAdmin: u.role === "admin",
+      });
+      if (guard.kind !== "allow") {
+        const status = guard.kind === "malformed" ? 400 : 403;
+        // Audit the rejection so admin can see scraping attempts.
+        void opts.apiUsage
+          .insert({
+            userId: u.id,
+            accountId: null,
+            provider: `upstream:${provider}`,
+            endpoint: `${method} ${upstreamPath.slice(0, 200)}`,
+            httpStatus: status,
+            durationMs: 0,
+            cacheHit: 0,
+            error: guard.kind,
+          })
+          .catch(() => undefined);
+        return reply
+          .code(status)
+          .send({ error: guard.kind, message: guard.message });
+      }
 
       const t0 = Date.now();
       let httpStatus = 0;

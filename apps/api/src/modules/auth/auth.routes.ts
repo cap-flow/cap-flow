@@ -91,6 +91,16 @@ export async function authRoutes(
       schema: {
         response: { 200: loginResponseSchema },
       },
+      config: {
+        // /refresh is not pre-authed (it *establishes* the auth), so we
+        // can't key by req.user. IP is the right granularity here:
+        // protects against a runaway client looping refresh+login and
+        // against drive-by brute-force of stolen refresh cookies. 30
+        // req/15min comfortably exceeds normal token-rotation traffic
+        // (default access TTL is ~15min, so a session refreshes ~once
+        // per 15min; 30× headroom for multi-tab and reconnects).
+        rateLimit: { max: 30, timeWindow: "15 minutes" },
+      },
     },
     async (req, reply) => {
       const cookie = req.cookies[REFRESH_COOKIE_NAME];
@@ -116,13 +126,33 @@ export async function authRoutes(
     }
   );
 
-  route.post("/logout", {}, async (req, reply) => {
-    const cookie = req.cookies[REFRESH_COOKIE_NAME];
-    await app.auth.logout(cookie);
-    clearRefreshCookie(reply, cookieCfg);
-    clearAccessCookie(reply, accessCookieCfg);
-    return reply.status(204).send();
-  });
+  route.post(
+    "/logout",
+    {
+      // Logout is user-initiated and idempotent, so we keep the ceiling
+      // generous (20/5min) — well above any realistic click rate but low
+      // enough that an attacker can't loop /logout to mass-invalidate
+      // sessions if they ever steal a refresh cookie. Keyed per (user
+      // when known, else IP) — req.user is only populated when a valid
+      // bearer/access cookie is present; logout is otherwise rate-keyed
+      // by source IP as a safe default.
+      config: {
+        rateLimit: {
+          max: 20,
+          timeWindow: "5 minutes",
+          keyGenerator: (req: { user?: { id: string }; ip?: string }) =>
+            req.user?.id ?? req.ip ?? "anon",
+        },
+      },
+    },
+    async (req, reply) => {
+      const cookie = req.cookies[REFRESH_COOKIE_NAME];
+      await app.auth.logout(cookie);
+      clearRefreshCookie(reply, cookieCfg);
+      clearAccessCookie(reply, accessCookieCfg);
+      return reply.status(204).send();
+    }
+  );
 
   route.get(
     "/me",

@@ -155,6 +155,25 @@ const graphInternalTransfersResponse = z.object({
   untrackedDestinations: z.array(graphUntrackedDestination).optional(),
 });
 
+/**
+ * Security-hardening (2026-05-18): `POST /:walletId/sync` accepts up to
+ * 10 000 classified ops in a single batch and triggers a CTE-heavy
+ * insert + cost-basis recompute. Cap at 5 req/min per user — far above
+ * normal post-Refresh sync cadence (~1 req per wallet per minute) but
+ * blocks both runaway clients and intentional DB-storm attempts.
+ *
+ * `hook: "preHandler"` re-binds the limiter to run after auth, so
+ * `req.user.id` is set when keyGenerator fires (see cex.routes.ts for
+ * the long-form rationale).
+ */
+const HEAVY_SYNC_LIMIT = {
+  max: 5,
+  timeWindow: "1 minute",
+  hook: "preHandler",
+  keyGenerator: (req: { user?: { id: string }; ip?: string }) =>
+    req.user?.id ?? req.ip ?? "anon",
+} as const;
+
 export async function chainOpsRoutes(
   app: FastifyInstance,
   opts: RouteOptions,
@@ -170,6 +189,7 @@ export async function chainOpsRoutes(
         body: syncBatchBody,
         response: { 200: syncBatchResponse },
       },
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
     },
     async (req) => {
       const u = req.user;
@@ -239,6 +259,8 @@ export async function chainOpsRoutes(
       schema: {
         response: { 200: graphInternalTransfersResponse },
       },
+      // Six find-*-graph queries fan out per user; cap re-clicks.
+      config: { rateLimit: HEAVY_SYNC_LIMIT },
     },
     async (req) => {
       const u = req.user;
