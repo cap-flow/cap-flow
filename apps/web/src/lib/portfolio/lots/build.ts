@@ -21,7 +21,11 @@
  * этот трекер.
  */
 
-import { defillamaCoinKey, priceFromMap } from "@/lib/defillama";
+import {
+  defillamaCoinKey,
+  priceFromMap,
+  priceFromMapNearest,
+} from "@/lib/defillama";
 import { isJunkOp } from "../junk_filter";
 import { isStableSymbol } from "../protocols";
 import { isReceiptOfProtocol } from "../token_roles";
@@ -33,6 +37,16 @@ interface BuildOptions {
   histPrices?: Map<string, number>;
   /** Если задан — все lots создаются под этим walletId. Иначе из ops. */
   walletId: string;
+  /**
+   * UCB A4.2: per-op cost basis overrides, keyed by `op.hash.toLowerCase()`.
+   * Значение — **полная** USD-стоимость приобретения для этой tx (не per-unit).
+   * Acquisition handlers заменяют derived `movementUsd(...)` на этот override.
+   * Multiple in-movements в одной tx → cost делится пропорционально по amount.
+   *
+   * Источник: `chain_operation_annotations.manual_cost_basis_usd` (server A3).
+   * Применяется в handleTransferIn / handleBridgeIn / handleSwap.
+   */
+  costBasisOverrideByHash?: Map<string, number>;
 }
 
 /** Стоимость движения в USD (приоритет: hist price → m.usd → 0). */
@@ -43,12 +57,30 @@ function movementUsd(
   histPrices: Map<string, number>,
 ): number {
   if (m.amount <= 0) return 0;
-  if (isStableSymbol(m.symbol)) return m.amount;
+  // H11 (2026-05-14): same depeg fix as position_lot_cost_basis.movementUsd —
+  // stables go through DefiLlama hist lookup first with [$0.5, $2] sanity
+  // clamp, $1 fallback only when no price.
   const coin = defillamaCoinKey(chain, m.tokenId, m.symbol);
   if (coin) {
     const hp = priceFromMap(histPrices, coin, time);
-    if (hp != null && hp > 0) return m.amount * hp;
+    if (hp != null && hp > 0) {
+      if (isStableSymbol(m.symbol) && (hp < 0.5 || hp > 2)) {
+        return m.amount;
+      }
+      return m.amount * hp;
+    }
+    // UCB D9: exact-bucket miss → ближайший bucket ±7d того же coin.
+    // Sparse hist-data случается для редких токенов; approximate price
+    // лучше чем 0 (которое treats lot как airdrop).
+    const nearest = priceFromMapNearest(histPrices, coin, time);
+    if (nearest != null && nearest.price > 0) {
+      if (isStableSymbol(m.symbol) && (nearest.price < 0.5 || nearest.price > 2)) {
+        return m.amount;
+      }
+      return m.amount * nearest.price;
+    }
   }
+  if (isStableSymbol(m.symbol)) return m.amount;
   if (m.usd != null && m.usd > 0) return m.usd;
   return 0;
 }
@@ -71,6 +103,14 @@ export function buildLotTrackerFromOps(
   const tracker = new LotTracker("WAC");
   const histPrices = options.histPrices ?? new Map<string, number>();
   const walletId = options.walletId;
+  const overrides =
+    options.costBasisOverrideByHash ?? new Map<string, number>();
+
+  // UCB D5: "bridge state" — last consumed per-unit cost для каждого
+  // (walletId|family). bridge_out записывает сюда WAC ДО consume; bridge_in
+  // на другой chain читает и переиспользует. Очищается по asset когда
+  // bridge_in матчится (one-shot).
+  const lastBridgeOutWac = new Map<string, number>();
 
   const sorted = [...ops].sort((a, b) => a.time - b.time);
 
@@ -78,9 +118,11 @@ export function buildLotTrackerFromOps(
     if (op.status === "failed") continue;
     if (isJunkOp(op)) continue;
 
+    const override = overrides.get(op.hash.toLowerCase());
+
     switch (op.type) {
       case "swap":
-        handleSwap(op, tracker, walletId, histPrices);
+        handleSwap(op, tracker, walletId, histPrices, override);
         break;
       case "lp_add":
       case "lend_supply":
@@ -103,15 +145,33 @@ export function buildLotTrackerFromOps(
         break;
       case "transfer_in":
       case "deposit_fiat":
-        handleTransferIn(op, tracker, walletId, histPrices);
+        handleTransferIn(op, tracker, walletId, histPrices, override);
         break;
       case "transfer_out":
-      case "bridge_out":
       case "withdraw_fiat":
         handleTransferOut(op, tracker, walletId);
         break;
+      case "bridge_out":
+        // D5: capture pre-consume WAC per family ДО consume, чтобы
+        // matching bridge_in мог переиспользовать.
+        for (const m of op.movement) {
+          if (m.direction !== "out" || m.amount <= 0) continue;
+          const wac = tracker.wacAt(walletId, m.symbol, op.time);
+          if (wac != null && wac > 0) {
+            lastBridgeOutWac.set(m.symbol.toUpperCase(), wac);
+          }
+        }
+        handleTransferOut(op, tracker, walletId);
+        break;
       case "bridge_in":
-        handleBridgeIn(op, tracker, walletId, histPrices);
+        handleBridgeIn(
+          op,
+          tracker,
+          walletId,
+          histPrices,
+          override,
+          lastBridgeOutWac,
+        );
         break;
       // approve / unknown / failed — ничего не делаем
     }
@@ -127,6 +187,7 @@ function handleSwap(
   tracker: LotTracker,
   walletId: string,
   histPrices: Map<string, number>,
+  overrideUsd?: number,
 ): void {
   const ins = op.movement.filter((m) => m.direction === "in" && m.amount > 0);
   const outs = op.movement.filter(
@@ -135,22 +196,54 @@ function handleSwap(
   if (ins.length === 0 || outs.length === 0) return;
 
   // Total USD that was paid (out side).
+  //
+  // UCB invariant: cost basis of OUT-token flows through to IN-token.
+  // Для stable → не важно (cost = amount = $1 × amount).
+  // Для non-stable → consumed lot's WAC × amount, **не** market price.
+  // Иначе token→token swap инфлирует cost basis за счёт price
+  // appreciation (купил BTC за $20k → swap по market $50k → ETH lot
+  // получает $50k вместо $20k → realized PnL ломается).
   let paidUsd = 0;
   for (const m of outs) {
-    // Consume out-side from existing lots — это движение их уменьшает.
-    // Stable: $1 × amount. Non-stable: используем hist price если есть.
-    const usd = isStableSymbol(m.symbol)
-      ? m.amount
-      : movementUsd(m, op.chain, op.time, histPrices);
-    paidUsd += usd;
-    tracker.consume({
-      symbol: m.symbol,
-      tokenId: m.tokenId,
-      chain: op.chain,
-      amount: m.amount,
-      consumedAt: op.time,
-      walletId,
-    });
+    if (isStableSymbol(m.symbol)) {
+      paidUsd += m.amount;
+      tracker.consume({
+        symbol: m.symbol,
+        tokenId: m.tokenId,
+        chain: op.chain,
+        amount: m.amount,
+        consumedAt: op.time,
+        walletId,
+      });
+    } else {
+      // Non-stable OUT: cost = consumed WAC × amount (НЕ market price).
+      const consumed = tracker.consume({
+        symbol: m.symbol,
+        tokenId: m.tokenId,
+        chain: op.chain,
+        amount: m.amount,
+        consumedAt: op.time,
+        walletId,
+      });
+      if (consumed.totalCostUsd > 0) {
+        paidUsd += consumed.totalCostUsd;
+      } else {
+        // Fallback: source token не tracked (external transfer_in
+        // без cost basis) → market price лучше чем $0.
+        paidUsd += movementUsd(m, op.chain, op.time, histPrices);
+      }
+    }
+  }
+
+  // UCB A4.2: если user задал override — заменяем derived paidUsd на него.
+  // Out-side всё равно consumed (без override это и происходило бы), только
+  // cost basis новых in-lots использует user value.
+  if (
+    overrideUsd != null &&
+    Number.isFinite(overrideUsd) &&
+    overrideUsd >= 0
+  ) {
+    paidUsd = overrideUsd;
   }
 
   // Распределяем paidUsd между in-токенами пропорционально их amount-share
@@ -389,10 +482,13 @@ function handleClaim(
   walletId: string,
   histPrices: Map<string, number>,
 ): void {
-  // Claim rewards: in-side получает lot с cost = market price на момент.
+  // UCB D6: rewards имеют cost basis = $0 (user ничего не заплатил).
+  // Sale такого лота даёт realized = full proceeds. Market price на
+  // момент получения сохраняется как `fmvAtAcquisitionUsd` для будущего
+  // income-reporting (tax: ordinary income at FMV at receipt).
   for (const m of op.movement) {
     if (m.direction !== "in" || m.amount <= 0) continue;
-    const usd = isStableSymbol(m.symbol)
+    const fmvUsd = isStableSymbol(m.symbol)
       ? m.amount
       : movementUsd(m, op.chain, op.time, histPrices);
     tracker.acquire({
@@ -400,11 +496,12 @@ function handleClaim(
       tokenId: m.tokenId,
       chain: op.chain,
       amount: m.amount,
-      costPerUnitUsd: m.amount > 0 ? usd / m.amount : 0,
+      costPerUnitUsd: 0,
       acquiredAt: op.time,
-      acquiredVia: "claim_rewards",
+      acquiredVia: "received_as_reward",
       sourceHash: op.hash,
       walletId,
+      fmvAtAcquisitionUsd: fmvUsd,
     });
   }
 }
@@ -414,15 +511,31 @@ function handleTransferIn(
   tracker: LotTracker,
   walletId: string,
   histPrices: Map<string, number>,
+  overrideUsd?: number,
 ): void {
   // Transfer in: external income / CEX deposit / fiat purchase.
   // Cost = market price на момент (если задан manual_annotations.fiatPurchase
   // — это уже учтено классификатором через op.type).
-  for (const m of op.movement) {
-    if (m.direction !== "in" || m.amount <= 0) continue;
-    const usd = isStableSymbol(m.symbol)
-      ? m.amount
-      : movementUsd(m, op.chain, op.time, histPrices);
+  //
+  // UCB A4.2: если задан `overrideUsd` (annotation manual_cost_basis_usd),
+  // делим его пропорционально между in-movements по amount — игнорируя
+  // derived market prices. Это user explicit override.
+  const ins = op.movement.filter((m) => m.direction === "in" && m.amount > 0);
+  const totalAmount = ins.reduce((s, m) => s + m.amount, 0);
+  for (const m of ins) {
+    let usd: number;
+    if (
+      overrideUsd != null &&
+      Number.isFinite(overrideUsd) &&
+      overrideUsd >= 0 &&
+      totalAmount > 0
+    ) {
+      usd = overrideUsd * (m.amount / totalAmount);
+    } else {
+      usd = isStableSymbol(m.symbol)
+        ? m.amount
+        : movementUsd(m, op.chain, op.time, histPrices);
+    }
     tracker.acquire({
       symbol: m.symbol,
       tokenId: m.tokenId,
@@ -463,8 +576,57 @@ function handleBridgeIn(
   tracker: LotTracker,
   walletId: string,
   histPrices: Map<string, number>,
+  overrideUsd?: number,
+  lastBridgeOutWac?: Map<string, number>,
 ): void {
-  // Bridge in: same as transfer_in — actor unknown, treat as external arrival.
-  // Bridge_pair detection (handled elsewhere) может потом ре-link cost из bridge_out.
-  handleTransferIn(op, tracker, walletId, histPrices);
+  // UCB D5: bridge_in cost basis inheritance.
+  //
+  // Precedence:
+  //   1. explicit overrideUsd (A4 manual / D3 server CEX inheritance)
+  //   2. lastBridgeOutWac[symbol-family] (paired bridge_out — same wallet,
+  //      pre-consume WAC сохранён)
+  //   3. existing WAC of (walletId, family) если ещё не fully consumed
+  //   4. fallback: derived market price (первый bridge_in без prior history)
+  const ins = op.movement.filter((m) => m.direction === "in" && m.amount > 0);
+  const totalAmount = ins.reduce((s, m) => s + m.amount, 0);
+  for (const m of ins) {
+    let usd: number;
+    if (
+      overrideUsd != null &&
+      Number.isFinite(overrideUsd) &&
+      overrideUsd >= 0 &&
+      totalAmount > 0
+    ) {
+      usd = overrideUsd * (m.amount / totalAmount);
+    } else {
+      const symKey = m.symbol.toUpperCase();
+      const wacFromBridge = lastBridgeOutWac?.get(symKey);
+      if (wacFromBridge != null && wacFromBridge > 0) {
+        usd = m.amount * wacFromBridge;
+        // one-shot: после успешного match очищаем (не reuse'м для
+        // следующего unrelated bridge_in того же family).
+        lastBridgeOutWac?.delete(symKey);
+      } else {
+        const existingWac = tracker.wacAt(walletId, m.symbol, op.time);
+        if (existingWac != null && existingWac > 0) {
+          usd = m.amount * existingWac;
+        } else {
+          usd = isStableSymbol(m.symbol)
+            ? m.amount
+            : movementUsd(m, op.chain, op.time, histPrices);
+        }
+      }
+    }
+    tracker.acquire({
+      symbol: m.symbol,
+      tokenId: m.tokenId,
+      chain: op.chain,
+      amount: m.amount,
+      costPerUnitUsd: m.amount > 0 ? usd / m.amount : 0,
+      acquiredAt: op.time,
+      acquiredVia: "bridge_in",
+      sourceHash: op.hash,
+      walletId,
+    });
+  }
 }

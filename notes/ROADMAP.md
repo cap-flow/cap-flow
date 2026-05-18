@@ -1,9 +1,75 @@
 ---
-updated: 2026-05-18 (UCB C4 popup SoT consistency)
+updated: 2026-05-18 (UCB C5 token→token swap cost basis inheritance)
 ---
 
 
 # ROADMAP
+
+## 🔧 UCB C5 — token→token swap cost basis inheritance (2026-05-18)
+
+**UCB invariant violation**: token→token swaps (BTC → ETH, etc.) НЕ
+наследовали cost basis от source token's WAC. Использовали market price
+на момент свопа → инфлировали cost basis за счёт price appreciation.
+
+**Кейс**:
+- Купил 1 BTC за $20k (WAC $20k/BTC)
+- Через год BTC market = $50k
+- Swap 1 BTC → 25 ETH
+- **До C5**: ETH cost = market BTC $50k → $2000/ETH ❌ (inflated)
+- **После C5**: ETH cost = consumed BTC WAC $20k → $800/ETH ✅
+
+Это ломало realized PnL: продажа ETH дальше показывала маленький profit
+вместо большого (BTC appreciation skewed into ETH cost basis).
+
+**Fix в `lots/build.ts` handleSwap**:
+```ts
+// До: paidUsd += movementUsd(m, ...)  // market price
+// После: capture consume's totalCostUsd:
+const consumed = tracker.consume({...});
+paidUsd += consumed.totalCostUsd;  // = WAC × consumed amount
+```
+
+Stable OUT — без изменений (amount = $1 × amount). Non-stable OUT —
+теперь использует consumed lot WAC. Fallback на market если source
+token не tracked (external transfer_in без cost basis).
+
+Same fix в `position_lot_cost_basis.ts` (token→token branch) — для
+popup consistency.
+
+| File | Change | Tests |
+|---|---|:-:|
+| `lots/build.ts` handleSwap | Capture `tracker.consume(...).totalCostUsd` for non-stable OUT | 4/4 ✅ |
+| `lots/build.token_swap.test.ts` | TDD: BTC→ETH, partial, multi-source (BTC+ETH→SOL), untracked source fallback | 4/4 ✅ |
+| `position_lot_cost_basis.ts` | Same fix для popup token→token branch | — |
+
+**Cumulative**: 221/221 portfolio tests · tsc clean.
+
+## 🔧 UCB C4.5 — fix override stomp bug (post-C4 follow-up)
+
+**Bug**: после C4 popup SoT refactor, position startUsd в `/performance`
+table до сих пор показывал legacy $33,930 для via.irk POS-002 (вместо
+правильного $31,785).
+
+Root cause: `applyLendingCostBasisOverride` в OpenPositionsPage
+перетирал result от `buildSupplyToken` (LotTracker SoT). Этот override
+использовал:
+1. `getPositionLotCostBasis` БЕЗ `costBasisOverrideByHash` → терял
+   A4/D3/C2/C3 inheritance
+2. `t.amount × wac` (live amount с yield) → over-counted cost basis
+
+**Fix**:
+- Add `costBasisOverrideByHash` param to `applyLendingCostBasisOverride`
+- Add `useNetSuppliedAmount: true` для consistency
+- Use `r.totalCostUsd` directly вместо `t.amount × wac`
+- Pipe merged overrides из OpenPositionsPage callsite
+
+Теперь 4 уровня все консистентны:
+- column "Стартовая $" в /performance
+- applyLendingCostBasisOverride
+- applyCexInheritanceCostBasisOverride (когда срабатывает)
+- popup footer + line items
+
+Все = $31,785 для via.irk POS-002.
 
 ## 🔧 UCB C4 — PurchaseHistoryPopup → LotTracker SoT consistency (2026-05-18)
 
