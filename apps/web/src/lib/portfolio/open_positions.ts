@@ -1005,10 +1005,18 @@ function computePositionConsumedCostFromLots(
         if (m.direction !== "out" || m.amount <= 0) continue;
         if (normalizeSymbol(m.symbol) !== target) continue;
         totalAmount += m.amount;
-        if (wac != null && wac > 0) {
+        // UCB C9: trust tracker когда wacAt set — даже = 0 (explicit
+        // borrow-funded signal). Fallback к m.usd only когда wacAt
+        // returns null (= no data in tracker, asset never tracked).
+        //
+        // Кейс: vladimir POS-005 Fluid WBTC — 0.226 WBTC borrowed из
+        // Morpho (cost basis = $0 per UCB). Без C9 fallback на market
+        // m.usd $17,648 → inflate startUsd на $17.6k фантомного "вложения"
+        // когда реальные деньги — нулевые (debt). Real PnL ломался.
+        if (wac != null) {
           totalUsd += m.amount * wac;
         } else {
-          // Fallback: no tracker data → historical price → m.usd.
+          // Fallback: no tracker data (wac=null) → historical price → m.usd.
           const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
           let priceAtTx: number | null = null;
           if (coin) {
@@ -1983,8 +1991,13 @@ function buildOne(
         );
 
     if (
-      lotConsumed.usd > 0 &&
+      // UCB C9: accept lotConsumed как valid даже если usd = 0
+      // (borrow-funded positions имеют zero cost basis по UCB).
+      // Differentiation: lotConsumed.amount > 0 значит walker нашёл
+      // target supply ops (i.e. real position). Если amount = 0 — нет
+      // позиции в наших ops, fallback к cycleDeposit.
       lotConsumed.amount > 0 &&
+      lotConsumed.usd >= 0 &&
       s.amount >= lotConsumed.amount * 0.5
     ) {
       if (s.amount >= lotConsumed.amount * 0.95) {
