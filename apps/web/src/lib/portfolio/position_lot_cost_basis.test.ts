@@ -242,6 +242,79 @@ describe("getPositionLotCostBasis — UCB C4 popup SoT consistency", () => {
     expect(result.totalCostUsd).toBeCloseTo(3000, 0);
   });
 
+  it("CRITICAL: withdraw_fiat consumes lot, deposit_fiat with C2 override is NOT double-counted", () => {
+    // Vladimir POS-002 Aug 12: cowswap → withdraw_fiat → deposit_fiat
+    // (CEX-hop). Без consume на withdraw_fiat обе стороны acquire lot,
+    // FIFO consume eats both → inflated cost basis.
+    const ops: ClassifiedOp[] = [
+      op({
+        hash: "0xcowswap",
+        type: "swap",
+        time: 1000,
+        chain: "eth",
+        movements: [
+          { direction: "out", symbol: "USDC", amount: 9646, usd: 9646, isStable: true },
+          { direction: "in", symbol: "ETH", amount: 2.149, usd: 9646, tokenId: "eth" },
+        ],
+      }),
+      op({
+        hash: "0xwithdraw",
+        type: "withdraw_fiat",
+        time: 2000,
+        chain: "eth",
+        movements: [
+          { direction: "out", symbol: "ETH", amount: 2.163, usd: 4573, tokenId: "eth" },
+        ],
+      }),
+      op({
+        hash: "0xdeposit",
+        type: "deposit_fiat",
+        time: 3000,
+        chain: "arb",
+        movements: [
+          // m.usd = market $4578, но C2 override = inherited $9646
+          { direction: "in", symbol: "ETH", amount: 2.165, usd: 4578, tokenId: "arb" },
+        ],
+      }),
+      op({
+        hash: "0xsupply",
+        type: "lend_supply",
+        time: 4000,
+        protocol: { id: PROTO, name: "Fluid", category: "lending" },
+        movements: [
+          { direction: "out", symbol: "ETH", amount: 2.154, usd: 4555, tokenId: "arb" },
+        ],
+      }),
+    ];
+
+    // C2 fiat-hop override: deposit_fiat inherits $9646 from withdraw lot
+    const overrides = new Map([["0xdeposit", 9646]]);
+
+    const r = getPositionLotCostBasis({
+      ops,
+      walletId: WALLET,
+      protocolId: PROTO,
+      chain: "arb",
+      symbol: "ETH",
+      currentAmount: 2.154,
+      methodology: "FIFO",
+      useNetSuppliedAmount: true,
+      costBasisOverrideByHash: overrides,
+    });
+
+    // ОЖИДАНИЕ:
+    //   - cowswap acquire 2.149 ETH @ $4488/ETH
+    //   - withdraw_fiat consume 2.163 ETH (FIFO от cowswap) — fully eats it
+    //   - deposit_fiat acquire 2.165 ETH @ inherited $9646/2.165 = $4456/ETH
+    //   - supply consume 2.154 ETH from remaining (deposit_fiat lot)
+    //   - cost = 2.154 × $4456 ≈ $9598 (~$9646 × (2.154/2.165))
+    //
+    // НЕ должно быть double-count'а cowswap+deposit_fiat ≈ $19k.
+    expect(r.totalCostUsd).toBeGreaterThan(9400);
+    expect(r.totalCostUsd).toBeLessThan(9800);
+    expect(r.totalCostUsd).toBeLessThan(15000); // strict: not double-counted
+  });
+
   it("legacy mode (useNetSuppliedAmount=false): consume = currentAmount как раньше", () => {
     const ops: ClassifiedOp[] = [
       op({

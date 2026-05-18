@@ -256,9 +256,19 @@ export function getPositionLotCostBasis(
       continue;
     }
 
-    // transfer_out (gift / send to external) — consume non-stable.
-    // Это disposal — токены покинули owner'а, lots убираются.
-    if (op.type === "transfer_out") {
+    // transfer_out / withdraw_fiat / bridge_out — consume non-stable.
+    // Это disposal — токены покинули wallet. Без этого fiat-hop pair
+    // (withdraw_fiat → deposit_fiat) double-count'ится: оригинальный
+    // cowswap lot остаётся в пуле + deposit_fiat acquires inherited
+    // копию через C2 override → FIFO consume eats both = inflated cost.
+    //
+    // Main LotTracker (lots/build.ts) handles это через handleTransferOut
+    // для ВСЕХ OUT op types. Popup tracker должен повторять.
+    if (
+      op.type === "transfer_out" ||
+      op.type === "withdraw_fiat" ||
+      op.type === "bridge_out"
+    ) {
       for (const m of op.movement) {
         if (m.direction !== "out" || isStableSymbol(m.symbol)) continue;
         if (m.amount <= 0 || isGas(m)) continue;
