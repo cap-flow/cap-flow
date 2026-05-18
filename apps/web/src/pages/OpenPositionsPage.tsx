@@ -408,6 +408,7 @@ function OpenPositionsPageInner(): JSX.Element {
       opsByWallet,
       walletHistPrices.histPrices,
       lotMethodology,
+      costBasisOverrideByHash, // UCB C4: A4/D3/C2/C3 merged overrides
     );
     if (lendingResult.overriddenCount > 0) {
       for (const w of lendingResult.warnings) console.warn(w);
@@ -431,7 +432,7 @@ function OpenPositionsPageInner(): JSX.Element {
       working = cexResult.positions;
     }
     return working;
-  }, [positions, v3.data, v3CostBasisHook.data, loadedList, walletHistPrices.histPrices, lotMethodology, cexCostBasisByHash]);
+  }, [positions, v3.data, v3CostBasisHook.data, loadedList, walletHistPrices.histPrices, lotMethodology, cexCostBasisByHash, costBasisOverrideByHash]);
 
 
 

@@ -27,6 +27,14 @@ export function applyLendingCostBasisOverride(
   opsByWallet: Map<string, ClassifiedOp[]>,
   histPrices?: Map<string, number>,
   methodology: LotMethodology = "FIFO",
+  /**
+   * UCB C4: merged cost basis overrides (A4 manual + D3 CEX + C2 fiat-hop +
+   * C3 cross-wallet). Forward'ится в `getPositionLotCostBasis` чтобы lending
+   * override применял ТОТ ЖЕ cost basis что и `buildSupplyToken` + popup.
+   * Без этого был баг: `buildSupplyToken` правильно computed $31,785,
+   * а override стирал в $33,930 (market-based legacy).
+   */
+  costBasisOverrideByHash?: ReadonlyMap<string, number>,
 ): LendingOverrideResult {
   const result: OpenPosition[] = positions.map((p) => p);
   const warnings: string[] = [];
@@ -70,6 +78,10 @@ export function applyLendingCostBasisOverride(
         chain: p.chain,
         symbol: t.symbol,
         currentAmount: t.amount,
+        // UCB C4: consistent с buildSupplyToken + popup. Net supplied
+        // (без yield) для consume + merged overrides (A4/D3/C2/C3).
+        useNetSuppliedAmount: true,
+        ...(costBasisOverrideByHash && { costBasisOverrideByHash }),
         ...(methodology && { methodology }),
         ...(histPrices && { histPrices }),
       });
@@ -77,8 +89,13 @@ export function applyLendingCostBasisOverride(
         allTokensHaveData = false;
         break;
       }
+      // UCB C4: use totalCostUsd directly (= Σ consumed lot costs),
+      // not effectiveWac × t.amount. Это исключает yield amount × wac
+      // inflation. effectiveWac × supplied_amount ≡ totalCostUsd
+      // (by construction). For lending positions с yield, t.amount >
+      // r.totalAmountSupplied (yield), и t.amount × wac overcounts.
+      const usd = r.totalCostUsd;
       const wac = r.effectiveWac;
-      const usd = t.amount * wac;
       wacBasedStartUsd += usd;
       perTokenUsd.push({
         symbol: t.symbol,
@@ -111,7 +128,10 @@ export function applyLendingCostBasisOverride(
           : 0;
       return { ...t, startUsd: proRata };
     });
-    next.netPnlUsd = next.currentUsd - next.startUsd - next.currentDebtUsd;
+    // H6: PnL is collateral-side change only. Debt is a separate
+    // liability rendered via `currentDebtUsd`; subtracting it here
+    // double-counts the loan against the user.
+    next.netPnlUsd = next.currentUsd - next.startUsd;
     next.netPnlPct =
       next.startUsd > 0 ? (next.netPnlUsd / next.startUsd) * 100 : 0;
     result[idx] = next;
