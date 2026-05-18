@@ -124,8 +124,8 @@ function ProviderTable({
   readonly loading: boolean;
 }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card/40">
-      <table className="w-full text-sm">
+    <div className="overflow-x-auto rounded-lg border border-border bg-card/40">
+      <table className="w-full min-w-[700px] text-sm">
         <thead className="bg-card/80 text-left text-xs uppercase tracking-wider text-muted-foreground">
           <tr>
             <th className="px-3 py-2 font-medium">Провайдер</th>
@@ -313,8 +313,8 @@ function RecentTable({
   readonly usersById: Map<string, { email: string | null; name: string | null }>;
 }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card/40">
-      <table className="w-full text-sm">
+    <div className="overflow-x-auto rounded-lg border border-border bg-card/40">
+      <table className="w-full min-w-[1000px] text-sm">
         <thead className="bg-card/80 text-left text-xs uppercase tracking-wider text-muted-foreground">
           <tr>
             <th className="px-3 py-2 font-medium">Время</th>

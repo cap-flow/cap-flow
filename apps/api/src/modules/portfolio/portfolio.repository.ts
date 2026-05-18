@@ -1,5 +1,5 @@
 import { type Database, schema } from "@cap-flow/db";
-import { desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gte } from "drizzle-orm";
 
 export type PortfolioSnapshotRow =
   typeof schema.portfolioSnapshots.$inferSelect;
@@ -12,6 +12,15 @@ export interface IPortfolioRepository {
   recentSnapshots(
     accountId: string,
     limit: number
+  ): Promise<PortfolioSnapshotRow[]>;
+  /**
+   * H17: history series for TVL chart. Returns snapshots strictly after
+   * `since`, ordered chronologically. Caller is expected to thin out the
+   * point density client-side (Recharts is fine with 1000 points).
+   */
+  snapshotsSince(
+    accountId: string,
+    since: Date
   ): Promise<PortfolioSnapshotRow[]>;
 }
 
@@ -51,5 +60,21 @@ export class PortfolioRepository implements IPortfolioRepository {
       .where(eq(schema.portfolioSnapshots.accountId, accountId))
       .orderBy(desc(schema.portfolioSnapshots.createdAt))
       .limit(limit);
+  }
+
+  async snapshotsSince(
+    accountId: string,
+    since: Date
+  ): Promise<PortfolioSnapshotRow[]> {
+    return this.db
+      .select()
+      .from(schema.portfolioSnapshots)
+      .where(
+        and(
+          eq(schema.portfolioSnapshots.accountId, accountId),
+          gte(schema.portfolioSnapshots.createdAt, since)
+        )
+      )
+      .orderBy(asc(schema.portfolioSnapshots.createdAt));
   }
 }

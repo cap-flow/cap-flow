@@ -11,6 +11,8 @@ import type {
   PaymentAddressRow,
   UserPaymentRow,
 } from "./billing.repository.js";
+import { formatAmountForLedger } from "./payment-precision.js";
+import { periodEnd as computePeriodEnd } from "./period.js";
 import {
   plansFromConfig,
   selectPlanForAmount,
@@ -148,16 +150,19 @@ export class BillingService {
       );
     }
     const current = await this.repo.latestActiveSubscription(args.userId);
-    const now = Date.now();
-    const from =
-      current?.periodEnd && current.periodEnd.getTime() > now
-        ? current.periodEnd.getTime()
-        : now;
-    const periodEnd = new Date(from + plan.months * 30 * 86_400_000);
+    const nowDate = new Date();
+    const fromDate =
+      current?.periodEnd && current.periodEnd.getTime() > nowDate.getTime()
+        ? current.periodEnd
+        : nowDate;
+    // Real calendar months (B2): previous implementation used a 30-day
+    // approximation, silently shortening every annual plan by 5 days.
+    const periodEnd = computePeriodEnd(fromDate, plan.months);
 
     const row = await this.repo.creditPayment({
       userId: args.userId,
-      amountUsd: args.amountUsd.toFixed(2),
+      // L3: full precision (was toFixed(2)).
+      amountUsd: formatAmountForLedger(args.amountUsd),
       horizonMonths: plan.months,
       plan: plan.key,
       paymentMethod: "manual",
@@ -178,23 +183,6 @@ export class BillingService {
       },
     });
     return row;
-  }
-
-  async refund(args: {
-    paymentId: string;
-    actorAdminId: string;
-    note?: string;
-  }): Promise<UserPaymentRow> {
-    // Caller fetches history → picks paymentId. We resolve user via the row
-    // implicitly through the FK; here we just look it up via history scan.
-    // Cheap because admin actions are rare.
-    const allByPayment = await this.repo.paymentHistory(args.paymentId).catch(() => []);
-    // The above is paymentHistory(userId), so this guard never matches — we
-    // use a dedicated query in the route layer instead.
-    void allByPayment;
-    throw new NotFoundError(
-      "Refund must be initiated from /admin/users/:id/billing/refund where we resolve userId from path."
-    );
   }
 
   async refundForUser(args: {

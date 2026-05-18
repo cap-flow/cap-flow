@@ -9,6 +9,8 @@ import type {
   BillingRepository,
   PaymentAddressRow,
 } from "./billing.repository.js";
+import { formatAmountForLedger } from "./payment-precision.js";
+import { periodEnd as computePeriodEnd } from "./period.js";
 import {
   plansFromConfig,
   selectPlanForAmount,
@@ -102,25 +104,40 @@ export class PaymentMonitorService {
       const plan = selectPlanForAmount(amount, plans);
       if (!plan) continue; // amount under smallest plan — leave as observed-only
 
+      // M5 (2026-05-14): detect overpay. If the user sent more than the
+      // selected plan's price, the surplus is recorded in audit + the
+      // payment note. Admin can manually credit it back via /admin (or
+      // a future "redeem overpay" automated flow). The previous
+      // implementation silently lost the surplus to the operator —
+      // user-hostile and would block on review by EU consumer-rights
+      // regulators if ever escalated.
+      const overpay = Math.max(0, amount - plan.priceUsd);
+      const overpayNote = overpay > 0.005
+        ? ` (overpay $${overpay.toFixed(2)} — recorded for admin review)`
+        : "";
+
       // Extend from current period end if still active, else from now.
+      // Real calendar months (B2): 30-day approximation removed.
       const current = await this.repo.latestActiveSubscription(addr.userId);
-      const now = Date.now();
-      const from =
-        current?.periodEnd && current.periodEnd.getTime() > now
-          ? current.periodEnd.getTime()
-          : now;
-      const periodEnd = new Date(from + plan.months * 30 * 86_400_000);
+      const nowDate = new Date();
+      const fromDate =
+        current?.periodEnd && current.periodEnd.getTime() > nowDate.getTime()
+          ? current.periodEnd
+          : nowDate;
+      const periodEnd = computePeriodEnd(fromDate, plan.months);
 
       const payment = await this.repo.creditPayment({
         userId: addr.userId,
-        amountUsd: amount.toFixed(2),
+        // L3: full USDT precision (was toFixed(2) — silently lost up
+        // to ~$0.005 per tx, drift vs on-chain truth).
+        amountUsd: formatAmountForLedger(amount),
         horizonMonths: plan.months,
         plan: plan.key,
         paymentMethod:
           addr.network === "trc20"
             ? "crypto_usdt_trc20"
             : "crypto_usdt_erc20",
-        note: `Auto-credit from ${tx.network} tx ${tx.txHash.slice(0, 16)}…`,
+        note: `Auto-credit from ${tx.network} tx ${tx.txHash.slice(0, 16)}…${overpayNote}`,
         periodEnd,
         txId: tx.id,
       });
@@ -137,9 +154,28 @@ export class PaymentMonitorService {
           txHash: tx.txHash,
           amount: tx.amount,
           plan: plan.key,
+          planPriceUsd: plan.priceUsd,
+          overpayUsd: overpay > 0 ? overpay : 0,
           periodEnd: periodEnd.toISOString(),
         },
       });
+
+      // M5: separate explicit audit row when there's an overpay so the
+      // admin "Биллинг" dashboard can filter for it.
+      if (overpay > 0.005) {
+        await this.audit.log({
+          actorUserId: addr.userId,
+          action: "billing.overpay_recorded",
+          targetUserId: addr.userId,
+          payload: {
+            paymentId: payment.id,
+            txId: tx.id,
+            paidUsd: amount,
+            planPriceUsd: plan.priceUsd,
+            overpayUsd: overpay,
+          },
+        });
+      }
     }
     return credited;
   }

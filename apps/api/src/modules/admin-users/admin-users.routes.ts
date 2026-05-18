@@ -6,6 +6,7 @@ import type { Env } from "../../config/env.js";
 import { UnauthorizedError } from "../../core/errors.js";
 import {
   REFRESH_COOKIE_NAME,
+  setAccessCookie,
   setRefreshCookie,
 } from "../auth/auth.cookies.js";
 import type { UserRow } from "../auth/auth.repository.js";
@@ -18,6 +19,9 @@ const listFilterSchema = z.object({
   status: z.enum(["active", "pending", "blocked"]).optional(),
   role: z.enum(["admin", "user", "viewer"]).optional(),
   search: z.string().max(120).optional(),
+  // M14: cursor + limit.
+  cursor: z.string().datetime().optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
 const adminUserResponseSchema = z.object({
@@ -36,7 +40,10 @@ const adminUserWithAggregatesSchema = adminUserResponseSchema.extend({
   lastSnapshotUsd: z.number().nullable(),
 });
 
-const adminUserListResponseSchema = z.array(adminUserWithAggregatesSchema);
+const adminUserListResponseSchema = z.object({
+  items: z.array(adminUserWithAggregatesSchema),
+  nextCursor: z.string().datetime().nullable(),
+});
 
 const setStatusBodySchema = z.object({
   status: z.enum(["active", "pending", "blocked"]),
@@ -73,6 +80,16 @@ export async function adminUsersRoutes(
     maxAgeSeconds: env.JWT_REFRESH_TTL_DAYS * 24 * 60 * 60,
   };
 
+  // H2: access-cookie config matches auth.routes.ts. Capped at 24h
+  // because cookies live on `/api/v1/upstream` and are used by viem
+  // (which has no refresh logic of its own) — past 24h the cookie
+  // forces a fresh login.
+  const accessCookieCfg = {
+    secure: env.COOKIE_SECURE,
+    domain: env.COOKIE_DOMAIN,
+    maxAgeSeconds: Math.min(env.JWT_ACCESS_TTL_MIN * 60, 24 * 3600),
+  };
+
   route.get(
     "/",
     {
@@ -86,20 +103,27 @@ export async function adminUsersRoutes(
         status?: "active" | "pending" | "blocked";
         role?: "admin" | "user" | "viewer";
         search?: string;
+        cursor?: string;
+        limit?: number;
       } = {};
       if (req.query.status) filter.status = req.query.status;
       if (req.query.role) filter.role = req.query.role;
       if (req.query.search) filter.search = req.query.search;
+      if (req.query.cursor) filter.cursor = req.query.cursor;
+      if (req.query.limit) filter.limit = req.query.limit;
 
-      const rows = await service.listUsers(filter);
-      return rows.map((entry) => ({
-        ...toAdminUserResponse(entry.user),
-        accountCount: entry.accountCount,
-        lastSnapshotAt: entry.lastSnapshotAt
-          ? entry.lastSnapshotAt.toISOString()
-          : null,
-        lastSnapshotUsd: entry.lastSnapshotUsd,
-      }));
+      const page = await service.listUsers(filter);
+      return {
+        items: page.items.map((entry) => ({
+          ...toAdminUserResponse(entry.user),
+          accountCount: entry.accountCount,
+          lastSnapshotAt: entry.lastSnapshotAt
+            ? entry.lastSnapshotAt.toISOString()
+            : null,
+          lastSnapshotUsd: entry.lastSnapshotUsd,
+        })),
+        nextCursor: page.nextCursor,
+      };
     }
   );
 
@@ -141,6 +165,32 @@ export async function adminUsersRoutes(
     }
   );
 
+  /**
+   * Hard-delete user and ALL associated data.
+   *
+   * Destructive: removes accounts (cascades wallets/operations/snapshots),
+   * sessions, payments, notifications. Cannot delete yourself, and the
+   * last admin is protected by the service-layer guard.
+   *
+   * `audit_log` retains the row but nulls out actor/target FKs — useful
+   * for forensic queries about who-deleted-whom-and-when.
+   */
+  route.delete(
+    "/:id",
+    {
+      schema: {
+        params: userIdParamSchema,
+        response: { 204: z.null() },
+      },
+    },
+    async (req, reply) => {
+      const u = req.user;
+      if (!u) throw new UnauthorizedError();
+      await service.deleteUser(req.params.id, u.id);
+      return reply.status(204).send();
+    }
+  );
+
   route.post(
     "/:id/impersonate",
     {
@@ -159,6 +209,15 @@ export async function adminUsersRoutes(
         ip: req.ip ?? null,
       });
       setRefreshCookie(reply, result.refreshToken, cookieCfg);
+      // H2: also re-issue the access cookie. Previously only the refresh
+      // cookie was rotated, leaving the admin's `cap_access` cookie in
+      // the browser. Subsequent upstream-proxy calls (viem to Alchemy,
+      // DeBank) authenticated AS THE ADMIN, not as the impersonated
+      // user — broken rate-limit attribution and (worse) potential
+      // data leaks across tenants if any handler scoped by cookie
+      // identity. Setting the new access cookie aligns both auth
+      // paths and the JS-readable bearer token to the same identity.
+      setAccessCookie(reply, result.accessToken, accessCookieCfg);
       return {
         accessToken: result.accessToken,
         expiresAt: result.accessTokenExpiresAt.toISOString(),

@@ -265,3 +265,48 @@ export function priceFromMap(
   const k = cacheKeyFor(coin, timestamp);
   return map.get(k) ?? null;
 }
+
+/**
+ * UCB D9: fallback к ближайшему по времени bucket'у для того же coin'а.
+ *
+ * DefiLlama hist-цены — sparse: для редких токенов или экстремальных дат
+ * может не быть exact-bucket match'а, и `priceFromMap` возвращает null.
+ * Это приводит к unknown cost basis для transfer_in / bridge_in / claim.
+ *
+ * Эта функция расширяет lookup: если exact miss, ищем ближайший bucket
+ * ±maxOffsetHours (default 7 days = 168h). Возвращает цену из ближайшего
+ * найденного bucket'а; null если ни одного в окне.
+ *
+ * Не используется для time-sensitive расчётов (PnL, fees APR), только
+ * для cost basis fallback — где иметь approximate price лучше чем 0.
+ */
+export function priceFromMapNearest(
+  map: Map<string, number>,
+  coin: string,
+  timestamp: number,
+  maxOffsetHours = 24 * 7,
+): { readonly price: number; readonly offsetHours: number } | null {
+  // Fast-path: exact hit.
+  const exact = priceFromMap(map, coin, timestamp);
+  if (exact != null && exact > 0) return { price: exact, offsetHours: 0 };
+
+  const targetBucket = bucketTs(timestamp);
+  const prefix = `${coin}|`;
+  let best: { price: number; offsetHours: number } | null = null;
+
+  // Linear scan по ключам — O(n_buckets). Для типичной session (~100-500
+  // pairs) практически instant. Если в будущем станет hot — построим
+  // per-coin sorted index в init-time.
+  for (const [k, v] of map) {
+    if (!k.startsWith(prefix)) continue;
+    if (v <= 0) continue;
+    const bucket = Number(k.slice(prefix.length));
+    if (!Number.isFinite(bucket)) continue;
+    const offsetHours = Math.abs(bucket - targetBucket) / HOUR;
+    if (offsetHours > maxOffsetHours) continue;
+    if (!best || offsetHours < best.offsetHours) {
+      best = { price: v, offsetHours };
+    }
+  }
+  return best;
+}

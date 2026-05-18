@@ -147,6 +147,60 @@ export function lookupProtocol(
 }
 
 /**
+ * Map DefiLlama category → наш `ProtocolCategory` (используется в
+ * `classifyProtocol` для решения, какой ветке classifier'а отдать op).
+ *
+ * Это отличается от `mapDefiLlamaCategory` (которая возвращает PositionKind):
+ * здесь нам нужна точнее различимая category, потому что classifier
+ * выбирает ветку по ней (dex/lending/staking/restaking/perp/yield/bridge/cdp).
+ */
+export function mapDefiLlamaToProtocolCategory(
+  category: string | undefined | null,
+):
+  | "lending"
+  | "dex"
+  | "lp"
+  | "staking"
+  | "restaking"
+  | "yield"
+  | "perp"
+  | "bridge"
+  | "cdp"
+  | "other" {
+  if (!category) return "other";
+  const c = category.toLowerCase();
+  // Order matters — more specific first.
+  if (c.includes("cdp")) return "cdp";
+  if (c.includes("liquid restak") || c.includes("restak")) return "restaking";
+  if (c.includes("liquid stak") || c === "staking pool" || c.includes("stak"))
+    return "staking";
+  if (c.includes("bridge") || c.includes("cross chain")) return "bridge";
+  if (c.includes("derivativ") || c.includes("perp") || c.includes("option"))
+    return "perp";
+  if (
+    c.includes("dex") ||
+    c.includes("amm") ||
+    c.includes("liquidity manager") ||
+    c.includes("dex aggregator")
+  )
+    return "dex";
+  if (
+    c.includes("lend") ||
+    c.includes("rwa lending") ||
+    c.includes("borrow")
+  )
+    return "lending";
+  if (
+    c.includes("yield") ||
+    c.includes("farm") ||
+    c.includes("vault") ||
+    c.includes("indexes")
+  )
+    return "yield";
+  return "other";
+}
+
+/**
  * Map DefiLlama category → наш PositionKind.
  *
  * DefiLlama categories include:

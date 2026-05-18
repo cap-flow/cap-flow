@@ -10,12 +10,27 @@
  *   1. Для каждой OpenPosition с V3 LP — найти соответствующие NFT
  *      (live tokenId через v3PositionMap)
  *   2. Sum cumulative cost basis из v3CostBasis Map (по nftTokenId)
- *   3. Если authoritative total больше DeBank-видимой mint suma на > 5% —
- *      override startUsd на authoritative
+ *   3. Если authoritative total отличается от DeBank-видимой mint suma
+ *      больше чем на `DISTANCE_TOLERANCE` — override startUsd на authoritative
  *   4. Pro-rata distribute если в группе несколько NFT
  *
  * Возвращает новый массив OpenPosition (не мутирует оригинальный).
  */
+
+/**
+ * L4 (2026-05-14): единая константа для V3-override tolerance.
+ *
+ * Pre-L4 в коде разбросаны hard-coded `< 0.01` (4 места) с inline
+ * комментариями вроде «< 5% diff» — расхождение между текстом и
+ * реальным значением (1%). Это путало contributors при попытках
+ * подкрутить параметр.
+ *
+ * 1% — реально подобранное значение (см. POS-002 на Alex 2026-05-08:
+ * $475 missing на $14,560 = 3.26%, под 5% threshold проскакивало →
+ * cost basis улетал). Tolerance держим узким, потому что
+ * authoritative-source Alchemy obyčно точна до центов.
+ */
+const DISTANCE_TOLERANCE = 0.01;
 
 import { findV3Deployments } from "@/lib/v3/chains";
 import { v3PositionKey, type V3PositionMap } from "@/lib/v3/hook";
@@ -119,7 +134,7 @@ export function applyV3CostBasisOverride(
         // прокидываем matchedV3TokenId чтобы UI показывал #{tokenId}.
         // Раньше threshold был 5% — пропускал missing IncreaseLiquidity
         // events (POS-002: $475 missing на $14,560 = 3.26%, под 5% threshold).
-        if (oldStartUsd > 0 && Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < 0.01) {
+        if (oldStartUsd > 0 && Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < DISTANCE_TOLERANCE) {
           const next: OpenPosition = { ...x.p, matchedV3TokenId: cb.tokenId.toString() };
           result[x.idx] = next;
           matchedTotalAuth.push(newStartUsd);
@@ -134,7 +149,12 @@ export function applyV3CostBasisOverride(
             startUsd: (t.startUsd / oldStartUsd) * newStartUsd,
           }));
         }
-        next.netPnlUsd = next.currentUsd - next.startUsd - next.currentDebtUsd;
+        // H6: do NOT subtract currentDebtUsd. PnL is the change in
+        // collateral value only; debt is a separate liability tracked
+        // via `currentDebtUsd`. Subtracting it here double-counts the
+        // loan against the user (the cash they received is sitting in
+        // their wallet, not lost to PnL).
+        next.netPnlUsd = next.currentUsd - next.startUsd;
         next.netPnlPct =
           next.startUsd > 0 ? (next.netPnlUsd / next.startUsd) * 100 : 0;
         result[x.idx] = next;
@@ -234,8 +254,10 @@ export function applyV3CostBasisOverride(
         }
         const oldStartUsd = item.p.startUsd;
         const newStartUsd = cb.netCostBasisUsd;
-        if (oldStartUsd > 0 && Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < 0.01) {
-          // < 5% diff — не override, но всё равно прокидываем matchedV3TokenId.
+        if (oldStartUsd > 0 && Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < DISTANCE_TOLERANCE) {
+          // L4: pct-diff < DISTANCE_TOLERANCE (1%) — не override, но
+          // прокидываем matchedV3TokenId чтобы downstream redistribution
+          // знал об установленной связи.
           const next: OpenPosition = { ...item.p, matchedV3TokenId: nft.tokenId.toString() };
           result[item.idx] = next;
           continue;
@@ -249,7 +271,12 @@ export function applyV3CostBasisOverride(
             startUsd: (t.startUsd / oldStartUsd) * newStartUsd,
           }));
         }
-        next.netPnlUsd = next.currentUsd - next.startUsd - next.currentDebtUsd;
+        // H6: do NOT subtract currentDebtUsd. PnL is the change in
+        // collateral value only; debt is a separate liability tracked
+        // via `currentDebtUsd`. Subtracting it here double-counts the
+        // loan against the user (the cash they received is sitting in
+        // their wallet, not lost to PnL).
+        next.netPnlUsd = next.currentUsd - next.startUsd;
         next.netPnlPct =
           next.startUsd > 0 ? (next.netPnlUsd / next.startUsd) * 100 : 0;
         result[item.idx] = next;
@@ -293,7 +320,9 @@ export function applyV3CostBasisOverride(
       // Найти NFT с таким netCostBasisUsd (точное совпадение после override).
       for (const nft of nfts) {
         const cb = v3CostBasis.get(nft.tokenId.toString());
-        if (cb && Math.abs(cb.netCostBasisUsd - overriddenStart) < 0.01) {
+        // Absolute (not pct) — comparing two USD amounts directly,
+// 1 cent difference = identity match for FX rounding noise.
+if (cb && Math.abs(cb.netCostBasisUsd - overriddenStart) < 0.01) {
           greedyMatchedNftIds.add(nft.tokenId.toString());
           break;
         }
@@ -316,14 +345,19 @@ export function applyV3CostBasisOverride(
     const currentTotalStart = itemsWithoutMatch.reduce((s, x) => s + x.p.startUsd, 0);
     if (currentTotalStart <= 0) continue;
 
-    const diffPct =
-      Math.abs(unmatchedAuthTotal - currentTotalStart) / currentTotalStart;
-    if (diffPct < 0.01) continue;
-
+    // H5 (2026-05-14): previous logic compared GROUP totals — if the
+    // sum of all unmatched positions' old startUsd was within 1% of
+    // the authoritative sum, the entire group was skipped. This hid
+    // compensating per-NFT errors (e.g. +$2k on one position offset
+    // by −$2k on another → sum looks correct, but each individual
+    // PnL is wrong by tens of percent). Now we ALWAYS apply pro-rata
+    // distribution at the per-NFT level and only skip writes that
+    // are individually within tolerance.
     const totalCurrent = itemsWithoutMatch.reduce(
       (s, x) => s + Math.max(0, x.p.currentUsd),
       0,
     );
+    let groupApplied = 0;
     for (const x of itemsWithoutMatch) {
       const share =
         totalCurrent > 0
@@ -331,6 +365,16 @@ export function applyV3CostBasisOverride(
           : 1 / itemsWithoutMatch.length;
       const newStartUsd = unmatchedAuthTotal * share;
       const oldStartUsd = x.p.startUsd;
+      // Per-NFT skip: don't churn if our pro-rata estimate lands
+      // within 1% of the existing startUsd. The override has FX cost
+      // (recomputes supplyTokens proportionally, breaks downstream
+      // memoization), so it's worth dodging when not needed.
+      if (
+        oldStartUsd > 0 &&
+        Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < DISTANCE_TOLERANCE
+      ) {
+        continue;
+      }
       const next: OpenPosition = { ...x.p };
       next.startUsd = newStartUsd;
       if (oldStartUsd > 0) {
@@ -339,18 +383,22 @@ export function applyV3CostBasisOverride(
           startUsd: (t.startUsd / oldStartUsd) * newStartUsd,
         }));
       }
-      next.netPnlUsd = next.currentUsd - next.startUsd - next.currentDebtUsd;
+      // H6: collateral-side PnL only.
+      next.netPnlUsd = next.currentUsd - next.startUsd;
       next.netPnlPct =
         next.startUsd > 0 ? (next.netPnlUsd / next.startUsd) * 100 : 0;
       result[x.idx] = next;
       overriddenCount++;
+      groupApplied++;
     }
 
-    warnings.push(
-      `[V3 override pro-rata] ${key}: oldTotal=$${currentTotalStart.toFixed(2)} → ` +
-        `authTotal=$${unmatchedAuthTotal.toFixed(2)} ` +
-        `(${itemsWithoutMatch.length} unmatched positions)`,
-    );
+    if (groupApplied > 0) {
+      warnings.push(
+        `[V3 override pro-rata] ${key}: oldTotal=$${currentTotalStart.toFixed(2)} → ` +
+          `authTotal=$${unmatchedAuthTotal.toFixed(2)} ` +
+          `(${groupApplied}/${itemsWithoutMatch.length} unmatched positions adjusted)`,
+      );
+    }
   }
 
   return { positions: result, overriddenCount, warnings };

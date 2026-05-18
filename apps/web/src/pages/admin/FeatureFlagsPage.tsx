@@ -105,7 +105,8 @@ export function AdminFeatureFlagsPage(): JSX.Element {
                         {rows.length} scope-ряд(ов)
                       </span>
                     </div>
-                    <table className="w-full text-sm">
+                    <div className="overflow-x-auto">
+                    <table className="w-full min-w-[500px] text-sm">
                       <thead className="text-left text-muted-foreground">
                         <tr>
                           <th className="py-1">Scope</th>
@@ -155,6 +156,7 @@ export function AdminFeatureFlagsPage(): JSX.Element {
                         ))}
                       </tbody>
                     </table>
+                    </div>
                   </div>
                 ))}
               </div>

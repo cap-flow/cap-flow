@@ -5,10 +5,11 @@ import {
   CreditCard,
   DollarSign,
   Flag,
+  HeartPulse,
+  KeyRound,
   LayoutGrid,
   ListChecks,
   LogOut,
-  MailPlus,
   Menu,
   ShieldAlert,
   ShieldCheck,
@@ -29,17 +30,52 @@ interface AdminNavItem {
   readonly icon: typeof Users;
 }
 
-const ADMIN_NAV: AdminNavItem[] = [
-  { to: "/admin/metrics", label: "SaaS-метрики", icon: BarChart3 },
-  { to: "/admin/portfolios", label: "Портфели", icon: LayoutGrid },
-  { to: "/admin/users", label: "Пользователи", icon: Users },
-  { to: "/admin/invites", label: "Приглашения", icon: MailPlus },
-  { to: "/admin/billing", label: "Биллинг", icon: CreditCard },
-  { to: "/admin/feature-flags", label: "Feature flags", icon: Flag },
-  { to: "/admin/audit", label: "Аудит-лог", icon: ListChecks },
-  { to: "/admin/tech-audit", label: "Тех. аудит", icon: ShieldAlert },
-  { to: "/admin/queue", label: "Очередь", icon: ActivityIcon },
-  { to: "/admin/api-usage", label: "Расходы API", icon: DollarSign },
+interface AdminNavGroup {
+  readonly title: string | null;
+  readonly items: AdminNavItem[];
+}
+
+/**
+ * Admin sidebar — три блока:
+ *   1. Обзор: SaaS-метрики (overview / KPIs).
+ *   2. Пользователи: всё что связано с user lifecycle — список юзеров,
+ *      их портфели, приглашения, биллинг.
+ *   3. Технический блок: системные настройки и observability — feature
+ *      flags, аудит-логи, очередь jobs, расходы API, подключения
+ *      интеграций.
+ *
+ * Группировка устаканилась после того как стало 11 пунктов в плоском
+ * списке — без секций трудно было ориентироваться между user-facing
+ * и ops-facing разделами.
+ */
+const ADMIN_NAV: AdminNavGroup[] = [
+  {
+    title: null,
+    items: [{ to: "/admin/metrics", label: "SaaS-метрики", icon: BarChart3 }],
+  },
+  {
+    // "Приглашения" свёрнуты в саб-таб внутри `/admin/users` — это
+    // одна сущность (lifecycle пользователя), нет смысла держать
+    // отдельный пункт навигации с дублирующейся таблицей.
+    title: "Пользователи",
+    items: [
+      { to: "/admin/users", label: "Пользователи", icon: Users },
+      { to: "/admin/portfolios", label: "Портфели", icon: LayoutGrid },
+      { to: "/admin/billing", label: "Биллинг", icon: CreditCard },
+    ],
+  },
+  {
+    title: "Технический блок",
+    items: [
+      { to: "/admin/feature-flags", label: "Feature flags", icon: Flag },
+      { to: "/admin/audit", label: "Аудит-лог", icon: ListChecks },
+      { to: "/admin/tech-audit", label: "Тех. аудит", icon: ShieldAlert },
+      { to: "/admin/queue", label: "Очередь", icon: ActivityIcon },
+      { to: "/admin/health", label: "Health", icon: HeartPulse },
+      { to: "/admin/api-usage", label: "Расходы API", icon: DollarSign },
+      { to: "/admin/integrations", label: "Интеграции", icon: KeyRound },
+    ],
+  },
 ];
 
 export function AdminShell({ children }: { readonly children: React.ReactNode }) {
@@ -103,33 +139,42 @@ function AdminSidebar({
         </span>
       </div>
 
-      <nav className="flex-1 space-y-1 px-3 py-2">
-        {ADMIN_NAV.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            onClick={onClose}
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                isActive
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
-              )
-            }
-          >
-            {({ isActive }) => (
-              <>
-                <Icon
-                  className={cn(
-                    "h-4 w-4 shrink-0",
-                    isActive ? "text-brand-cyan" : "text-muted-foreground"
-                  )}
-                />
-                <span>{label}</span>
-              </>
+      <nav className="flex-1 space-y-3 overflow-y-auto px-3 py-2">
+        {ADMIN_NAV.map((group, gi) => (
+          <div key={group.title ?? `g${gi}`} className="space-y-1">
+            {group.title && (
+              <div className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
+                {group.title}
+              </div>
             )}
-          </NavLink>
+            {group.items.map(({ to, label, icon: Icon }) => (
+              <NavLink
+                key={to}
+                to={to}
+                onClick={onClose}
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                    isActive
+                      ? "bg-accent text-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                  )
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    <Icon
+                      className={cn(
+                        "h-4 w-4 shrink-0",
+                        isActive ? "text-brand-cyan" : "text-muted-foreground"
+                      )}
+                    />
+                    <span>{label}</span>
+                  </>
+                )}
+              </NavLink>
+            ))}
+          </div>
         ))}
       </nav>
 

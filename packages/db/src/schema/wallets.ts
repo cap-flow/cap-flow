@@ -32,6 +32,10 @@ export const wallets = pgTable(
       .references(() => accounts.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     kind: walletKindEnum("kind").notNull().default("external"),
+    /** UCB B5: когда last-synced on-chain ops (DeBank/Helius). Null = never. */
+    lastOpsSyncAt: timestamp("last_ops_sync_at", { withTimezone: true }),
+    /** Текст ошибки последнего ops-sync attempt. Null если success. */
+    lastOpsSyncError: text("last_ops_sync_error"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

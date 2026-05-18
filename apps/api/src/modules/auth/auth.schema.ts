@@ -17,6 +17,8 @@ export const meResponseSchema = z.object({
   role: z.enum(["admin", "user", "viewer"]),
   createdAt: z.string().datetime(),
   lastLoginAt: z.string().datetime().nullable(),
+  /** B4: email verification timestamp; NULL = not verified yet. */
+  emailVerifiedAt: z.string().datetime().nullable(),
   /** Present iff the current session is an admin acting as this user.
    *  Frontend uses it to render the persistent "you're impersonating X" banner. */
   impersonation: impersonationInfoSchema.nullable(),

@@ -148,14 +148,17 @@ export function applyRebaseYield(
   const trackerAmount = lots.currentAmount(walletId, symbol);
   const diff = liveAmount - trackerAmount;
   if (diff <= 0) return 0; // не растёт или уменьшился (rebase down)
+  // UCB D6: rebase yield = reward с cost basis $0.
+  // FMV нам не известен без spot price → не заполняем
+  // fmvAtAcquisitionUsd (best-effort: rebase aggregator может позже).
   lots.acquire({
     symbol,
     tokenId,
     chain,
     amount: diff,
-    costPerUnitUsd: 0, // yield, не покупка
+    costPerUnitUsd: 0,
     acquiredAt: asOfTime,
-    acquiredVia: "claim_rewards",
+    acquiredVia: "received_as_reward",
     sourceHash: `rebase:${symbol}:${asOfTime}`,
     walletId,
   });

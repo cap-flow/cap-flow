@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { usePrimaryAccount } from "@/features/accounts/hooks";
+import { useActiveAccount } from "@/features/accounts/hooks";
 import {
   importItemsSchema,
   type ImportItem,
@@ -55,7 +55,7 @@ const IMPORT_EXAMPLE: ImportItem[] = [
 
 export function OperationsPage(): JSX.Element {
   const t = useT();
-  const primary = usePrimaryAccount();
+  const primary = useActiveAccount();
 
   if (primary === undefined) {
     return (

@@ -66,7 +66,8 @@ import {
   type ProtocolBreakdown,
 } from "@/lib/dashboard/metrics";
 import { useUsdRub } from "@/lib/dashboard/fxRate";
-import { usePrimaryAccount } from "@/features/accounts/hooks";
+import { useActiveAccount } from "@/features/accounts/hooks";
+import { useCexValuation } from "@/features/cex/hooks";
 import {
   useAccountSnapshot,
   useTriggerAccountRefresh,
@@ -112,6 +113,9 @@ import {
   useAssetCompositions,
 } from "@/lib/portfolio/asset_composition";
 import { AssetCompositionDialog } from "@/components/portfolio/AssetCompositionDialog";
+import { OnboardingChecklist } from "@/components/onboarding/OnboardingChecklist";
+// TvlChart import kept commented for easy revert; component remains in source.
+// import { TvlChart } from "@/components/portfolio/TvlChart";
 import { cn } from "@/lib/utils";
 
 /**
@@ -168,15 +172,32 @@ function portfolioGroupOf(symbol: string): { key: string; label: string } {
 export function HomePage(): JSX.Element {
   const { locale } = useI18n();
   const { loadedById, internalHashes } = useLoadedWallets();
+  // F2: auto-redirect новых users на onboarding wizard. Один раз per device
+  // (флаг в localStorage). Если user уже завершил или пропустил — не редирект.
+  const homeNavigate = useNavigate();
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("capflow.onboarding.completed.v1") !== "true") {
+        homeNavigate("/onboarding", { replace: true });
+      }
+    } catch {
+      // localStorage unavailable — пропустить, не блокировать dashboard.
+    }
+  }, [homeNavigate]);
   const [annotations] = useOpAnnotations();
   const { rate: usdRub } = useUsdRub();
   // Server-side snapshot (worker-written hourly). Authoritative source
   // for top-level metrics (Текущий капитал, Стартовый капитал) — the
   // client-side compute from LoadedWalletsProvider stays for positions
   // and per-token breakdown until phase F6 finishes the migration.
-  const primary = usePrimaryAccount();
+  const primary = useActiveAccount();
   const { metrics: snapshotMetrics } = useAccountSnapshot(primary?.id);
   const triggerRefresh = useTriggerAccountRefresh(primary?.id);
+  // CEX balances across all connected exchanges, valued in USD. Folded
+  // into both Cap Wallet (top-right widget) and Capital Hero so the
+  // dashboard's totals reflect on-chain + CEX as one capital.
+  const cexValuationQ = useCexValuation();
+  const cexUsd = cexValuationQ.data?.totalUsd ?? 0;
 
   // Rebuild snapshot с учётом internal-pairs cross-wallet. Это важно: при
   // переводе между своими кошельками cost basis не должен «съедаться» как
@@ -598,7 +619,9 @@ export function HomePage(): JSX.Element {
     m.totalAssetsUsd - (m.walletUsd + m.protocolsAssetUsd);
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
+    // M12: tighter mobile spacing (space-y-4 sm:space-y-6) — saves
+    // ~16-24px of vertical real estate on phones across 6 sections.
+    <div className="mx-auto max-w-7xl space-y-4 sm:space-y-6">
       {/* Top: PageHeader (left) + compact Cap Wallet (right, на той же строке) */}
       <div className="flex flex-col items-start gap-4 lg:flex-row lg:gap-6">
         <div className="flex-1 min-w-0">
@@ -608,12 +631,14 @@ export function HomePage(): JSX.Element {
           <WalletBalancesBlock
             loadedList={loadedList}
             totalUsd={
-              m.walletUsd === 0 &&
+              (m.walletUsd === 0 &&
               typeof snapshotMetrics?.totalUsd === "number" &&
               snapshotMetrics.totalUsd > 0
                 ? snapshotMetrics.totalUsd
-                : m.walletUsd
+                : m.walletUsd) + cexUsd
             }
+            cexUsd={cexUsd}
+            cexAccounts={cexValuationQ.data?.perAccount ?? []}
             usdRub={usdRub}
             locale={locale}
             compact
@@ -629,11 +654,22 @@ export function HomePage(): JSX.Element {
         </div>
       </div>
 
+      {/* M17: onboarding checklist — auto-hides when all steps done. */}
+      <OnboardingChecklist />
+
+      {/* H17: TVL history chart — временно скрыт по запросу (2026-05-14).
+          Endpoint `/v1/accounts/:id/history` работает; компонент готов и
+          сохранён в `components/portfolio/TvlChart.tsx`. Чтобы вернуть —
+          раскомментировать импорт + строку ниже. */}
+      {/* <TvlChart /> */}
+
       {/* Сводка по капиталу — на всю ширину */}
       <CapitalHero
         m={m}
         usdRub={usdRub}
         snapshot={snapshotMetrics}
+        cexUsd={cexUsd}
+        cexUnpricedCount={cexValuationQ.data?.unpricedCount ?? 0}
         pnlTotalUsd={pnlTotalUsd}
         pnlTotalPct={pnlTotalPct}
         pnlOwnUsd={pnlOwnUsd}
@@ -728,6 +764,8 @@ function CapitalHero({
   m,
   usdRub,
   snapshot,
+  cexUsd = 0,
+  cexUnpricedCount = 0,
   pnlTotalUsd,
   pnlTotalPct,
   pnlOwnUsd,
@@ -748,6 +786,10 @@ function CapitalHero({
   m: DashboardMetrics;
   usdRub: number;
   snapshot: SnapshotMetrics | null;
+  /** Total USD of all connected CEX accounts (Bybit, OKX, Bitget, MEXC, BingX). */
+  cexUsd?: number;
+  /** How many CEX assets we couldn't price (registry miss / quota). */
+  cexUnpricedCount?: number;
   pnlTotalUsd: number;
   pnlTotalPct: number | null;
   pnlOwnUsd: number;
@@ -786,10 +828,14 @@ function CapitalHero({
           0,
         )
       : null;
-  const currentUsdToShow =
+  // Base is on-chain (worker snapshot wins over empty client compute);
+  // CEX assets are summed on top so the total reflects the user's full
+  // capital (DeFi + CEX), which is what "Текущий капитал" promises.
+  const onChainCurrentUsd =
     snapshotTotalUsd !== null && m.totalAssetsUsd === 0
       ? snapshotTotalUsd
       : m.totalAssetsUsd;
+  const currentUsdToShow = onChainCurrentUsd + cexUsd;
   const startUsdToShow =
     snapshotStartUsd !== null && snapshotStartUsd > 0 && m.startUsdEffective === 0
       ? snapshotStartUsd
@@ -801,10 +847,12 @@ function CapitalHero({
     typeof snapshot?.ownCapitalUsd === "number" ? snapshot.ownCapitalUsd : null;
   const snapshotDebtUsd =
     typeof snapshot?.totalDebtUsd === "number" ? snapshot.totalDebtUsd : null;
-  const ownCapitalToShow =
+  // CEX = own capital (no loans on CEX in our model) so fold it in.
+  const onChainOwnCapitalUsd =
     snapshotOwnCapitalUsd !== null && m.ownCapitalUsd === 0
       ? snapshotOwnCapitalUsd
       : m.ownCapitalUsd;
+  const ownCapitalToShow = onChainOwnCapitalUsd + cexUsd;
   const debtToShow =
     snapshotDebtUsd !== null && m.totalDebtUsd === 0
       ? snapshotDebtUsd
@@ -880,9 +928,17 @@ function CapitalHero({
         <BigKpi
           label="Текущий капитал"
           value={formatUsd(currentUsdToShow, locale)}
-          delta={`≈ ${formatRub(currentUsdToShow * usdRub, locale)}`}
+          delta={
+            cexUsd > 0
+              ? `≈ ${formatRub(currentUsdToShow * usdRub, locale)} · вкл. ${formatUsd(cexUsd, locale)} на CEX`
+              : `≈ ${formatRub(currentUsdToShow * usdRub, locale)}`
+          }
           deltaPositive
-          tooltip="Σ on-chain балансов кошельков + брутто-стоимость supply во всех DeFi-позициях. Источник: server snapshot (worker, hourly cron) с fallback на клиентский compute."
+          tooltip={
+            cexUsd > 0
+              ? `On-chain $${onChainCurrentUsd.toFixed(2)} + CEX $${cexUsd.toFixed(2)}. CEX = балансы Bybit/OKX/Bitget/MEXC/BingX по последнему snapshot.${cexUnpricedCount > 0 ? ` ${cexUnpricedCount} актив(ов) без CoinGecko-цены не учтены.` : ""}`
+              : "Σ on-chain балансов кошельков + брутто-стоимость supply во всех DeFi-позициях. Источник: server snapshot (worker, hourly cron) с fallback на клиентский compute."
+          }
         />
         <BigKpi
           label="Собственный капитал"
@@ -2424,6 +2480,8 @@ function tokenExplorerUrl(chain: string, tokenId: string): string | null {
 function WalletBalancesBlock({
   loadedList,
   totalUsd,
+  cexUsd = 0,
+  cexAccounts = [],
   usdRub,
   locale,
   compact = false,
@@ -2431,6 +2489,25 @@ function WalletBalancesBlock({
 }: {
   loadedList: Loaded[];
   totalUsd: number;
+  /** USD on connected CEX exchanges (Bybit/OKX/Bitget/MEXC/BingX).
+   *  Already included in `totalUsd` — passed separately so we can show
+   *  a small breakdown "+ CEX $X" under the headline number. */
+  cexUsd?: number;
+  /** Per-CEX-account valuation. Each entry rendered as its own
+   *  accordion section after the on-chain chain groups. */
+  cexAccounts?: ReadonlyArray<{
+    id: string;
+    exchange: string;
+    label: string | null;
+    totalUsd: number;
+    unpricedCount: number;
+    assets: ReadonlyArray<{
+      asset: string;
+      total: number;
+      priceUsd: number | null;
+      valueUsd: number;
+    }>;
+  }>;
   usdRub: number;
   locale: "en" | "ru";
   /** Компактный размер (для top-right widget). */
@@ -2484,7 +2561,10 @@ function WalletBalancesBlock({
         if (t.amount <= 0) continue;
         // Раньше фильтр `!t.isKnown` отсекал валидные SUI/TON/Cosmos
         // токены — теперь оставляем всё с балансом, фильтр только по USD.
-        if (t.usd < 0.5) continue;
+        // 2026-05-14: порог поднят 0.5 → 1.0 — пользователю мешала пыль
+        // (мем-токены копейки и т.п.). Те же $1 применяются и для CEX
+        // (CEX_DUST_USD ниже), чтобы оба источника прятали одинаковый шум.
+        if (t.usd < 1) continue;
         const chain = t.chain;
         const tokens = chainMap.get(chain) ?? new Map<string, AggregatedToken>();
         const key = t.symbol.toUpperCase();
@@ -2617,6 +2697,108 @@ function WalletBalancesBlock({
   // Auto-close отключён — пользователь сам управляет состоянием через клик
   // на заголовок (ранее автозакрывался через 5 сек, что мешало просмотру
   // длинного списка балансов).
+
+  // ─── Filters (chains / wallets / source) ──────────────────────────
+  //
+  // Empty set = "all selected" (no filtering). User toggles chips to
+  // narrow. Filters apply ONLY to the token list below — the headline
+  // `totalUsd` and counts stay accurate to the full portfolio so the
+  // user can always see what 100% looks like.
+  const [chainFilter, setChainFilter] = useState<Set<string>>(new Set());
+  const [walletFilter, setWalletFilter] = useState<Set<string>>(new Set());
+  const [sourceFilter, setSourceFilter] = useState<Set<"onchain" | "cex">>(
+    new Set(),
+  );
+  // CEX section collapse — separate from the global widget collapse so
+  // the user can keep on-chain expanded but hide the CEX dust groups.
+  const [cexSectionCollapsed, setCexSectionCollapsed] = useState(false);
+  // Show CEX dust (priced assets worth < $0.5). Default OFF — most of
+  // the time these are abandoned mem-token positions from old trades.
+  const [cexShowDust, setCexShowDust] = useState(false);
+  // Dust threshold mirrors the on-chain wallet code so both sources
+  // hide the same noise. $1 was chosen after user feedback that the
+  // CEX dust panel was full of mem-coin remainders worth pennies.
+  const CEX_DUST_USD = 1;
+  const toggleInSet = <T extends string>(
+    setter: React.Dispatch<React.SetStateAction<Set<T>>>,
+    v: T,
+  ) =>
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(v)) next.delete(v);
+      else next.add(v);
+      return next;
+    });
+
+  // Available on-chain wallet names (from `loadedList`) + CEX-account
+  // labels — used to build the wallet-filter chips.
+  const availableOnchainWallets = useMemo(
+    () =>
+      Array.from(new Set(loadedList.map((l) => l.wallet.name))).sort(),
+    [loadedList],
+  );
+  const availableChains = useMemo(
+    () => Array.from(new Set(loadedList.flatMap((l) =>
+      (l.live?.tokens ?? []).filter((t) => t.amount > 0 && t.usd >= 0.5).map((t) => t.chain),
+    ))).sort(),
+    [loadedList],
+  );
+
+  // Apply filters to chain breakdown. `wallet` filter narrows the
+  // tokens-inside-chain via `wallets[].name` membership; the chain
+  // itself stays.
+  const filteredByChain = useMemo(() => {
+    const skipOnchain = sourceFilter.size > 0 && !sourceFilter.has("onchain");
+    if (skipOnchain) return [];
+    return byChain
+      .filter((g) => chainFilter.size === 0 || chainFilter.has(g.chain))
+      .map((g) => {
+        if (walletFilter.size === 0) return g;
+        const filteredTokens = g.tokens
+          .map((t) => {
+            const ws = t.wallets.filter((w) => walletFilter.has(w.name));
+            if (ws.length === 0) return null;
+            const amount = ws.reduce((s, w) => s + w.amount, 0);
+            const usd = ws.reduce((s, w) => s + w.usd, 0);
+            return { ...t, wallets: ws, amount, usd };
+          })
+          .filter((t): t is NonNullable<typeof t> => t !== null);
+        const totalUsd = filteredTokens.reduce((s, t) => s + t.usd, 0);
+        return { ...g, tokens: filteredTokens, totalUsd };
+      })
+      .filter((g) => g.tokens.length > 0);
+  }, [byChain, chainFilter, walletFilter, sourceFilter]);
+
+  const filteredCexAccounts = useMemo(() => {
+    const skipCex = sourceFilter.size > 0 && !sourceFilter.has("cex");
+    if (skipCex) return [];
+    // Wallet filter: by exchange-name (case-insensitive).
+    const byWallet =
+      walletFilter.size === 0
+        ? cexAccounts
+        : cexAccounts.filter((a) => {
+            const candidates = [a.exchange, a.label].filter(
+              (s): s is string => !!s,
+            );
+            return candidates.some((c) => walletFilter.has(c));
+          });
+    // Apply dust filter to each account's asset list. "Dust" = either:
+    //   - priced asset worth < CEX_DUST_USD, or
+    //   - unpriced asset (no CoinGecko mapping) — almost always retired
+    //     mem-tokens, can't be valued, and user wants them gone by
+    //     default. They reappear when «Показать пыль» is toggled.
+    if (cexShowDust) return byWallet;
+    return byWallet.map((a) => {
+      const isDust = (x: { priceUsd: number | null; valueUsd: number }) =>
+        x.priceUsd == null || x.valueUsd < CEX_DUST_USD;
+      const dustCount = a.assets.filter(isDust).length;
+      const visible = a.assets.filter((x) => !isDust(x));
+      return { ...a, assets: visible, dustCount };
+    });
+  }, [cexAccounts, walletFilter, sourceFilter, cexShowDust]);
+
+  const activeFilterCount =
+    chainFilter.size + walletFilter.size + sourceFilter.size;
   const clientWalletsCount = useMemo(
     () => new Set(loadedList.map((l) => l.wallet.id)).size,
     [loadedList],
@@ -2701,46 +2883,20 @@ function WalletBalancesBlock({
           <div className="text-[10px] tabular-nums text-muted-foreground">
             ≈ {formatRub(totalUsd * usdRub, locale)}
           </div>
-          {(() => {
-            // Подсчёт активов с положительным amount но без рыночной цены
-            // (синтетика: GM/GLV-токены, jupiter vault NFTs, Sui receipt'ы…).
-            // Эти токены НЕ входят в totalUsd — пользователь должен видеть,
-            // что Capflow о них знает, но не может оценить.
-            const unpriced: { symbol: string; amount: number }[] = [];
-            for (const l of loadedList) {
-              if (!l.live) continue;
-              for (const t of l.live.tokens) {
-                if (
-                  t.amount > 0 &&
-                  (t.price === null || t.price === 0) &&
-                  t.symbol &&
-                  t.symbol !== "?"
-                ) {
-                  unpriced.push({ symbol: t.symbol, amount: t.amount });
-                }
-              }
-            }
-            if (unpriced.length === 0) return null;
-            const symbols = Array.from(
-              new Set(unpriced.map((u) => u.symbol)),
-            ).slice(0, 5);
-            const more = unpriced.length - symbols.length;
-            return (
-              <div
-                className="mt-1 text-[10px] text-warning/90"
-                title={`${unpriced.length} актив${unpriced.length === 1 ? "" : unpriced.length < 5 ? "а" : "ов"} без рыночной цены — не учтены в Total. Чаще всего синтетические токены протоколов (GM/GLV в GMTrade, vault-NFT в Jupiter Perps).`}
-              >
-                ⚠ {unpriced.length} актив
-                {unpriced.length === 1
-                  ? ""
-                  : unpriced.length < 5
-                    ? "а"
-                    : "ов"}{" "}
-                без цены: {symbols.join(", ")}
-                {more > 0 ? ` (+${more})` : ""}
-              </div>
-            );
-          })()}
+          {cexUsd > 0 && (
+            <div
+              className="mt-0.5 text-[10px] tabular-nums text-brand-cyan/90"
+              title="Включает балансы подключённых CEX-бирж (Bybit/OKX/Bitget/MEXC/BingX). Управляется в Реестре."
+            >
+              · вкл. {formatUsd(cexUsd, locale)} на CEX
+            </div>
+          )}
+          {/* Раньше здесь был warning «⚠ N активов без цены: …» —
+              скрыт по запросу пользователя (2026-05-14): сами токены
+              уже фильтруются ниже порогом `t.usd < 1`, отдельный
+              warning только мозолил глаза. Если когда-нибудь
+              понадобится для диагностики синтетики — вернуть из
+              истории git. */}
         </div>
 
         {/* Рабочие кнопки действий */}
@@ -2801,19 +2957,92 @@ function WalletBalancesBlock({
         )}
       >
         <div className="overflow-hidden">
-          <div className="max-h-[480px] overflow-y-auto overscroll-contain border-t border-border">
+          <div className="max-h-[520px] overflow-y-auto overscroll-contain border-t border-border">
             <SourcesIndicator loadedList={loadedList} />
-            {byChain.length === 0 ? (
+
+            {/* Filter chips — Сети / Кошельки / Источник */}
+            {(availableChains.length > 1 ||
+              availableOnchainWallets.length > 1 ||
+              cexAccounts.length > 0) && (
+              <div className="space-y-1.5 border-b border-border bg-secondary/30 px-3 py-2">
+                {/* Source: on-chain vs CEX — shown only if user has both */}
+                {cexAccounts.length > 0 && (
+                  <FilterChipRow
+                    label="Источник"
+                    items={[
+                      { value: "onchain", label: "On-chain" },
+                      { value: "cex", label: "CEX" },
+                    ]}
+                    selected={sourceFilter as Set<string>}
+                    onToggle={(v) =>
+                      toggleInSet(
+                        setSourceFilter as React.Dispatch<
+                          React.SetStateAction<Set<string>>
+                        >,
+                        v,
+                      )
+                    }
+                  />
+                )}
+                {/* Chains — only when more than one on-chain net is loaded */}
+                {availableChains.length > 1 && (
+                  <FilterChipRow
+                    label="Сети"
+                    items={availableChains.map((c) => ({
+                      value: c,
+                      label: c.toUpperCase(),
+                    }))}
+                    selected={chainFilter}
+                    onToggle={(v) => toggleInSet(setChainFilter, v)}
+                  />
+                )}
+                {/* Wallets: on-chain names + CEX exchange names */}
+                {(availableOnchainWallets.length + cexAccounts.length > 1) && (
+                  <FilterChipRow
+                    label="Кошельки"
+                    items={[
+                      ...availableOnchainWallets.map((n) => ({
+                        value: n,
+                        label: n,
+                      })),
+                      ...cexAccounts.map((a) => ({
+                        value: a.exchange,
+                        label: `${a.exchange}${a.label ? ` · ${a.label}` : ""}`,
+                      })),
+                    ]}
+                    selected={walletFilter}
+                    onToggle={(v) => toggleInSet(setWalletFilter, v)}
+                  />
+                )}
+                {activeFilterCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChainFilter(new Set());
+                      setWalletFilter(new Set());
+                      setSourceFilter(new Set());
+                    }}
+                    className="text-[10px] text-muted-foreground hover:text-foreground"
+                  >
+                    × сбросить все ({activeFilterCount})
+                  </button>
+                )}
+              </div>
+            )}
+
+            {filteredByChain.length === 0 && filteredCexAccounts.length === 0 ? (
               <p className="px-4 py-4 text-sm text-muted-foreground">
-                Нет загруженных балансов.
+                {activeFilterCount > 0
+                  ? "Нет балансов под текущие фильтры."
+                  : "Нет загруженных балансов."}
               </p>
             ) : (
-              byChain.map((group, idx) => (
+              filteredByChain.map((group, idx) => (
                 <Fragment key={`${group.chain}-${group.variant}`}>
                   {/* Заголовок «Расписки» (a/cTokens, debt) — компактный
                       с tooltip-иконкой вместо длинного описательного блока. */}
                   {group.variant === "receipts" &&
-                    byChain[idx - 1]?.variant !== "receipts" && (
+                    filteredByChain[idx - 1]?.variant !== "receipts" && (
                       <div className="flex items-center justify-between gap-2 border-y border-warning/30 bg-warning/5 px-4 py-1.5">
                         <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-warning">
                           <span className="inline-block h-3 w-0.5 rounded bg-warning" />
@@ -2843,7 +3072,7 @@ function WalletBalancesBlock({
                     )}
                   {/* Заголовок «LP / Vault позиции» (GM/GLV/fVLT/UNI-V/LST) */}
                   {group.variant === "lp_vault" &&
-                    byChain[idx - 1]?.variant !== "lp_vault" && (
+                    filteredByChain[idx - 1]?.variant !== "lp_vault" && (
                       <div className="flex items-center justify-between gap-2 border-y border-brand-cyan/30 bg-brand-cyan/5 px-4 py-1.5">
                         <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-brand-cyan">
                           <span className="inline-block h-3 w-0.5 rounded bg-brand-cyan" />
@@ -2885,8 +3114,229 @@ function WalletBalancesBlock({
                 </Fragment>
               ))
             )}
+            {/* CEX accounts — rendered after on-chain chain groups so
+                the visual separation between "on-chain" and "exchange"
+                is obvious. Section header is clickable to collapse the
+                whole CEX block (chain groups stay visible). */}
+            {filteredCexAccounts.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setCexSectionCollapsed((v) => !v)}
+                  className="flex w-full items-center justify-between gap-2 border-y border-brand-cyan/30 bg-brand-cyan/5 px-4 py-1.5 transition-colors hover:bg-brand-cyan/10"
+                >
+                  <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-brand-cyan">
+                    <ChevronDown
+                      className={cn(
+                        "h-3 w-3 transition-transform",
+                        cexSectionCollapsed && "-rotate-90",
+                      )}
+                    />
+                    <span className="inline-block h-3 w-0.5 rounded bg-brand-cyan" />
+                    Биржи (CEX)
+                  </span>
+                  <span className="flex items-center gap-2 text-[10px]">
+                    {!cexSectionCollapsed && (() => {
+                      const totalDust = filteredCexAccounts.reduce(
+                        (s, a) =>
+                          s + ((a as { dustCount?: number }).dustCount ?? 0),
+                        0,
+                      );
+                      return totalDust > 0 ? (
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setCexShowDust((v) => !v);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setCexShowDust((v) => !v);
+                            }
+                          }}
+                          className="cursor-pointer rounded border border-brand-cyan/40 bg-brand-cyan/10 px-1.5 py-px font-medium normal-case text-brand-cyan/90 hover:bg-brand-cyan/20"
+                        >
+                          {cexShowDust
+                            ? "скрыть пыль"
+                            : `+${totalDust} пыль`}
+                        </span>
+                      ) : null;
+                    })()}
+                    <span className="tabular-nums text-brand-cyan/80">
+                      {formatUsd(
+                        filteredCexAccounts.reduce((s, a) => s + a.totalUsd, 0),
+                        locale,
+                      )}
+                    </span>
+                  </span>
+                </button>
+                {!cexSectionCollapsed &&
+                  filteredCexAccounts.map((acc) => (
+                    <CexAccountGroup
+                      key={acc.id}
+                      account={acc}
+                      walletTotalUsd={totalUsd}
+                      locale={locale}
+                      compact={compact}
+                    />
+                  ))}
+              </>
+            )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Render one CEX account's assets as a chain-style group inside the
+ * Cap Wallet widget. Visually consistent with the on-chain chain
+ * groups above so the user perceives "Bitget" and "ETH" as parallel
+ * "sources" of capital.
+ */
+function CexAccountGroup({
+  account,
+  walletTotalUsd,
+  locale,
+  compact,
+}: {
+  account: {
+    id: string;
+    exchange: string;
+    label: string | null;
+    totalUsd: number;
+    unpricedCount: number;
+    assets: ReadonlyArray<{
+      asset: string;
+      total: number;
+      priceUsd: number | null;
+      valueUsd: number;
+    }>;
+  };
+  walletTotalUsd: number;
+  locale: "en" | "ru";
+  compact: boolean;
+}) {
+  const headerName = account.label
+    ? `${account.exchange} · ${account.label}`
+    : account.exchange;
+  const pct =
+    walletTotalUsd > 0 ? (account.totalUsd / walletTotalUsd) * 100 : 0;
+  return (
+    <div className="border-b border-border/60 last:border-b-0">
+      <div
+        className={cn(
+          "flex items-center justify-between gap-2 bg-secondary/30",
+          compact ? "px-3 py-1" : "px-4 py-1.5",
+        )}
+      >
+        <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-foreground/80">
+          {headerName}
+          {account.unpricedCount > 0 && (
+            <span
+              className="rounded border border-warning/40 bg-warning/10 px-1 py-px text-[9px] normal-case text-warning"
+              title={`${account.unpricedCount} актив(ов) без CoinGecko-цены — не учтены в сумме.`}
+            >
+              {account.unpricedCount} без цены
+            </span>
+          )}
+        </span>
+        <span className="text-[10px] tabular-nums text-muted-foreground">
+          {formatUsd(account.totalUsd, locale)}
+          {pct > 0 && <span className="ml-1 opacity-70">· {pct.toFixed(1)}%</span>}
+        </span>
+      </div>
+      {account.assets.length === 0 ? (
+        <p className={cn("text-[11px] text-muted-foreground", compact ? "px-3 py-1" : "px-4 py-1.5")}>
+          Нет активов в последнем snapshot. Нажмите «Синхронизировать» на бирже в Реестре.
+        </p>
+      ) : (
+        <ul>
+          {account.assets.map((a) => (
+            <li
+              key={a.asset}
+              className={cn(
+                "flex items-center justify-between gap-2 text-[11px]",
+                compact ? "px-3 py-1" : "px-4 py-1.5",
+              )}
+            >
+              <span className="font-mono uppercase text-foreground">
+                {a.asset}
+              </span>
+              <span className="flex items-center gap-2 tabular-nums">
+                <span className="text-muted-foreground">
+                  {formatNumber(a.total, locale, 6)}
+                </span>
+                {a.priceUsd != null ? (
+                  <span className="text-foreground/80">
+                    {formatUsd(a.valueUsd, locale)}
+                  </span>
+                ) : (
+                  <span
+                    className="text-warning/80"
+                    title="Нет CoinGecko-цены — не учтён в сумме капитала."
+                  >
+                    —
+                  </span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Multi-select filter chip row used inside the Cap Wallet widget.
+ * Empty selection = "all" (no filter). Matches the visual language of
+ * the chips used in RegistryPage for consistency.
+ */
+function FilterChipRow({
+  label,
+  items,
+  selected,
+  onToggle,
+}: {
+  label: string;
+  items: ReadonlyArray<{ value: string; label: string }>;
+  selected: Set<string>;
+  onToggle: (v: string) => void;
+}) {
+  return (
+    <div className="space-y-0.5">
+      <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+        {selected.size > 0 && (
+          <span className="ml-1 rounded-full bg-brand-cyan/15 px-1 text-[9px] font-bold text-brand-cyan">
+            {selected.size}
+          </span>
+        )}
+      </span>
+      <div className="flex flex-wrap gap-1">
+        {items.map((it) => {
+          const active = selected.has(it.value);
+          return (
+            <button
+              key={it.value}
+              type="button"
+              onClick={() => onToggle(it.value)}
+              className={cn(
+                "inline-flex items-center rounded-full border px-1.5 py-px text-[10px] transition-all",
+                active
+                  ? "border-brand-cyan/60 bg-brand-cyan/15 text-brand-cyan"
+                  : "border-border bg-secondary/50 text-muted-foreground hover:border-brand-cyan/30 hover:text-foreground",
+              )}
+            >
+              {it.label}
+            </button>
+          );
+        })}
       </div>
     </div>
   );

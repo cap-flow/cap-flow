@@ -53,11 +53,17 @@ export class PortfolioRefreshQueue {
     actorUserId: string,
     trigger: "admin" | "user"
   ): Promise<string> {
+    // M6 (2026-05-14): widen the dedup window from 1s to 30s. Every
+    // refresh consumes ~5 DeBank credits + queues a worker job; the
+    // pre-fix 1-second bucket was too tight to catch impatient
+    // double-/triple-clicks (slow first refresh → user mashes button
+    // → 5+ refreshes queued in 3 seconds). 30s suppresses noise while
+    // still allowing a deliberate re-trigger half-a-minute later.
+    const bucket = Math.floor(Date.now() / 30_000);
     const job = await this.queue.add(
       "refresh",
       { accountId, trigger, actorUserId },
-      // Unique per (account, second) so a double-click doesn't pile up.
-      { jobId: `manual-${accountId}-${Math.floor(Date.now() / 1000)}` }
+      { jobId: `manual-${accountId}-${bucket}` }
     );
     return job.id ?? "unknown";
   }

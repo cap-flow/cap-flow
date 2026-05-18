@@ -102,9 +102,11 @@ export async function upstreamProxyRoutes(
       const t0 = Date.now();
       let httpStatus = 0;
       let errorMsg: string | undefined;
+      let retries = 0;
       try {
         const r = await opts.service.forward(proxyReq);
         httpStatus = r.status;
+        retries = r.retries ?? 0;
         reply.code(r.status);
         if (r.contentType) reply.header("Content-Type", r.contentType);
         return reply.send(r.body);
@@ -129,12 +131,19 @@ export async function upstreamProxyRoutes(
       } finally {
         // Per-user audit/observability. Don't wait — fire & forget.
         // If api_usage write fails we still served the user.
+        // Encode retry count into the endpoint string so we can grep
+        // `(r=N)` to find which calls had to back off — useful when
+        // diagnosing rate-limit pressure on a provider.
+        const endpoint =
+          retries > 0
+            ? `${method} ${upstreamPath.slice(0, 180)} (r=${retries})`
+            : `${method} ${upstreamPath.slice(0, 200)}`;
         void opts.apiUsage
           .insert({
             userId: u.id,
             accountId: null,
             provider: `upstream:${provider}`,
-            endpoint: `${method} ${upstreamPath.slice(0, 200)}`,
+            endpoint,
             httpStatus,
             durationMs: Date.now() - t0,
             cacheHit: 0,

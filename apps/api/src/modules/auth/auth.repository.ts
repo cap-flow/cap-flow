@@ -14,6 +14,12 @@ export interface CreateSessionInput {
    *  across refresh rotations so the banner survives page reloads. */
   readonly impersonatedById?: string;
   readonly impersonationMode?: "view" | "edit";
+  /**
+   * H1: rotation chain. NULL on login → server stamps with the new
+   * session.id (self-rooted family). On rotation, copy from the
+   * parent session so the chain stays linkable for reuse-detection.
+   */
+  readonly familyId?: string;
 }
 
 export interface CreateUserInput {
@@ -27,13 +33,29 @@ export interface IAuthRepository {
   findActiveUserByEmail(email: string): Promise<UserRow | null>;
   findUserByEmail(email: string): Promise<UserRow | null>;
   findActiveUserById(id: string): Promise<UserRow | null>;
+  /** Any user by id, including blocked/pending — used by email verification. */
+  findUserById(id: string): Promise<UserRow | null>;
   createUser(input: CreateUserInput): Promise<UserRow>;
   setPasswordHash(userId: string, passwordHash: string): Promise<void>;
   touchUserLastLogin(userId: string, when: Date): Promise<void>;
+  /** B4: stamp `users.email_verified_at` only if currently NULL (don't overwrite earlier verifications). */
+  markEmailVerified(userId: string, at: Date): Promise<UserRow | null>;
   createSession(input: CreateSessionInput): Promise<SessionRow>;
   findActiveSessionByTokenHash(tokenHash: string): Promise<SessionRow | null>;
+  /**
+   * H1: lookup by token hash regardless of revoked_at — used by refresh
+   * flow to detect reuse of an already-rotated token. Returns null only
+   * when the hash truly doesn't exist.
+   */
+  findAnySessionByTokenHash(tokenHash: string): Promise<SessionRow | null>;
   findActiveSessionById(id: string): Promise<SessionRow | null>;
-  revokeSession(sessionId: string, when: Date): Promise<void>;
+  revokeSession(sessionId: string, when: Date, reason?: string): Promise<void>;
+  /** H1: revoke every session in a family (token-reuse detector hammer). */
+  revokeSessionFamily(
+    familyId: string,
+    when: Date,
+    reason: string
+  ): Promise<number>;
   touchSessionLastUsed(sessionId: string, when: Date): Promise<void>;
 }
 
@@ -96,6 +118,37 @@ export class AuthRepository implements IAuthRepository {
       .where(eq(schema.users.id, userId));
   }
 
+  async findUserById(id: string): Promise<UserRow | null> {
+    const rows = await this.db
+      .select()
+      .from(schema.users)
+      .where(eq(schema.users.id, id))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Stamp `email_verified_at = at` only if it's currently NULL. Returns the
+   * fresh row (or the existing one if already verified earlier). This is
+   * the email-verification idempotency contract: confirming a token twice,
+   * or after admin manually verified, must not overwrite the older timestamp.
+   */
+  async markEmailVerified(userId: string, at: Date): Promise<UserRow | null> {
+    const [row] = await this.db
+      .update(schema.users)
+      .set({ emailVerifiedAt: at, updatedAt: at })
+      .where(and(eq(schema.users.id, userId), isNull(schema.users.emailVerifiedAt)))
+      .returning();
+    if (row) return row;
+    // Either user doesn't exist, or already verified earlier.
+    const rows = await this.db
+      .select()
+      .from(schema.users)
+      .where(eq(schema.users.id, userId))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   async touchUserLastLogin(userId: string, when: Date): Promise<void> {
     await this.db
       .update(schema.users)
@@ -112,6 +165,7 @@ export class AuthRepository implements IAuthRepository {
         userAgent: input.userAgent,
         ip: input.ip,
         expiresAt: input.expiresAt,
+        ...(input.familyId ? { familyId: input.familyId } : {}),
         ...(input.impersonatedById
           ? {
               impersonatedById: input.impersonatedById,
@@ -121,6 +175,14 @@ export class AuthRepository implements IAuthRepository {
       })
       .returning();
     if (!row) throw new Error("Session insert returned no row.");
+    // H1: self-root the family on login (no parent supplied).
+    if (!input.familyId) {
+      await this.db
+        .update(schema.sessions)
+        .set({ familyId: row.id })
+        .where(eq(schema.sessions.id, row.id));
+      return { ...row, familyId: row.id };
+    }
     return row;
   }
 
@@ -140,6 +202,17 @@ export class AuthRepository implements IAuthRepository {
     return rows[0] ?? null;
   }
 
+  async findAnySessionByTokenHash(
+    tokenHash: string
+  ): Promise<SessionRow | null> {
+    const rows = await this.db
+      .select()
+      .from(schema.sessions)
+      .where(eq(schema.sessions.sessionTokenHash, tokenHash))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   async findActiveSessionById(id: string): Promise<SessionRow | null> {
     const rows = await this.db
       .select()
@@ -151,11 +224,33 @@ export class AuthRepository implements IAuthRepository {
     return rows[0] ?? null;
   }
 
-  async revokeSession(sessionId: string, when: Date): Promise<void> {
+  async revokeSession(
+    sessionId: string,
+    when: Date,
+    reason: string = "rotated"
+  ): Promise<void> {
     await this.db
       .update(schema.sessions)
-      .set({ revokedAt: when })
+      .set({ revokedAt: when, revokedReason: reason })
       .where(eq(schema.sessions.id, sessionId));
+  }
+
+  async revokeSessionFamily(
+    familyId: string,
+    when: Date,
+    reason: string
+  ): Promise<number> {
+    const rows = await this.db
+      .update(schema.sessions)
+      .set({ revokedAt: when, revokedReason: reason })
+      .where(
+        and(
+          eq(schema.sessions.familyId, familyId),
+          isNull(schema.sessions.revokedAt)
+        )
+      )
+      .returning({ id: schema.sessions.id });
+    return rows.length;
   }
 
   async touchSessionLastUsed(sessionId: string, when: Date): Promise<void> {

@@ -1,0 +1,13 @@
+[Unit]
+# One-shot postgres backup runner. Triggered by capflow-backup.timer (daily).
+Description=Capflow postgres backup
+
+[Service]
+Type=oneshot
+User=capflow
+Group=capflow
+EnvironmentFile=/etc/capflow/backup.env
+ExecStart=/srv/capflow/infra/scripts/backup-postgres.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=capflow-backup

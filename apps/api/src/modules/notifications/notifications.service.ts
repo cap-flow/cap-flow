@@ -139,6 +139,26 @@ export class NotificationsService {
     });
   }
 
+  async sendEmailVerification(
+    user: UserRow,
+    verifyUrl: string
+  ): Promise<SendResult> {
+    return this.send({
+      user,
+      type: "email_verification",
+      subject: "Подтвердите ваш email — Capflow",
+      bodyText:
+        `Здравствуйте!\n\n` +
+        `Чтобы завершить регистрацию в Capflow, подтвердите этот email — ` +
+        `перейдите по ссылке (действительна 24 часа):\n\n` +
+        `${verifyUrl}\n\n` +
+        `После подтверждения вы получите доступ ко всем функциям ` +
+        `(в т.ч. восстановление пароля и уведомления о платежах).\n\n` +
+        `Если вы не регистрировались — просто игнорируйте письмо.`,
+      transactional: true,
+    });
+  }
+
   async sendInvite(
     invitedEmail: string,
     inviteUrl: string,

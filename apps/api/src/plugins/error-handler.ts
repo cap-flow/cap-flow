@@ -1,3 +1,6 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import type { FastifyInstance } from "fastify";
 import fp from "fastify-plugin";
 import { hasZodFastifySchemaValidationErrors } from "fastify-type-provider-zod";
@@ -64,7 +67,46 @@ export const errorHandlerPlugin = fp(async (app: FastifyInstance) => {
       });
     }
 
+    // Honor `error.statusCode` set by middleware/plugins (e.g.
+    // @fastify/rate-limit throws a plain Error with statusCode=429 and
+    // a "Rate limit exceeded, retry in N minutes" message). Pre-fix
+    // these surfaced as 500 because they're not instanceof AppError —
+    // the user got "Something went wrong" instead of the actual
+    // rate-limit explanation.
+    const code =
+      typeof (error as { statusCode?: unknown }).statusCode === "number"
+        ? ((error as { statusCode: number }).statusCode)
+        : 0;
+    if (code >= 400 && code < 600) {
+      return reply.status(code).send({
+        error: (error as { code?: string }).code ?? error.name ?? "Error",
+        message: error.message ?? "Request failed.",
+      });
+    }
+
     request.log.error({ err: error }, "unhandled error");
+
+    // Diagnostic side-channel: write the last unhandled error to a
+    // file so developers can read it without scraping stdout of the
+    // tsx watch process. The file is overwritten on every 500 — we
+    // only ever care about the most recent one. Best-effort: any IO
+    // failure is swallowed, response semantics are unchanged.
+    try {
+      const err = error as Error;
+      const payload = [
+        `[${new Date().toISOString()}] ${request.method} ${request.url}`,
+        `name: ${err.name}`,
+        `message: ${err.message}`,
+        `stack: ${err.stack ?? "(no stack)"}`,
+      ].join("\n");
+      // process.cwd() for the API process is apps/api when started
+      // via `pnpm --filter @cap-flow/api dev`.
+      writeFileSync(join(process.cwd(), "tmp", "last-500.log"), payload + "\n", {
+        flag: "w",
+      });
+    } catch {
+      /* file logging is best-effort */
+    }
 
     return reply.status(500).send({
       error: "InternalServerError",

@@ -61,7 +61,13 @@ import {
   type SavedWallet,
   type WalletChain,
 } from "@/lib/wallets";
-import { usePrimaryAccount } from "@/features/accounts/hooks";
+import { useActiveAccount } from "@/features/accounts/hooks";
+import {
+  useCexAccounts,
+  useCexTransfersWithHash,
+  useCexWithdrawalCostBasis,
+  useSyncAllCex,
+} from "@/features/cex/hooks";
 import { walletsApi, type AddressType } from "@/features/wallets/api";
 import { computeLpCloseAttribution } from "@/lib/portfolio/cost_basis_tracker";
 import { useT, useI18n } from "@/i18n/I18nProvider";
@@ -75,10 +81,14 @@ import { cn } from "@/lib/utils";
 import { Chip } from "@/components/ui/Chip";
 import { ManualAnnotationCell } from "@/components/portfolio/ManualAnnotationCell";
 import { BulkFiatMarker } from "@/components/portfolio/BulkFiatMarker";
+import { CexExchangesPanel } from "@/components/cex/CexExchangesPanel";
 import {
   annotationKey,
   useOpAnnotations,
 } from "@/lib/portfolio/manual_annotations";
+import { useAnnotations } from "@/features/chain-ops/hooks";
+import { OpAnnotationDialog } from "@/components/data/OpAnnotationDialog";
+import { useAuth } from "@/features/auth/AuthProvider";
 import { Banknote, Landmark, Tag } from "lucide-react";
 
 type AnnotationFilter = "all" | "any" | "fiat" | "credit" | "none";
@@ -154,6 +164,19 @@ export function RegistryPage(): JSX.Element {
   const [filtersOpen, setFiltersOpen] = useState<boolean>(false);
   const [annotations] = useOpAnnotations();
 
+  // UCB A3: server-side annotations (override classifier). Bulk-load
+  // ВСЕХ annotations user'а, потом строим composite-key map для O(1)
+  // lookup в строках таблицы.
+  const auth = useAuth();
+  const serverAnnotationsQuery = useAnnotations(!!auth.user?.id);
+  const serverAnnotationsByKey = useMemo(() => {
+    const m = new Map<string, import("@/features/chain-ops/api").ResolvedAnnotation>();
+    for (const a of serverAnnotationsQuery.data?.annotations ?? []) {
+      m.set(`${a.walletId}|${a.txHash.toLowerCase()}|${a.logIndex}`, a);
+    }
+    return m;
+  }, [serverAnnotationsQuery.data]);
+
   // Toggle helper для Set-фильтров.
   function toggleSet<T>(setter: React.Dispatch<React.SetStateAction<Set<T>>>, v: T) {
     setter((prev) => {
@@ -189,6 +212,45 @@ export function RegistryPage(): JSX.Element {
   // нашими кошельками с одинаковым семейством токена и близкой суммой
   // переклассифицируются как `bridge_out` / `bridge_in`.
   const loadedList = useLoadedListWithBridges(loadedListRaw);
+
+  // Hash-индекс CEX-переводов: один lookup по tx_hash и мы знаем, что
+  // эта on-chain операция парная депозиту/выводу с биржи. Регистр
+  // показывает badge "↔ Bitget" вместо обычного "transfer".
+  const cexTransfersWithHashQ = useCexTransfersWithHash();
+  const cexLinkByHash = useMemo(() => {
+    const m = new Map<
+      string,
+      { exchange: string; label: string | null; direction: "deposit" | "withdrawal" }
+    >();
+    for (const t of cexTransfersWithHashQ.data ?? []) {
+      // Hash equality is case-insensitive on EVM (0x… stored mixed-case
+      // by Bitget). Index by lowercased form, lookup the same way.
+      m.set(t.txHash.toLowerCase(), {
+        exchange: t.exchange,
+        label: t.label,
+        direction: t.direction as "deposit" | "withdrawal",
+      });
+    }
+    return m;
+  }, [cexTransfersWithHashQ.data]);
+
+  // Cost-basis для каждого withdrawal с биржи — позволяет показывать
+  // «Стартовый капитал из фиата» бэйдж на on-chain приёмных операциях.
+  const costBasisQ = useCexWithdrawalCostBasis();
+  const cexCostBasisByHash = useMemo(() => {
+    const m = new Map<
+      string,
+      { costBasisUsd: number; source: string; asset: string }
+    >();
+    for (const c of costBasisQ.data ?? []) {
+      m.set(c.txHash.toLowerCase(), {
+        costBasisUsd: c.costBasisUsd,
+        source: c.source,
+        asset: c.asset,
+      });
+    }
+    return m;
+  }, [costBasisQ.data]);
 
   const allOps = useMemo<ClassifiedOpWithWallet[]>(() => {
     const arr: ClassifiedOpWithWallet[] = [];
@@ -427,7 +489,14 @@ export function RegistryPage(): JSX.Element {
         registrySync={registrySync}
       />
 
-      {anyLoaded && <CacheFreshness />}
+      <CexExchangesPanel />
+
+      {/* CacheFreshness теперь рендерится и когда есть только CEX
+          (без on-chain кошельков) — кнопка «Обновить всё» в нём
+          синкает CEX-биржи тоже, поэтому она нужна даже когда
+          loadedList пуст. */}
+      <CacheFreshness />
+      {void anyLoaded}
 
       {error && (
         <Card>
@@ -709,6 +778,9 @@ export function RegistryPage(): JSX.Element {
               locale={locale}
               lpCloseUsdByHash={lpCloseUsdByHash}
               internalHashes={internalHashes}
+              cexLinkByHash={cexLinkByHash}
+              cexCostBasisByHash={cexCostBasisByHash}
+              annotationsByKey={serverAnnotationsByKey}
             />
           )}
         </>
@@ -842,12 +914,45 @@ function RawOpsTable({
   locale,
   lpCloseUsdByHash,
   internalHashes,
+  cexLinkByHash,
+  cexCostBasisByHash,
+  annotationsByKey,
 }: {
   ops: ClassifiedOpWithWallet[];
   locale: "en" | "ru";
   lpCloseUsdByHash: Map<string, number>;
   internalHashes: Set<string>;
+  cexLinkByHash: Map<
+    string,
+    { exchange: string; label: string | null; direction: "deposit" | "withdrawal" }
+  >;
+  cexCostBasisByHash: Map<
+    string,
+    { costBasisUsd: number; source: string; asset: string }
+  >;
+  /**
+   * UCB A3: map по composite key `${walletId}|${txHash}|${logIndex}` →
+   * resolved annotation. Когда пользователь открывает annotation dialog
+   * мы pre-fill'им форму current value (если есть) и шлём composite key
+   * на upsert.
+   */
+  annotationsByKey: Map<string, import("@/features/chain-ops/api").ResolvedAnnotation>;
 }) {
+  // Local state для открытия annotation dialog'а — храним выбранный op.
+  const [editingOp, setEditingOp] = useState<ClassifiedOpWithWallet | null>(
+    null,
+  );
+
+  // Map'инг compositeId → walletId UUID. Composite frontend id —
+  // `api:<walletId>:<addressId>`, walletId UUID = средняя часть.
+  const realWalletId = useCallback((compositeId: string): string => {
+    if (compositeId.startsWith("api:")) {
+      const parts = compositeId.split(":");
+      return parts[1] ?? compositeId;
+    }
+    return compositeId;
+  }, []);
+
   return (
     <Card>
       <CardContent className="px-0 pb-0">
@@ -904,6 +1009,46 @@ function RawOpsTable({
                         ↔ internal
                       </span>
                     )}
+                    {(() => {
+                      const cex = cexLinkByHash.get(op.hash.toLowerCase());
+                      if (!cex) return null;
+                      const label = cex.label
+                        ? `${cex.exchange}/${cex.label}`
+                        : cex.exchange;
+                      return (
+                        <span
+                          className="ml-1 inline-block rounded border border-purple-500/40 bg-purple-500/10 px-1 py-0.5 text-[9px] uppercase tracking-wider text-purple-400"
+                          title={`Парная операция с биржей ${label} (${cex.direction === "deposit" ? "вы отправили на CEX" : "пришло с CEX"}). Cost basis сохраняется, не считается продажей/покупкой.`}
+                        >
+                          ↔ {label}
+                        </span>
+                      );
+                    })()}
+                    {(() => {
+                      // Cost-basis-from-fiat badge: applies only to
+                      // incoming on-chain ops paired with a CEX
+                      // WITHDRAWAL (CEX → wallet). The cost basis is
+                      // the USD value the user effectively invested in
+                      // the chain Fiat → P2P → trade → withdrawal.
+                      const cb = cexCostBasisByHash.get(
+                        op.hash.toLowerCase(),
+                      );
+                      if (!cb || cb.costBasisUsd <= 0) return null;
+                      const sourceLabel = {
+                        "fiat-direct": "из фиата (точно)",
+                        "fiat-stable": "≈ из фиата (стейбл)",
+                        inherited: "наследовано",
+                        unknown: "?",
+                      }[cb.source as "fiat-direct" | "fiat-stable" | "inherited" | "unknown"] ?? cb.source;
+                      return (
+                        <span
+                          className="ml-1 inline-block rounded border border-emerald-500/40 bg-emerald-500/10 px-1 py-0.5 text-[9px] uppercase tracking-wider text-emerald-400"
+                          title={`Cost basis из CEX-цепочки: $${cb.costBasisUsd.toFixed(2)} (${sourceLabel}). Это «стартовый капитал» для этого ${cb.asset} — отслежен от P2P/трейдов на бирже до выводе сюда.`}
+                        >
+                          $ {cb.costBasisUsd.toFixed(2)}
+                        </span>
+                      );
+                    })()}
                     {op.type === "lp_remove" &&
                       lpCloseUsdByHash.get(`${op.wallet.id}|${op.hash}`) != null && (
                         <div
@@ -970,15 +1115,38 @@ function RawOpsTable({
                     {op.gasUsd != null && op.gasUsd > 0 ? formatUsd(op.gasUsd, locale) : "—"}
                   </td>
                   <td className="px-3 py-2 text-right">
-                    <a
-                      href={explorerUrl(op)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 font-mono text-[10px] text-brand-cyan hover:underline"
-                    >
-                      {shortAddress(op.hash, 6, 4)}
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
+                    <div className="inline-flex items-center gap-2">
+                      <a
+                        href={explorerUrl(op)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 font-mono text-[10px] text-brand-cyan hover:underline"
+                      >
+                        {shortAddress(op.hash, 6, 4)}
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => setEditingOp(op)}
+                        title={
+                          annotationsByKey.get(
+                            `${realWalletId(op.wallet.id)}|${op.hash.toLowerCase()}|0`,
+                          )
+                            ? "Аннотация задана — нажмите для редактирования"
+                            : "Добавить аннотацию (UCB A3)"
+                        }
+                        className={
+                          "rounded border px-1.5 py-0.5 text-[10px] transition " +
+                          (annotationsByKey.get(
+                            `${realWalletId(op.wallet.id)}|${op.hash.toLowerCase()}|0`,
+                          )
+                            ? "border-brand-cyan/60 bg-brand-cyan/10 text-brand-cyan"
+                            : "border-border text-muted-foreground hover:bg-accent/40")
+                        }
+                      >
+                        ✎
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -986,6 +1154,26 @@ function RawOpsTable({
           </table>
         </div>
       </CardContent>
+      {editingOp && (
+        <OpAnnotationDialog
+          open
+          onClose={() => setEditingOp(null)}
+          chainOpId={
+            annotationsByKey.get(
+              `${realWalletId(editingOp.wallet.id)}|${editingOp.hash.toLowerCase()}|0`,
+            )?.chainOpId ?? null
+          }
+          walletId={realWalletId(editingOp.wallet.id)}
+          txHash={editingOp.hash.toLowerCase()}
+          logIndex={0}
+          opType={editingOp.type}
+          current={
+            annotationsByKey.get(
+              `${realWalletId(editingOp.wallet.id)}|${editingOp.hash.toLowerCase()}|0`,
+            ) ?? null
+          }
+        />
+      )}
     </Card>
   );
 }
@@ -1401,11 +1589,19 @@ function CacheFreshness() {
   const { locale } = useI18n();
   const { loadedById, busyId, loadAll, forgetAll } = useLoadedWallets();
   const wallets = useWallets();
+  // Полная синхронизация теперь включает и CEX-биржи: ребята жаловались
+  // что после reload приходится дёргать «Обновить» по одной кнопке на
+  // КАЖДОЙ бирже в подразделах P2P/Переводы. Объединяем в одну кнопку.
+  const cexAccountsQ = useCexAccounts();
+  const cexAccountsCount = cexAccountsQ.data?.length ?? 0;
+  const syncAllCex = useSyncAllCex();
+  const isBusy = Boolean(busyId) || syncAllCex.isPending;
 
   const loaded = Object.values(loadedById);
-  if (loaded.length === 0) return null;
+  if (loaded.length === 0 && cexAccountsCount === 0) return null;
 
-  const oldestLoadedAt = Math.min(...loaded.map((l) => l.loadedAt));
+  const oldestLoadedAt =
+    loaded.length > 0 ? Math.min(...loaded.map((l) => l.loadedAt)) : Date.now();
   const ageMs = Date.now() - oldestLoadedAt;
   const ageHours = ageMs / 3_600_000;
 
@@ -1418,34 +1614,91 @@ function CacheFreshness() {
 
   const stale = ageHours > 1;
 
+  const handleRefreshAll = async (opts?: { full?: boolean }) => {
+    // Параллелим: wallets-refresh и CEX-sync независимы. Внутри CEX
+    // sync-all сам идёт последовательно по аккаунтам — не упрёмся в
+    // 429. Все ошибки локализованы в своих promise'ах и не валят друг
+    // друга.
+    const tasks: Promise<unknown>[] = [];
+    if (wallets.list.length > 0)
+      tasks.push(loadAll(opts?.full ? { full: true } : undefined));
+    if (cexAccountsCount > 0) tasks.push(syncAllCex.mutateAsync());
+    await Promise.allSettled(tasks);
+  };
+
+  // Свожу результаты CEX в одну строку для inline-фидбэка.
+  const cexSummary = (() => {
+    const r = syncAllCex.data;
+    if (!r || r.length === 0) return null;
+    const dep = r.reduce((s, x) => s + (x.transfers?.newDeposits ?? 0), 0);
+    const wd = r.reduce((s, x) => s + (x.transfers?.newWithdrawals ?? 0), 0);
+    const trades = r.reduce((s, x) => s + (x.balance?.newTrades ?? 0), 0);
+    const p2p = r.reduce((s, x) => s + (x.p2p?.newOrders ?? 0), 0);
+    const errs = r.filter(
+      (x) =>
+        (x.balance && !x.balance.ok) ||
+        (x.transfers && !x.transfers.ok) ||
+        (x.p2p && !x.p2p.ok),
+    );
+    return { dep, wd, trades, p2p, errs };
+  })();
+
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-secondary/40 px-4 py-2 text-xs text-muted-foreground">
       <div>
         <span className={stale ? "text-warning" : "text-success"}>●</span>{" "}
-        {t("registry.cache.updated")} <span className="font-medium text-foreground">{ageLabel}</span> {t("registry.cache.ago")} ·{" "}
-        {loaded.length}/{wallets.list.length} {t("registry.cache.wallets")} ·{" "}
-        <span className="font-mono text-[10px]">cache v{CURRENT_CACHE_VERSION}</span>
+        {t("registry.cache.updated")}{" "}
+        <span className="font-medium text-foreground">{ageLabel}</span>{" "}
+        {t("registry.cache.ago")} · {loaded.length}/{wallets.list.length}{" "}
+        {t("registry.cache.wallets")}
+        {cexAccountsCount > 0 && (
+          <>
+            {" · "}
+            <span className="text-brand-cyan">
+              {cexAccountsCount} CEX
+            </span>
+          </>
+        )}{" "}
+        ·{" "}
+        <span className="font-mono text-[10px]">
+          cache v{CURRENT_CACHE_VERSION}
+        </span>
+        {cexSummary && (
+          <span className="ml-2 text-[10px] text-muted-foreground">
+            · last CEX sync: +{cexSummary.trades} trades · +{cexSummary.dep}
+            /-{cexSummary.wd} transfers · +{cexSummary.p2p} P2P
+            {cexSummary.errs.length > 0 && (
+              <span className="ml-1 text-warning">
+                ({cexSummary.errs.length} err)
+              </span>
+            )}
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-2">
         <Button
           variant="ghost"
           size="sm"
-          disabled={Boolean(busyId)}
-          onClick={() => void loadAll()}
-          title={t("registry.cache.incrementalHint")}
+          disabled={isBusy}
+          onClick={() => void handleRefreshAll()}
+          title="Инкрементальный refresh: кошельки + балансы/трейды/переводы/P2P на всех CEX"
         >
-          <RotateCw className="h-3.5 w-3.5" />
-          {t("registry.cache.refresh")}
+          {syncAllCex.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RotateCw className="h-3.5 w-3.5" />
+          )}
+          Обновить всё
         </Button>
         <Button
           variant="ghost"
           size="sm"
-          disabled={Boolean(busyId)}
+          disabled={isBusy}
           onClick={() => {
             if (window.confirm(t("registry.cache.confirmFull")))
-              void loadAll({ full: true });
+              void handleRefreshAll({ full: true });
           }}
-          title={t("registry.cache.fullHint")}
+          title="Полный рефреш: переcчитать кошельки с нуля + синхронизация CEX"
         >
           <RotateCw className="h-3.5 w-3.5" />
           {t("registry.cache.fullRefresh")}
@@ -1491,7 +1744,7 @@ function useRegistryApiSync(
   onRemove: (localId: string) => Promise<void>;
   migrating: boolean;
 } {
-  const primary = usePrimaryAccount();
+  const primary = useActiveAccount();
   // Migration was a one-time bridge from pre-SaaS localStorage entries
   // to the API. After Hydration switched to server-only mode, legacy
   // entries are dropped on the next render, so the migration loop only

@@ -54,6 +54,23 @@ export const sessions = pgTable(
       .notNull()
       .defaultNow(),
 
+    /**
+     * H1 (2026-05-14): refresh-token family for reuse detection.
+     *
+     * The first session minted for a user (login) gets `family_id = id`.
+     * Every subsequent rotation copies the parent's family_id. If a
+     * previously-rotated token is presented again (= refresh-token reuse,
+     * which means someone has a leaked token), we revoke the ENTIRE
+     * family — both attacker and victim get logged out, forcing
+     * re-authentication via password.
+     *
+     * Reason discriminator on `revoked_at` lets the reuse-detector tell
+     * "rotated" (rotation chain still valid) from "logout"/"admin"
+     * (rotation chain ended cleanly).
+     */
+    familyId: uuid("family_id"),
+    revokedReason: text("revoked_reason"),
+
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -64,6 +81,7 @@ export const sessions = pgTable(
     ),
     index("sessions_user_idx").on(table.userId),
     index("sessions_expires_idx").on(table.expiresAt),
+    index("sessions_family_idx").on(table.familyId),
   ]
 );
 

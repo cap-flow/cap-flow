@@ -28,8 +28,26 @@ export type AdminAggregate = z.infer<typeof adminAggregateSchema>;
 
 const adminAccountsListSchema = z.array(adminAccountRowSchema);
 
+const refreshAllResponseSchema = z.object({
+  enqueued: z.number(),
+  accountIds: z.array(z.string().uuid()),
+});
+export type AdminRefreshAllResponse = z.infer<typeof refreshAllResponseSchema>;
+
 export const adminPortfoliosApi = {
   list: () => api.get("/v1/admin/portfolios", adminAccountsListSchema),
   aggregate: () =>
     api.get("/v1/admin/portfolios/aggregate", adminAggregateSchema),
+  refreshAll: () =>
+    api.post(
+      "/v1/admin/portfolios/refresh-all",
+      undefined,
+      refreshAllResponseSchema
+    ),
+  refreshOne: (accountId: string) =>
+    api.post(
+      `/v1/admin/portfolios/${accountId}/refresh`,
+      undefined,
+      z.object({ jobId: z.string(), accountId: z.string().uuid() })
+    ),
 };

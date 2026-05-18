@@ -408,7 +408,7 @@ function OpenPositionsPageInner(): JSX.Element {
       opsByWallet,
       walletHistPrices.histPrices,
       lotMethodology,
-      costBasisOverrideByHash, // UCB C4: A4/D3/C2/C3 merged overrides
+      costBasisOverrideByHash,
     );
     if (lendingResult.overriddenCount > 0) {
       for (const w of lendingResult.warnings) console.warn(w);

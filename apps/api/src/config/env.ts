@@ -40,6 +40,13 @@ const envSchema = z.object({
     .url()
     .default("http://localhost:5173/reset-password"),
 
+  // B4: email verification
+  EMAIL_VERIFY_TTL_HOURS: z.coerce.number().int().positive().default(24),
+  EMAIL_VERIFY_BASE_URL: z
+    .string()
+    .url()
+    .default("http://localhost:5173/verify-email"),
+
   // Rate limiting
   RATE_LIMIT_LOGIN_PER_15MIN: z.coerce.number().int().positive().default(5),
 
@@ -79,11 +86,74 @@ const envSchema = z.object({
   HELIUS_API_KEY: z.string().optional(),    // Solana wallet balances
   COINSTATS_API_KEY: z.string().optional(), // multi-chain unified API (Phase 3d)
 
+  /**
+   * Optional HTTPS proxy for ALL outgoing CEX-exchange traffic. Set
+   * this when the API server runs in a region the exchange's CDN
+   * geoblocks (Bybit / OKX / BingX from RU/CIS).
+   *
+   * Format:
+   *   http://user:pass@host:port
+   *   http://host:port
+   *   socks5://host:port            (use a SOCKS proxy — supported via
+   *                                  socks-proxy-agent fallback)
+   *
+   * The proxy is applied to BOTH the CCXT HTTPS client (balance /
+   * trades / deposits / withdrawals across every connected exchange)
+   * AND the native-fetch Bitget P2P client.
+   *
+   * Also honors `HTTPS_PROXY` / `https_proxy` env vars as a fallback,
+   * matching common ops conventions.
+   */
+  CEX_HTTPS_PROXY: z.string().optional(),
+
+  /**
+   * B5 (2026-05-14): encryption key for `integration_secrets.value`.
+   * Optional — if absent, the admin-integrations service derives a key
+   * from COOKIE_SECRET (already enforced ≥32 chars). Set this explicitly
+   * before rotating COOKIE_SECRET, otherwise stored secrets become
+   * undecryptable. Must be ≥32 chars when set.
+   */
+  INTEGRATION_SECRETS_KEY: z
+    .string()
+    .min(32, "INTEGRATION_SECRETS_KEY must be ≥32 chars")
+    .optional(),
+
   // Per-user upstream quotas (beta values — generous, mainly for logging).
   QUOTA_COINGECKO_PER_DAY: z.coerce.number().int().positive().default(2000),
   QUOTA_DEBANK_PER_DAY: z.coerce.number().int().positive().default(2000),
   QUOTA_ALCHEMY_PER_DAY: z.coerce.number().int().positive().default(5000),
   QUOTA_ETHERSCAN_PER_DAY: z.coerce.number().int().positive().default(5000),
+
+  /**
+   * H3 (2026-05-14): per-user upstream-proxy rate-limit. Was hard-coded
+   * to {60, 600} before beta testing required them lifted to {6000,
+   * 60000}, but the lifted values never got rolled back via env. Now
+   * env-gated with safe defaults for public launch.
+   *
+   * Tuning guide:
+   *   - 60/min × 600/hour = normal SaaS dashboard session
+   *   - 600/min × 6000/hour = power user with multi-account drill-down
+   *   - 6000/min × 60000/hour = effectively-off (use only for local QA)
+   * The hour cap should always be ≥ 10× the minute cap so a legit
+   * burst doesn't permanently lock the user out.
+   */
+  UPSTREAM_RATE_PER_MIN: z.coerce.number().int().positive().default(60),
+  UPSTREAM_RATE_PER_HOUR: z.coerce.number().int().positive().default(600),
+
+  /**
+   * M8 (2026-05-14): pg connection pool size. Was hard-coded to 10 in
+   * `createDbClient`. Under load (50 concurrent requests, multi-statement
+   * txs) the pool saturates and additional requests wait. Default
+   * bumped to 20 for API (per-process). Worker still uses 10 since
+   * its concurrency is bounded by BullMQ already.
+   *
+   * Total Postgres connections = (API replicas × DB_POOL_MAX) +
+   * (worker replicas × DB_POOL_MAX_WORKER) — keep under
+   * `postgresql.max_connections` (default 100).
+   */
+  DB_POOL_MAX: z.coerce.number().int().positive().default(20),
+  DB_POOL_MAX_WORKER: z.coerce.number().int().positive().default(10),
+  DB_POOL_IDLE_MS: z.coerce.number().int().positive().default(30_000),
 
   // Cache TTLs (seconds).
   CACHE_PRICE_TTL_SEC: z.coerce.number().int().positive().default(300),

@@ -62,6 +62,9 @@ export class LotTracker {
       acquiredVia: opts.acquiredVia,
       sourceHash: opts.sourceHash,
       walletId: opts.walletId,
+      ...(opts.fmvAtAcquisitionUsd !== undefined && {
+        fmvAtAcquisitionUsd: opts.fmvAtAcquisitionUsd,
+      }),
     };
     const k = key(opts.walletId, opts.symbol);
     let arr = this.lots.get(k);
@@ -69,10 +72,22 @@ export class LotTracker {
       arr = [];
       this.lots.set(k, arr);
     }
-    arr.push(lot);
-    // Поддерживаем хронологический порядок (на случай если ops приходят
-    // вне порядка — для FIFO/LIFO это критично).
-    arr.sort((a, b) => a.acquiredAt - b.acquiredAt);
+    // M4 (2026-05-14): binary-search insert in O(log n) + O(n) splice
+    // instead of `push + sort` which was O(n log n) per acquire. For
+    // 5000-lot wallets the old approach was ~25M sort ops; this brings
+    // it to ~60k. Maintains chronological invariant FIFO/LIFO depend on.
+    //
+    // Most acquires arrive in time order (ops are pre-sorted upstream),
+    // so the binary search lands at the tail in O(1) effectively. The
+    // worst case is back-fills (manual fiat annotations).
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (arr[mid]!.acquiredAt <= opts.acquiredAt) lo = mid + 1;
+      else hi = mid;
+    }
+    arr.splice(lo, 0, lot);
     return lot;
   }
 
@@ -141,6 +156,30 @@ export class LotTracker {
       remaining -= take;
       totalCost += costPart;
       totalAmount += take;
+    }
+
+    // M3 (2026-05-14): WAC drift fix.
+    //
+    // After a WAC consume, lot.amount is decremented but the original
+    // costPerUnitUsd stays unchanged on each remaining lot. The sum
+    // `Σ amount × costPerUnit` across remaining lots no longer matches
+    // "true" residual cost (pre-WAC × residual-amount). Future WAC
+    // computes from those stale per-lot prices → numerical drift.
+    //
+    // Fix: normalize ALL remaining lots' `costPerUnitUsd` to the
+    // pre-consume WAC (which mathematically equals the post-consume
+    // WAC under proportional consumption). Eliminates drift while
+    // preserving FIFO/LIFO chronological order for `currentAvg` /
+    // `currentAmount` and audit trail.
+    //
+    // No-op for FIFO/LIFO — per-lot prices are the source of truth there.
+    if (this.methodology === "WAC" && wacCostPerUnit != null && wacCostPerUnit > 0) {
+      for (const lot of arr) {
+        if (lot.amount <= 1e-9) continue;
+        if (opts.tokenId && lot.tokenId !== opts.tokenId.toLowerCase()) continue;
+        if (opts.chain && lot.chain !== opts.chain) continue;
+        (lot as { costPerUnitUsd: number }).costPerUnitUsd = wacCostPerUnit;
+      }
     }
 
     // Чистим пустые лоты (amount ≈ 0).
@@ -234,6 +273,18 @@ export class LotTracker {
         return [...arr];
       case "LIFO":
         return [...arr].reverse();
+      case "HIFO":
+        // T1.1: Highest-In-First-Out. Берём лоты с наибольшим
+        // costPerUnitUsd первыми — это минимизирует gain (cost наибольший
+        // → разница с proceeds меньше). Tax-optimal для US Specific ID.
+        // Stable sort by acquiredAt asc — детерминированный tie-break при
+        // одинаковом cost.
+        return [...arr].sort((a, b) => {
+          if (b.costPerUnitUsd !== a.costPerUnitUsd) {
+            return b.costPerUnitUsd - a.costPerUnitUsd;
+          }
+          return a.acquiredAt - b.acquiredAt;
+        });
       case "WAC":
       default:
         // WAC: consume пропорционально. Эмулируем через "нормализованные" лоты —

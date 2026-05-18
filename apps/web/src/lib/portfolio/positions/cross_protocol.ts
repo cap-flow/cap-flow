@@ -19,7 +19,11 @@
  * через единственный chronological pass.
  */
 
-import { defillamaCoinKey, priceFromMap } from "@/lib/defillama";
+import {
+  defillamaCoinKey,
+  priceFromMap,
+  priceFromMapNearest,
+} from "@/lib/defillama";
 import { isJunkOp } from "../junk_filter";
 import { isStableSymbol } from "../protocols";
 import { isReceiptLessProtocol, isReceiptOfProtocol } from "../token_roles";
@@ -37,6 +41,16 @@ interface BuildResult {
 interface BuildOptions {
   histPrices?: Map<string, number>;
   walletNameById: Map<string, string>;
+  /**
+   * UCB A4.2: per-op cost basis overrides — keyed by `op.hash.toLowerCase()`.
+   * Override = TOTAL USD spent на acquisition этой tx (не per-unit).
+   * Применяется в handleSwap (заменяет paidUsd) и handleTransferIn
+   * (заменяет derived `tokenUsdHist`).
+   *
+   * Источник: server annotation `manual_cost_basis_usd` (A3 + A4 wiring
+   * в `LoadedWalletsProvider`).
+   */
+  costBasisOverrideByHash?: Map<string, number>;
 }
 
 function isGas(m: TokenMovement): boolean {
@@ -56,6 +70,11 @@ function tokenUsdHist(
   if (coin) {
     const hp = priceFromMap(histPrices, coin, time);
     if (hp != null && hp > 0) return m.amount * hp;
+    // UCB D9: sparse hist-data fallback — ближайший bucket в ±7d окне.
+    // Не идеально для time-sensitive metrics, но даёт approximate cost
+    // basis для редких токенов где иначе была бы 0.
+    const nearest = priceFromMapNearest(histPrices, coin, time);
+    if (nearest != null && nearest.price > 0) return m.amount * nearest.price;
   }
   if (m.usd != null && m.usd > 0) return m.usd;
   return 0;
@@ -87,7 +106,13 @@ export function buildLotsAndPositions(
   const lots = new LotTracker("WAC");
   const positions = new PositionTracker();
   const histPrices = options.histPrices ?? new Map<string, number>();
+  const overrides =
+    options.costBasisOverrideByHash ?? new Map<string, number>();
   const walletName = options.walletNameById.get(walletId) ?? walletId;
+
+  // UCB D5: per-symbol-family last bridge_out WAC, для передачи cost
+  // basis в matching bridge_in (та же chain-agnostic family key).
+  const lastBridgeOutWac = new Map<string, number>();
 
   const sorted = [...ops].sort((a, b) => a.time - b.time);
 
@@ -95,8 +120,19 @@ export function buildLotsAndPositions(
     if (op.status === "failed") continue;
     if (isJunkOp(op)) continue;
 
+    // D5: capture WAC ПЕРЕД consume в handleLotsForOp.
+    if (op.type === "bridge_out") {
+      for (const m of op.movement) {
+        if (m.direction !== "out" || m.amount <= 0) continue;
+        const wac = lots.wacAt(walletId, m.symbol, op.time);
+        if (wac != null && wac > 0) {
+          lastBridgeOutWac.set(m.symbol.toUpperCase(), wac);
+        }
+      }
+    }
+
     // 1. Обновляем lots для swap / transfer / claim / approve.
-    handleLotsForOp(op, lots, walletId, histPrices);
+    handleLotsForOp(op, lots, walletId, histPrices, overrides, lastBridgeOutWac);
 
     // 2. Если это позиционная op — эмитим event в PositionTracker.
     if (op.protocol) {
@@ -127,19 +163,35 @@ function handleLotsForOp(
   lots: LotTracker,
   walletId: string,
   histPrices: Map<string, number>,
+  overrides: Map<string, number>,
+  lastBridgeOutWac: Map<string, number>,
 ): void {
   // Эта функция отвечает за UPDATE lots для НЕ-позиционных ops (swap,
   // transfer_in/out, deposit_fiat, claim_rewards). Для позиционных
   // (lp_add/remove, lend_supply/withdraw, borrow/repay) lot-attribution
   // делается внутри `emitPositionEvent` вместе с position-event.
+  const override = overrides.get(op.hash.toLowerCase());
   switch (op.type) {
     case "swap":
-      handleSwap(op, lots, walletId, histPrices);
+      handleSwap(op, lots, walletId, histPrices, override);
       break;
     case "transfer_in":
     case "deposit_fiat":
+      handleTransferIn(op, lots, walletId, histPrices, override);
+      break;
     case "bridge_in":
-      handleTransferIn(op, lots, walletId, histPrices);
+      // UCB D5: bridge_in — другая семантика чем transfer_in. Cost basis
+      // должен сохраняться через chains (asset не покинул user'а, просто
+      // changed network). Precedence: override → lastBridgeOutWac →
+      // existing WAC → derived market.
+      handleBridgeIn(
+        op,
+        lots,
+        walletId,
+        histPrices,
+        override,
+        lastBridgeOutWac,
+      );
       break;
     case "transfer_out":
     case "withdraw_fiat":
@@ -157,6 +209,7 @@ function handleSwap(
   lots: LotTracker,
   walletId: string,
   histPrices: Map<string, number>,
+  overrideUsd?: number,
 ): void {
   const ins = op.movement.filter((m) => m.direction === "in" && m.amount > 0);
   const outs = op.movement.filter(
@@ -182,6 +235,15 @@ function handleSwap(
         : tokenUsdHist(m, op.chain, op.time, histPrices);
       paidUsd += fallbackUsd;
     }
+  }
+
+  // UCB A4.2: explicit override — заменяет derived paidUsd.
+  if (
+    overrideUsd != null &&
+    Number.isFinite(overrideUsd) &&
+    overrideUsd >= 0
+  ) {
+    paidUsd = overrideUsd;
   }
 
   const totalInUsd = ins.reduce(
@@ -216,12 +278,25 @@ function handleTransferIn(
   lots: LotTracker,
   walletId: string,
   histPrices: Map<string, number>,
+  overrideUsd?: number,
 ): void {
-  for (const m of op.movement) {
-    if (m.direction !== "in" || m.amount <= 0) continue;
-    const usd = isStableSymbol(m.symbol)
-      ? m.amount
-      : tokenUsdHist(m, op.chain, op.time, histPrices);
+  const ins = op.movement.filter((m) => m.direction === "in" && m.amount > 0);
+  const totalAmount = ins.reduce((s, m) => s + m.amount, 0);
+  for (const m of ins) {
+    let usd: number;
+    if (
+      overrideUsd != null &&
+      Number.isFinite(overrideUsd) &&
+      overrideUsd >= 0 &&
+      totalAmount > 0
+    ) {
+      // UCB A4.2: explicit override делится пропорционально по amount.
+      usd = overrideUsd * (m.amount / totalAmount);
+    } else {
+      usd = isStableSymbol(m.symbol)
+        ? m.amount
+        : tokenUsdHist(m, op.chain, op.time, histPrices);
+    }
     lots.acquire({
       symbol: m.symbol,
       tokenId: m.tokenId,
@@ -233,6 +308,83 @@ function handleTransferIn(
         op.type === "deposit_fiat"
           ? ("manual_seed" as AcquiredVia)
           : ("transfer_in" as AcquiredVia),
+      sourceHash: op.hash,
+      walletId,
+    });
+  }
+}
+
+/**
+ * UCB D5: bridge_in cost basis inheritance.
+ *
+ * Семантика bridge_in принципиально отличается от transfer_in:
+ *   - transfer_in: asset пришёл от внешнего отправителя (airdrop, salary,
+ *     CEX deposit). Cost basis = derived market price (или CEX inheritance
+ *     через override map).
+ *   - bridge_in: asset МОЙ ЖЕ, просто на другой chain. Cost basis сохранён
+ *     с предыдущей chain — должен наследоваться, не пересчитываться по
+ *     market price.
+ *
+ * Precedence (higher takes over):
+ *   1. Manual override (`overrideUsd` из A4 annotation)
+ *   2. Existing WAC того же (walletId, family) — D5 core
+ *   3. CEX cost basis inheritance (`overrideUsd` из server, D3)
+ *   4. Fallback: derived market price (legacy behavior)
+ *
+ * Note: lots in `LotTracker` keyed by `(walletId, family)` — chain-agnostic
+ * by design. После bridge_out на eth (consume) → bridge_in на arb (acquire),
+ * оба touch'ат тот же ключ `lex2|USDT`. WAC из существующих lots отражает
+ * cost basis до bridge'а — мы переиспользуем эту WAC для new lot.
+ *
+ * Fee bridge: разница (bridge_out_amount − bridge_in_amount) уже списана
+ * через consume в `handleTransferOut`; новый lot получает только пришедшее
+ * количество с той же WAC. PnL impact фен'а = (out_amount − in_amount) ×
+ * WAC, что и нужно.
+ */
+function handleBridgeIn(
+  op: ClassifiedOp,
+  lots: LotTracker,
+  walletId: string,
+  histPrices: Map<string, number>,
+  overrideUsd?: number,
+  lastBridgeOutWac?: Map<string, number>,
+): void {
+  const ins = op.movement.filter((m) => m.direction === "in" && m.amount > 0);
+  const totalAmount = ins.reduce((s, m) => s + m.amount, 0);
+  for (const m of ins) {
+    let usd: number;
+    if (
+      overrideUsd != null &&
+      Number.isFinite(overrideUsd) &&
+      overrideUsd >= 0 &&
+      totalAmount > 0
+    ) {
+      usd = overrideUsd * (m.amount / totalAmount);
+    } else {
+      const symKey = m.symbol.toUpperCase();
+      const wacFromBridge = lastBridgeOutWac?.get(symKey);
+      if (wacFromBridge != null && wacFromBridge > 0) {
+        usd = m.amount * wacFromBridge;
+        lastBridgeOutWac?.delete(symKey);
+      } else {
+        const existingWac = lots.wacAt(walletId, m.symbol, op.time);
+        if (existingWac != null && existingWac > 0) {
+          usd = m.amount * existingWac;
+        } else {
+          usd = isStableSymbol(m.symbol)
+            ? m.amount
+            : tokenUsdHist(m, op.chain, op.time, histPrices);
+        }
+      }
+    }
+    lots.acquire({
+      symbol: m.symbol,
+      tokenId: m.tokenId,
+      chain: op.chain,
+      amount: m.amount,
+      costPerUnitUsd: m.amount > 0 ? usd / m.amount : 0,
+      acquiredAt: op.time,
+      acquiredVia: "bridge_in" as AcquiredVia,
       sourceHash: op.hash,
       walletId,
     });
@@ -264,9 +416,11 @@ function handleClaim(
   walletId: string,
   histPrices: Map<string, number>,
 ): void {
+  // UCB D6: rewards = cost basis $0. FMV at receipt сохраняется
+  // отдельно для income reporting. См. build.ts.handleClaim.
   for (const m of op.movement) {
     if (m.direction !== "in" || m.amount <= 0) continue;
-    const usd = isStableSymbol(m.symbol)
+    const fmvUsd = isStableSymbol(m.symbol)
       ? m.amount
       : tokenUsdHist(m, op.chain, op.time, histPrices);
     lots.acquire({
@@ -274,11 +428,12 @@ function handleClaim(
       tokenId: m.tokenId,
       chain: op.chain,
       amount: m.amount,
-      costPerUnitUsd: m.amount > 0 ? usd / m.amount : 0,
+      costPerUnitUsd: 0,
       acquiredAt: op.time,
-      acquiredVia: "claim_rewards",
+      acquiredVia: "received_as_reward",
       sourceHash: op.hash,
       walletId,
+      fmvAtAcquisitionUsd: fmvUsd,
     });
   }
 }

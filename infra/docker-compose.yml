@@ -106,6 +106,13 @@ services:
   # `portfolio-refresh` and `payment-monitor` queues. Same image as the
   # api, different command. Must run; without it manual `/refresh` jobs
   # just queue forever.
+  #
+  # M9 (2026-05-14): runs `replicas: 2` for HA. BullMQ atomically locks
+  # jobs through Redis (one job → one worker), so dual replicas don't
+  # duplicate work. Override `WORKER_REPLICAS` env or comment out the
+  # `deploy` block if running under plain `docker-compose up` (which
+  # ignores `deploy.replicas` and starts 1 instance). For prod stick
+  # with `docker stack deploy` or k8s, both honor replicas.
   worker:
     image: ${API_IMAGE:-cap-flow-api:latest}
     build: *api-build
@@ -121,6 +128,11 @@ services:
       redis:
         condition: service_healthy
     networks: [internal]
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
 
   web:
     image: ${WEB_IMAGE:-cap-flow-web:latest}

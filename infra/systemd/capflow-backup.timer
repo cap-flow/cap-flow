@@ -1,0 +1,12 @@
+[Unit]
+# Trigger daily postgres backup at 03:00 UTC. Adjust if your DB has
+# active traffic peak — backup blocks vacuum/replication for the dump.
+Description=Daily Capflow postgres backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

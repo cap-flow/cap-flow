@@ -22,19 +22,22 @@ export class PasswordResetRepository implements IPasswordResetRepository {
   async create(input: CreateAuthTokenInput): Promise<AuthTokenRow> {
     const [row] = await this.db
       .insert(schema.authTokens)
-      .values(input)
+      .values({ ...input, purpose: "password_reset" })
       .returning();
     if (!row) throw new Error("auth_tokens insert returned no row.");
     return row;
   }
 
   async findActiveByHash(tokenHash: string): Promise<AuthTokenRow | null> {
+    // B4: scope by purpose so an email-verification token cannot be
+    // consumed via the password-reset flow.
     const rows = await this.db
       .select()
       .from(schema.authTokens)
       .where(
         and(
           eq(schema.authTokens.tokenHash, tokenHash),
+          eq(schema.authTokens.purpose, "password_reset"),
           isNull(schema.authTokens.consumedAt)
         )
       )

@@ -21,7 +21,11 @@ export const adminUserRowSchema = z.object({
 });
 export type AdminUserRow = z.infer<typeof adminUserRowSchema>;
 
-const adminUserListSchema = z.array(adminUserRowSchema);
+const adminUserListSchema = z.object({
+  items: z.array(adminUserRowSchema),
+  nextCursor: z.string().nullable(),
+});
+export type AdminUserListPage = z.infer<typeof adminUserListSchema>;
 
 const baseUserSchema = z.object({
   id: z.string().uuid(),
@@ -47,6 +51,8 @@ export interface ListFilter {
   readonly status?: AdminUserStatus | undefined;
   readonly role?: AdminUserRole | undefined;
   readonly search?: string | undefined;
+  readonly cursor?: string | undefined;
+  readonly limit?: number | undefined;
 }
 
 function toQuery(f: ListFilter): string {
@@ -54,6 +60,8 @@ function toQuery(f: ListFilter): string {
   if (f.status) p.set("status", f.status);
   if (f.role) p.set("role", f.role);
   if (f.search && f.search.trim()) p.set("search", f.search.trim());
+  if (f.cursor) p.set("cursor", f.cursor);
+  if (f.limit) p.set("limit", String(f.limit));
   const s = p.toString();
   return s ? `?${s}` : "";
 }
@@ -74,4 +82,11 @@ export const adminUsersApi = {
       undefined,
       impersonateResponseSchema
     ),
+
+  /**
+   * Hard-delete: removes user + all owned accounts (cascades wallets,
+   * operations, snapshots, payments, notifications). Admin-confirmed
+   * destructive action — UI must show a confirm dialog.
+   */
+  delete: (id: string) => api.delete<null>(`/v1/admin/users/${id}`),
 };

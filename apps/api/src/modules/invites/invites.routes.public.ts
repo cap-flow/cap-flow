@@ -51,6 +51,7 @@ export async function publicInviteRoutes(
       return {
         email: preview.email,
         expiresAt: preview.expiresAt.toISOString(),
+        notes: preview.notes,
       };
     }
   );
@@ -70,8 +71,9 @@ export async function publicInviteRoutes(
     async (req, reply) => {
       const tokens = await invites.registerByToken({
         token: req.params.token,
+        ...(req.body.email ? { email: req.body.email } : {}),
         password: req.body.password,
-        name: req.body.name,
+        ...(req.body.name ? { name: req.body.name } : {}),
         userAgent: req.headers["user-agent"] ?? null,
         ip: req.ip ?? null,
       });
@@ -98,6 +100,7 @@ function toMe(u: UserRow) {
     role: u.role as "admin" | "user" | "viewer",
     createdAt: u.createdAt.toISOString(),
     lastLoginAt: u.lastLoginAt ? u.lastLoginAt.toISOString() : null,
+    emailVerifiedAt: u.emailVerifiedAt ? u.emailVerifiedAt.toISOString() : null,
     // Self-register can never establish an impersonation session.
     impersonation: null,
   };

@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
+import { Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { useAuth } from "@/features/auth/AuthProvider";
 import {
   useAdminUsers,
+  useDeleteUser,
   useImpersonateUser,
   useSetUserRole,
   useSetUserStatus,
@@ -21,6 +24,7 @@ import { ApiError } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
 
 import { PageHeader } from "./_PageHeader";
+import { InvitesPanel } from "./InvitesPage";
 
 const STATUSES: Array<{ value: AdminUserStatus | ""; label: string }> = [
   { value: "", label: "Все статусы" },
@@ -36,10 +40,13 @@ const ROLES: Array<{ value: AdminUserRole | ""; label: string }> = [
   { value: "viewer", label: "Viewer" },
 ];
 
+type UsersTab = "users" | "invites";
+
 export function AdminUsersPage(): JSX.Element {
   const [statusFilter, setStatusFilter] = useState<AdminUserStatus | "">("");
   const [roleFilter, setRoleFilter] = useState<AdminUserRole | "">("");
   const [search, setSearch] = useState("");
+  const [tab, setTab] = useState<UsersTab>("users");
 
   // Debounce-lite: only fire the query for searches once 250ms idle.
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -60,14 +67,86 @@ export function AdminUsersPage(): JSX.Element {
     <div>
       <PageHeader
         title="Пользователи"
-        description="Список пользователей платформы. Изменение статуса/роли и view-mode impersonation."
+        description="Список пользователей платформы + invite-ссылки на регистрацию. Объединено в один раздел — invite это часть user lifecycle, не отдельная сущность."
         actions={
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
-            Обновить
-          </Button>
+          tab === "users" ? (
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              Обновить
+            </Button>
+          ) : null
         }
       />
 
+      <div className="mb-4 inline-flex rounded-md border border-border bg-card/40 p-1">
+        <button
+          type="button"
+          onClick={() => setTab("users")}
+          className={cn(
+            "rounded px-3 py-1.5 text-sm font-medium transition-colors",
+            tab === "users"
+              ? "bg-accent text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          )}
+        >
+          Зарегистрированные ({data?.items.length ?? 0})
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("invites")}
+          className={cn(
+            "rounded px-3 py-1.5 text-sm font-medium transition-colors",
+            tab === "invites"
+              ? "bg-accent text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          )}
+        >
+          Приглашения
+        </button>
+      </div>
+
+      {tab === "invites" && <InvitesPanel />}
+      {tab === "users" && (
+        <UsersTabContent
+          data={data}
+          isLoading={isLoading}
+          error={error as Error | null}
+          statusFilter={statusFilter}
+          setStatusFilter={setStatusFilter}
+          roleFilter={roleFilter}
+          setRoleFilter={setRoleFilter}
+          search={search}
+          setSearch={setSearch}
+        />
+      )}
+    </div>
+  );
+}
+
+function UsersTabContent({
+  data,
+  isLoading,
+  error,
+  statusFilter,
+  setStatusFilter,
+  roleFilter,
+  setRoleFilter,
+  search,
+  setSearch,
+}: {
+  readonly data:
+    | { items: AdminUserRow[]; nextCursor: string | null }
+    | undefined;
+  readonly isLoading: boolean;
+  readonly error: Error | null;
+  readonly statusFilter: AdminUserStatus | "";
+  readonly setStatusFilter: (v: AdminUserStatus | "") => void;
+  readonly roleFilter: AdminUserRole | "";
+  readonly setRoleFilter: (v: AdminUserRole | "") => void;
+  readonly search: string;
+  readonly setSearch: (v: string) => void;
+}): JSX.Element {
+  return (
+    <>
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <Select
           value={statusFilter}
@@ -106,8 +185,8 @@ export function AdminUsersPage(): JSX.Element {
         </p>
       )}
 
-      <div className="overflow-hidden rounded-lg border border-border bg-card/40">
-        <table className="w-full text-sm">
+      <div className="overflow-x-auto rounded-lg border border-border bg-card/40">
+        <table className="w-full min-w-[1100px] text-sm">
           <thead className="bg-card/80 text-left text-xs uppercase tracking-wider text-muted-foreground">
             <tr>
               <th className="px-4 py-3 font-medium">Пользователь</th>
@@ -127,20 +206,20 @@ export function AdminUsersPage(): JSX.Element {
                 </td>
               </tr>
             )}
-            {!isLoading && data?.length === 0 && (
+            {!isLoading && data?.items.length === 0 && (
               <tr>
                 <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
                   Нет пользователей под текущие фильтры.
                 </td>
               </tr>
             )}
-            {data?.map((u) => (
+            {data?.items.map((u) => (
               <UserRow key={u.id} user={u} />
             ))}
           </tbody>
         </table>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -150,8 +229,11 @@ function UserRow({ user }: { readonly user: AdminUserRow }) {
   const setStatus = useSetUserStatus();
   const setRole = useSetUserRole();
   const impersonate = useImpersonateUser();
+  const deleteUser = useDeleteUser();
 
   const [confirmImpersonate, setConfirmImpersonate] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [rowError, setRowError] = useState<string | null>(null);
 
   const isSelf = me?.id === user.id;
@@ -191,6 +273,21 @@ function UserRow({ user }: { readonly user: AdminUserRow }) {
     }
   }
 
+  async function handleDelete() {
+    setRowError(null);
+    try {
+      await deleteUser.mutateAsync(user.id);
+      setConfirmDelete(false);
+      setDeleteConfirmText("");
+    } catch (e) {
+      setRowError(formatError(e));
+    }
+  }
+
+  const expectedConfirm = (user.email ?? user.name ?? "удалить").trim();
+  const canConfirmDelete =
+    deleteConfirmText.trim().toLowerCase() === expectedConfirm.toLowerCase();
+
   return (
     <tr className="hover:bg-card/60">
       <td className="px-4 py-3">
@@ -228,14 +325,33 @@ function UserRow({ user }: { readonly user: AdminUserRow }) {
         {user.lastLoginAt ? formatDate(user.lastLoginAt) : "никогда"}
       </td>
       <td className="px-4 py-3 text-right">
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={isSelf || impersonate.isPending}
-          onClick={() => setConfirmImpersonate(true)}
-        >
-          Impersonate
-        </Button>
+        <div className="inline-flex gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isSelf || impersonate.isPending}
+            onClick={() => setConfirmImpersonate(true)}
+          >
+            Impersonate
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            disabled={isSelf || deleteUser.isPending}
+            onClick={() => {
+              setDeleteConfirmText("");
+              setConfirmDelete(true);
+            }}
+            title={
+              isSelf
+                ? "Нельзя удалить самого себя"
+                : "Удалить пользователя и все его данные"
+            }
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Удалить
+          </Button>
+        </div>
         {rowError && (
           <div className="mt-1 text-xs text-destructive">{rowError}</div>
         )}
@@ -268,6 +384,68 @@ function UserRow({ user }: { readonly user: AdminUserRow }) {
             админская сессия будет завершена. После «Завершить» в красном
             баннере вы попадёте на /login и войдёте как админ заново.
           </p>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={confirmDelete}
+        onClose={() => {
+          if (!deleteUser.isPending) {
+            setConfirmDelete(false);
+            setDeleteConfirmText("");
+          }
+        }}
+        title="Удалить пользователя?"
+        description={`${user.name ?? "—"} · ${user.email ?? "—"}`}
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setConfirmDelete(false);
+                setDeleteConfirmText("");
+              }}
+              disabled={deleteUser.isPending}
+            >
+              Отмена
+            </Button>
+            <Button
+              onClick={handleDelete}
+              disabled={!canConfirmDelete || deleteUser.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleteUser.isPending ? "Удаляем…" : "Удалить навсегда"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive">
+            <div className="font-semibold">⚠ Действие необратимо</div>
+            <div className="mt-1 text-xs">
+              Будут удалены: все аккаунты пользователя ({user.accountCount} шт.),
+              кошельки, история операций, snapshot'ы, платежи, подписки,
+              сессии. Записи в audit_log сохранятся (для forensic-расследований),
+              но FK на пользователя обнулится.
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor={`confirm-${user.id}`}>
+              Введите{" "}
+              <code className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs">
+                {expectedConfirm}
+              </code>{" "}
+              для подтверждения
+            </Label>
+            <Input
+              id={`confirm-${user.id}`}
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              autoFocus
+              autoComplete="off"
+              disabled={deleteUser.isPending}
+            />
+          </div>
         </div>
       </Dialog>
     </tr>

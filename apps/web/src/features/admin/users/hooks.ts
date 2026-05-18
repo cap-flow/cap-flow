@@ -42,3 +42,11 @@ export function useImpersonateUser() {
     mutationFn: (id: string) => adminUsersApi.impersonate(id),
   });
 }
+
+export function useDeleteUser() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => adminUsersApi.delete(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: KEYS.all }),
+  });
+}

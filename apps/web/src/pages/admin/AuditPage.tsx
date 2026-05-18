@@ -115,8 +115,8 @@ export function AdminAuditPage(): JSX.Element {
       </div>
 
       <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-[1fr_280px]">
-        <div className="overflow-hidden rounded-lg border border-border bg-card/40">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto rounded-lg border border-border bg-card/40">
+          <table className="w-full min-w-[900px] text-sm">
             <thead className="bg-card/80 text-left text-xs uppercase tracking-wider text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 font-medium">Время</th>

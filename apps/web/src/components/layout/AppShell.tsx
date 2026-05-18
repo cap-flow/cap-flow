@@ -11,8 +11,12 @@ import {
   BellRing,
   PanelLeftClose,
   PanelLeftOpen,
+  Coins,
+  Database,
   Receipt,
   ScrollText,
+  Activity,
+  FileText,
   Wallet as WalletIcon,
 } from "lucide-react";
 
@@ -23,6 +27,8 @@ import { useProfile } from "@/components/profile/profile";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
 import { useAuth } from "@/features/auth/AuthProvider";
 import { useWalletsHydration } from "@/features/wallets/useWalletsHydration";
+import { EmailVerificationBanner } from "@/components/auth/EmailVerificationBanner";
+import { AccountSwitcher } from "./AccountSwitcher";
 import { useSidebar } from "./SidebarProvider";
 import { WalletSearch } from "./WalletSearch";
 import { useT } from "@/i18n/I18nProvider";
@@ -45,6 +51,10 @@ const NAV: NavItem[] = [
   { to: "/performance", labelKey: "nav.performance", icon: LineChart, end: false },
   { to: "/insights", labelKey: "nav.insights", icon: PieChart, end: false },
   { to: "/registry", labelKey: "nav.registry", icon: Receipt, end: false },
+  { to: "/assets", labelKey: "nav.assets", icon: Coins, end: false },
+  { to: "/timeline", labelKey: "nav.timeline", icon: Activity, end: false },
+  { to: "/tax", labelKey: "nav.tax", icon: FileText, end: false },
+  { to: "/coverage", labelKey: "nav.coverage", icon: Database, end: false },
 ];
 
 const SIDEBAR_W_OPEN = "w-64";
@@ -73,6 +83,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
       >
         <Topbar />
+        <EmailVerificationBanner />
         <main className="px-4 pb-12 pt-4 sm:px-6 lg:px-10">{children}</main>
       </div>
     </div>
@@ -223,6 +234,8 @@ function Topbar() {
 
       <div className="ml-auto flex flex-1 items-center justify-end gap-2 sm:gap-3">
         <WalletSearch />
+
+        <AccountSwitcher />
 
         <ThemeToggle />
 

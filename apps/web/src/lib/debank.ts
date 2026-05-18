@@ -23,6 +23,19 @@ export interface DeBankToken {
   decimals: number;
   logo_url: string | null;
   price?: number;
+  /**
+   * Спам-фильтр от самого DeBank. Эти поля приходят в /v1/user/all_token_list
+   * (но не во всех других ответах), и мы используем их, чтобы отбраковать
+   * скам-токены с фейковой high-price (типа "$5000 за CLAIM-airdrop"),
+   * которые иначе бы инфлировали Σ tokens.usd дашборда в десятки раз.
+   * `is_verified` — токен опознан issuer'ом.
+   * `is_core`     — DeBank сам признаёт его «настоящим» токеном.
+   * `is_wallet`   — токен в кошельке (а не receipt-токен протокола; не путать
+   *                 с EVM_RECEIPT_TOKEN_SYMBOLS из live_adapters.ts).
+   */
+  is_verified?: boolean;
+  is_core?: boolean;
+  is_wallet?: boolean;
 }
 
 export interface DeBankProject {
@@ -175,11 +188,22 @@ export async function fetchAllHistory(
 
   let startTime: number | undefined = undefined;
   let lastSeenTime = Number.POSITIVE_INFINITY;
-  // 50 pages × 20 tx = 1000 most-recent operations. Covers ~years of
-  // typical activity. Power users with vitalik-scale histories pass
-  // maxPages explicitly. 200 (the old default) tied up the browser for
-  // 100+ seconds and blocked the live-state fetch that follows.
-  const maxPages = args.maxPages ?? 50;
+  // H13 (2026-05-14): default cut from 50 → 25 pages.
+  //
+  // Rationale:
+  //   - 25 pages × 20 tx = 500 most-recent operations. Covers months-to-
+  //     years for the typical retail user (few-tx-per-week pattern).
+  //   - Burning 50 DeBank credits PER user-load was wasteful given the
+  //     `stopWhen` incremental cache: cron + auto-refresh already pull
+  //     anything new in 1-3 pages, so the 50-page burn was only useful
+  //     on the FIRST observation of a wallet — and even then 500 ops
+  //     usually covers the relevant cost-basis history.
+  //   - Power users with vitalik-scale histories pass `maxPages: 100`
+  //     (or higher) explicitly through the call site.
+  //
+  // Synced with `apps/api/src/modules/integrations/debank.ts` defaults
+  // so the two ends agree on credit budget.
+  const maxPages = args.maxPages ?? 25;
 
   for (let page = 0; page < maxPages; page++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");

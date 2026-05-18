@@ -34,3 +34,20 @@ export * from "./wallets.js";
 
 // Operations ledger (Phase 4a, inherited DB schema). Source for cost basis.
 export * from "./operations.js";
+
+// UCB B5: server-side cache of DeBank/Helius classified on-chain ops.
+// Frozen JSON shape, cross-device access, foundation for BullMQ worker.
+export * from "./chain_operations.js";
+
+// UCB A3: per-op user-driven annotations (overrides classifier decisions).
+// One-to-many w/ chain_operations; survives re-classification.
+export * from "./chain_operation_annotations.js";
+
+// Admin-editable upstream API key overrides (Phase S6 / 2026-05-14).
+export * from "./integration_secrets.js";
+
+// CEX exchange API connections per user (2026-05-14).
+export * from "./cex_accounts.js";
+
+// UCB C1: client-supplied cost basis seeds for CEX deposits.
+export * from "./cex_deposit_seeds.js";

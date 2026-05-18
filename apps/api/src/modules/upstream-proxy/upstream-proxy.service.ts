@@ -46,6 +46,11 @@ export interface ProxyResponse {
   readonly status: number;
   readonly body: string;
   readonly contentType: string | null;
+  /**
+   * How many extra attempts we did beyond the first. 0 = success/fail on
+   * first try. Reported in api_usage so admin can spot upstream flakiness.
+   */
+  readonly retries?: number;
 }
 
 type ProxyErrorKind =
@@ -64,6 +69,20 @@ export class UpstreamProxyError extends Error {
   ) {
     super(message);
   }
+}
+
+/**
+ * L2 (2026-05-14): sanitize user-supplied path before including it in
+ * error messages / logs. The raw `req.path` was echoed verbatim, which
+ * is a minor log-injection / reflected-output vector. Keep only chars
+ * that legitimately appear in URL paths (alphanumeric, slash, dot,
+ * hyphen, underscore) and truncate to a sane preview length.
+ *
+ * Real path validation (the allow-list regex) stays in the per-provider
+ * `buildUrl` — this helper only protects what we say BACK to callers.
+ */
+function safePathPreview(p: string): string {
+  return p.slice(0, 80).replace(/[^a-zA-Z0-9/_.\-]/g, "?");
 }
 
 /* ------------------------- provider configs ------------------------------- */
@@ -103,7 +122,7 @@ const PROVIDERS: Record<string, ProviderHandler> = {
         )
       ) {
         throw new UpstreamProxyError(
-          `Path not allowed for DeBank: ${req.path}`,
+          `Path not allowed for DeBank: ${safePathPreview(req.path)}`,
           "forbidden_path",
           "debank"
         );
@@ -117,7 +136,7 @@ const PROVIDERS: Record<string, ProviderHandler> = {
     buildUrl: (req) => {
       if (!/^v0\/(addresses|transactions|nfts)\b|^v1\/.+/.test(req.path)) {
         throw new UpstreamProxyError(
-          `Path not allowed for Helius: ${req.path}`,
+          `Path not allowed for Helius: ${safePathPreview(req.path)}`,
           "forbidden_path",
           "helius"
         );
@@ -131,7 +150,7 @@ const PROVIDERS: Record<string, ProviderHandler> = {
     buildUrl: (req) => {
       if (!/^v2\/api\b|^api\b/.test(req.path)) {
         throw new UpstreamProxyError(
-          `Path not allowed for Etherscan: ${req.path}`,
+          `Path not allowed for Etherscan: ${safePathPreview(req.path)}`,
           "forbidden_path",
           "etherscan"
         );
@@ -149,7 +168,7 @@ const PROVIDERS: Record<string, ProviderHandler> = {
       const chain = req.path.trim();
       if (!ALCHEMY_CHAINS.has(chain)) {
         throw new UpstreamProxyError(
-          `Unknown Alchemy chain: ${chain}`,
+          `Unknown Alchemy chain: ${safePathPreview(chain)}`,
           "forbidden_path",
           "alchemy"
         );
@@ -162,8 +181,37 @@ const PROVIDERS: Record<string, ProviderHandler> = {
 
 /* ------------------------- service ---------------------------------------- */
 
+export interface RetryConfig {
+  readonly maxRetries: number;
+  readonly baseBackoffMs: number;
+  readonly maxBackoffMs: number;
+  readonly maxRetryAfterSec: number;
+}
+
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxRetries: 3,
+  baseBackoffMs: 250,
+  maxBackoffMs: 4_000,
+  maxRetryAfterSec: 30,
+};
+
+/** Disable retries — for tests, or when the caller wants raw upstream errors. */
+export const NO_RETRY: RetryConfig = {
+  maxRetries: 0,
+  baseBackoffMs: 0,
+  maxBackoffMs: 0,
+  maxRetryAfterSec: 0,
+};
+
 export class UpstreamProxyService {
-  constructor(private readonly env: ProxyEnv) {}
+  private readonly retry: RetryConfig;
+
+  constructor(
+    private readonly env: ProxyEnv,
+    retry: Partial<RetryConfig> = {}
+  ) {
+    this.retry = { ...DEFAULT_RETRY_CONFIG, ...retry };
+  }
 
   async forward(req: ProxyRequest): Promise<ProxyResponse> {
     const handler = PROVIDERS[req.provider];
@@ -227,26 +275,145 @@ export class UpstreamProxyService {
     }
     if (req.signal) init.signal = req.signal;
 
-    let res: Response;
-    try {
-      res = await fetch(finalUrl.toString(), init);
-    } catch (err) {
-      // Strip API key from any error message that may have leaked the URL.
-      const raw = err instanceof Error ? err.message : String(err);
-      throw new UpstreamProxyError(
-        `Upstream ${req.provider} request failed: ${redactKey(raw, apiKey)}`,
-        "network",
-        req.provider
-      );
+    return this.fetchWithRetry(finalUrl.toString(), init, req, apiKey);
+  }
+
+  /**
+   * Fetch with bounded retry on transient upstream failures.
+   *
+   * Retried statuses:
+   *   - **429** Too Many Requests — respect `Retry-After` header (sec)
+   *     when present, else exponential backoff.
+   *   - **502 / 503 / 504** — provider hiccups; exponential backoff.
+   *   - Network errors (fetch throws) — exponential backoff.
+   *
+   * NOT retried:
+   *   - 2xx / 3xx — happy path.
+   *   - 4xx other than 429 — client bug / forbidden / not found; no
+   *     amount of retrying will help.
+   *   - Caller-supplied AbortSignal aborted — bail out immediately.
+   *
+   * Idempotency: our upstream providers (DeBank GET, Helius GET,
+   * Etherscan GET, Alchemy JSON-RPC POST) are all idempotent reads, so
+   * a retry is always safe. If we ever add a mutating endpoint, gate
+   * retries on method.
+   *
+   * Budget:
+   *   - up to MAX_RETRIES extra attempts (default 3 → 4 total attempts)
+   *   - per-attempt delay capped at MAX_BACKOFF_MS
+   *   - Retry-After capped at 30s (defends against an upstream sending
+   *     a hostile Retry-After value)
+   *
+   * Without this, DeBank's 429s during cron-refresh of multiple wallets
+   * would surface as user-facing failures and inflate `api_usage.errors`.
+   */
+  private async fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    req: ProxyRequest,
+    apiKey: string | undefined
+  ): Promise<ProxyResponse> {
+    const MAX_RETRIES = this.retry.maxRetries;
+    const BASE_BACKOFF_MS = this.retry.baseBackoffMs;
+    const MAX_BACKOFF_MS = this.retry.maxBackoffMs;
+    const MAX_RETRY_AFTER_SEC = this.retry.maxRetryAfterSec;
+
+    let lastError: Error | null = null;
+    let lastStatus = 0;
+    let lastBody = "";
+    let lastContentType: string | null = null;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (req.signal?.aborted) {
+        throw new UpstreamProxyError(
+          `Upstream ${req.provider} request aborted`,
+          "network",
+          req.provider
+        );
+      }
+
+      try {
+        const res = await fetch(url, init);
+        const text = await res.text();
+
+        // Success or non-retryable client error → return immediately.
+        const isRetryable =
+          res.status === 429 ||
+          res.status === 502 ||
+          res.status === 503 ||
+          res.status === 504;
+        if (!isRetryable) {
+          return {
+            status: res.status,
+            body: text,
+            contentType: res.headers.get("Content-Type"),
+            retries: attempt,
+          };
+        }
+
+        lastStatus = res.status;
+        lastBody = text;
+        lastContentType = res.headers.get("Content-Type");
+
+        // Out of attempts — return the last response as-is so caller
+        // gets a real upstream status code, not a synthetic 500.
+        if (attempt === MAX_RETRIES) {
+          return {
+            status: lastStatus,
+            body: lastBody,
+            contentType: lastContentType,
+            retries: attempt,
+          };
+        }
+
+        // Calculate sleep: prefer Retry-After (for 429), else expo backoff.
+        let sleepMs: number;
+        const retryAfter = res.headers.get("Retry-After");
+        if (res.status === 429 && retryAfter) {
+          // Retry-After can be seconds or HTTP-date. We support seconds —
+          // HTTP-date is rare for rate-limit responses.
+          const sec = Number.parseInt(retryAfter, 10);
+          if (Number.isFinite(sec) && sec > 0) {
+            sleepMs = Math.min(sec, MAX_RETRY_AFTER_SEC) * 1000;
+          } else {
+            sleepMs = expoBackoff(attempt, BASE_BACKOFF_MS, MAX_BACKOFF_MS);
+          }
+        } else {
+          sleepMs = expoBackoff(attempt, BASE_BACKOFF_MS, MAX_BACKOFF_MS);
+        }
+        await sleep(sleepMs);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt === MAX_RETRIES) break;
+        await sleep(expoBackoff(attempt, BASE_BACKOFF_MS, MAX_BACKOFF_MS));
+      }
     }
 
-    const text = await res.text();
-    return {
-      status: res.status,
-      body: text,
-      contentType: res.headers.get("Content-Type"),
-    };
+    // All attempts exhausted with network error.
+    const raw = lastError ? lastError.message : "unknown network error";
+    throw new UpstreamProxyError(
+      `Upstream ${req.provider} request failed after ${MAX_RETRIES + 1} attempts: ${redactKey(raw, apiKey)}`,
+      "network",
+      req.provider
+    );
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Exponential backoff with full jitter:
+ *   attempt 0 → ~base
+ *   attempt 1 → ~base × 2
+ *   attempt 2 → ~base × 4
+ * Jitter prevents thundering-herd when many requests hit a 429 wall
+ * at the same wall-clock moment (e.g. cron-refresh of 10 accounts).
+ */
+function expoBackoff(attempt: number, baseMs: number, maxMs: number): number {
+  const deterministic = Math.min(maxMs, baseMs * Math.pow(2, attempt));
+  return Math.floor(deterministic * (0.5 + Math.random() * 0.5));
 }
 
 function redactKey(s: string, key: string | undefined): string {

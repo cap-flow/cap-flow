@@ -1,0 +1,54 @@
+[Unit]
+# Capflow API — bare-metal alternative to docker-compose service.
+#
+# Usage:
+#   sudo cp infra/systemd/capflow-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now capflow-api
+#
+# Logs: journalctl -u capflow-api -f
+Description=Capflow API server
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=capflow
+Group=capflow
+WorkingDirectory=/srv/capflow/apps/api
+# Production env loaded from /etc/capflow/api.env (managed by ops, NOT in repo).
+EnvironmentFile=/etc/capflow/api.env
+# Use the built artifact, not source.
+ExecStart=/usr/bin/node /srv/capflow/apps/api/dist/server.js
+# Restart on crash; 5s backoff prevents hot-loop on persistent failure.
+Restart=on-failure
+RestartSec=5s
+# Limit memory before OOM kicks in; tune per VPS RAM.
+MemoryMax=1G
+# Stop signal — Node.js handles SIGTERM gracefully (closes server, drains).
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# Security hardening (defense-in-depth).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/capflow/var/log
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false  # Node JIT needs RWX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+# Standard streams → journald.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=capflow-api
+
+[Install]
+WantedBy=multi-user.target

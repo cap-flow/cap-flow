@@ -11,14 +11,19 @@ import { loginResponseSchema } from "@/features/auth/api";
  */
 
 export const invitePreviewSchema = z.object({
-  email: z.string().email(),
+  /** `null` for open invites — the user supplies their email at registration. */
+  email: z.string().email().nullable(),
   expiresAt: z.string(),
+  /** Admin-supplied opening note shown to the user (optional). */
+  notes: z.string().nullable(),
 });
 export type InvitePreview = z.infer<typeof invitePreviewSchema>;
 
 export interface RegisterFromInviteInput {
+  /** Required for open invites (where preview.email is null). */
+  readonly email?: string;
   readonly password: string;
-  readonly name: string;
+  readonly name?: string;
 }
 
 export const publicInvitesApi = {

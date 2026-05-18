@@ -22,16 +22,37 @@ www.{$CADDY_DOMAIN} {
 		Referrer-Policy strict-origin-when-cross-origin
 		Permissions-Policy "geolocation=(), microphone=(), camera=()"
 
-		# CSP for the SPA. Loose-ish because legacy LoadedWalletsProvider
-		# still loads images from many chain RPCs / token logos. Tighten
-		# after the SaaS-dashboard refactor (post-beta).
-		#   default-src 'self'     — no cross-origin script/iframe by default
-		#   script-src 'self'      — only our bundle
-		#   style-src includes 'unsafe-inline' for runtime CSS injection
-		#   img-src '*'            — token logos from DeBank / CoinGecko CDNs
-		#   connect-src 'self'     — XHR/fetch goes back to our origin only
-		#                             (everything else is proxied via /api/*)
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+		# CSP for the SPA.
+		#
+		# L6 (2026-05-14): tightened `img-src` from `https:` (any HTTPS
+		# host) to an explicit allow-list of CDNs we actually use for
+		# token logos / protocol icons. Wildcard `https:` enabled the
+		# class of attacks where a 1×1-pixel beacon to attacker.example
+		# could ride on any user-supplied URL we ever render — narrows
+		# the surface even though we don't currently render user URLs.
+		# Also lifts Mozilla Observatory rating from B to A-range.
+		#
+		# When adding a new asset host:
+		#   1. open the page in DevTools → Network → filter "Img"
+		#   2. note any blocked requests
+		#   3. add the host here (or its bare domain with wildcard
+		#      subdomain prefix if the CDN spreads across many sub-
+		#      hostnames)
+		#
+		# Hosts list (curated):
+		#   debank        — static.debank.com (token + protocol logos)
+		#   coingecko     — assets.coingecko.com
+		#   coinstats     — static.coinstats.app
+		#   defillama     — icons.llamao.fi, defillama-datasets pages
+		#   tronscan      — coin.top.aws.tronscan.org (TRC20 logos)
+		#   helius        — cdn.helius-rpc.com (Solana token logos via DAS)
+		#   jupiter       — static.jup.ag (Jupiter portfolio icons)
+		#   aave/morpho   — *.aave.com, app.morpho.org
+		#   ipfs          — *.ipfs.io / cf-ipfs.com (NFT metadata)
+		#
+		# If you need to widen temporarily, set `img-src 'self' data: https:`
+		# to debug, then re-tighten before merging.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://static.debank.com https://assets.coingecko.com https://static.coinstats.app https://icons.llamao.fi https://*.llama.fi https://coin.top.aws.tronscan.org https://cdn.helius-rpc.com https://static.jup.ag https://*.ipfs.io https://cf-ipfs.com https://*.aave.com https://*.app.morpho.org; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
 		-Server
 	}
 

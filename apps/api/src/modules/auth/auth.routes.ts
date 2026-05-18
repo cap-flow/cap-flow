@@ -185,6 +185,47 @@ export async function authRoutes(
       };
     }
   );
+
+  /**
+   * M16 (2026-05-14): self-delete account (GDPR Art. 17 / 152-ФЗ).
+   *
+   * User-initiated deletion of their own account + all owned data
+   * (cascades through accounts → wallets/operations/snapshots, plus
+   * sessions/payments/notifications). Same cascade implementation as
+   * the admin route — `mode="self"` only skips the self-protection
+   * guard, last-admin safety still applies.
+   *
+   * Rate-limited harshly: a malicious script that tricks a user into
+   * triggering this multiple times shouldn't be able to. 3/hour is
+   * way more than any legitimate flow needs.
+   */
+  route.delete(
+    "/me",
+    {
+      preHandler: app.requireAuth,
+      schema: { response: { 204: z.null() } },
+      config: {
+        rateLimit: { max: 3, timeWindow: "1 hour" },
+      },
+    },
+    async (req, reply) => {
+      const u = req.user;
+      if (!u) throw new UnauthorizedError();
+      // Impersonated session must never trigger self-delete — that
+      // would let an admin permanently wipe a user from within their
+      // session without an explicit admin action. The user must end
+      // impersonation first.
+      if (u.impersonation) {
+        throw new ForbiddenError(
+          "Cannot self-delete from an impersonation session."
+        );
+      }
+      await opts.adminUsers.deleteUser(u.id, u.id, "self");
+      clearRefreshCookie(reply, cookieCfg);
+      clearAccessCookie(reply, accessCookieCfg);
+      return reply.status(204).send();
+    }
+  );
 }
 
 /** name fallback: prefer `name`, then `first_name + last_name`, then email-local-part. */
@@ -207,6 +248,7 @@ function toMe(
     role: u.role as UserRole,
     createdAt: u.createdAt.toISOString(),
     lastLoginAt: u.lastLoginAt ? u.lastLoginAt.toISOString() : null,
+    emailVerifiedAt: u.emailVerifiedAt ? u.emailVerifiedAt.toISOString() : null,
     impersonation,
   };
 }

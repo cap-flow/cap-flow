@@ -53,6 +53,85 @@ const EVM_RECEIPT_TOKEN_SYMBOLS = new Set([
   "MMX",      // Madonna market token
 ]);
 
+/**
+ * H10 (2026-05-14): symbol-prefix detection for receipt tokens.
+ *
+ * Adds convention-based heuristics on top of the hardcoded set above.
+ * Covers the long tail: aTokens (Aave), cTokens (Compound), fTokens
+ * (Fluid), Lido LST family, Rocket Pool, Pendle wrappers.
+ *
+ * NOT a security filter — false-positives are tolerable here because
+ * the worst case is hiding a legitimate token from the dashboard; the
+ * underlying value is still reflected via the protocol position. The
+ * REAL filter is `receiptTokenIdsFromProtocols()` below which walks
+ * the actual protocol data — this prefix check is the fallback when
+ * the protocol payload didn't surface a contract id.
+ */
+function isReceiptTokenByConvention(symbol: string): boolean {
+  const s = symbol.toUpperCase();
+  if (EVM_RECEIPT_TOKEN_SYMBOLS.has(s)) return true;
+  // Aave aTokens — second char must be uppercase (avoid matching "APE", "ATOM").
+  // Patterns: AUSDC, AETH, AWETH, AWBTC, ADAI, ALINK, ...
+  if (/^A(USDC|USDT|DAI|WETH|ETH|WBTC|LINK|UNI|AAVE|MATIC|FRAX|SUSDE)$/.test(s)) {
+    return true;
+  }
+  // Compound cTokens — same pattern. cUSDC, cETH, cDAI, ...
+  if (/^C(USDC|USDT|DAI|WETH|ETH|WBTC|COMP|UNI|MATIC|FRAX)$/.test(s)) {
+    return true;
+  }
+  // Fluid fTokens.
+  if (/^F(USDC|USDT|DAI|WETH|ETH|WBTC)$/.test(s)) return true;
+  // Compound III ("Comet") — cWETHv3, cUSDCv3.
+  if (/^C(USDC|USDT|WETH|ETH|WBTC)V3$/.test(s)) return true;
+  // Liquid staking / restaking tokens.
+  if (/^(ST|WST|R|SFRX|UNI|RSWST|EZ|WEEZ|WEETH|WBETH|CBETH)ETH$/.test(s)) {
+    return true;
+  }
+  if (s === "SAVAX" || s === "STMATIC" || s === "RETH" || s === "STBTC") return true;
+  // Pendle.
+  if (/^(PT|YT|SY|LP)[-_]/.test(s)) return true;
+  // Spark sToken.
+  if (/^S(USDC|USDT|DAI|WETH|ETH)$/.test(s)) return true;
+  // MetaMorpho vault shares — generic vault tokens often have "Morpho"
+  // in name; we'll catch those via receiptTokenIdsFromProtocols instead.
+  return false;
+}
+
+/**
+ * Build the set of receipt-token contract IDs that already participate
+ * in this wallet's DeFi positions. DeBank returns the receipt-token's
+ * contract as `detail.token.id` for vault-style positions and `pool.id`
+ * for AMM-style. Any matching id in `all_token_list` is a double-count
+ * and must be filtered out of the bare tokens display.
+ *
+ * Indexed by lowercase id; pre-prefixed and chain-prefixed forms are
+ * BOTH added so callers don't have to normalize.
+ */
+function receiptTokenIdsFromProtocols(
+  protocols: DeBankComplexProtocol[]
+): Set<string> {
+  const out = new Set<string>();
+  for (const proto of protocols) {
+    for (const item of proto.portfolio_item_list) {
+      const tokId = item.detail.token?.id;
+      if (tokId) {
+        const lc = tokId.toLowerCase();
+        out.add(lc);
+        // DeBank sometimes prefixes with chain ("arb:0xabc..."); strip
+        // so a chain-naked match still hits.
+        out.add(lc.replace(/^[a-z]{2,6}:/, ""));
+      }
+      const poolId = item.pool?.id;
+      if (poolId) {
+        const lc = poolId.toLowerCase();
+        out.add(lc);
+        out.add(lc.replace(/^[a-z]{2,6}:/, ""));
+      }
+    }
+  }
+  return out;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  EVM (DeBank) → LiveSnapshot                                                */
 /* -------------------------------------------------------------------------- */
@@ -63,14 +142,68 @@ export function adaptDeBankLive(args: {
   tokens: DeBankTokenBalance[];
   protocols: DeBankComplexProtocol[];
 }): LiveSnapshot {
+  // H10: pre-compute set of receipt-token contract ids from this
+  // wallet's actual DeFi positions. Any matching id in the bare token
+  // list is a double-count.
+  const receiptIds = receiptTokenIdsFromProtocols(args.protocols);
+
   const tokens: LiveTokenBalance[] = [];
   for (const tk of args.tokens) {
     const usd = (tk.price ?? 0) * tk.amount;
     if (usd < DUST_USD) continue;
 
-    // Skip GMX V2 GM, GLP и пр. receipt-токены — они не "наличные" пользователя,
-    // они — позиция. Будут показаны в Active DeFi positions через DeBank.
-    if (EVM_RECEIPT_TOKEN_SYMBOLS.has(tk.symbol.toUpperCase())) continue;
+    // H10: content-driven receipt-token filter. Drops aUSDC/cToken/
+    // fToken/stETH/wstETH/rETH/Pendle PT-YT-SY and any other receipt
+    // contract that DeBank surfaces in BOTH places.
+    const lowerId = tk.id.toLowerCase();
+    if (
+      receiptIds.has(lowerId) ||
+      receiptIds.has(lowerId.replace(/^[a-z]{2,6}:/, ""))
+    ) {
+      continue;
+    }
+    // H10: convention-based fallback for receipts DeBank failed to list
+    // in `detail.token.id` (some niche / new lending markets).
+    if (isReceiptTokenByConvention(tk.symbol)) continue;
+
+    // H9 (2026-05-14): DeBank spam-filter — **closed by default**.
+    //
+    // DeBank's `all_token_list` endpoint marks legitimate tokens with
+    // some combination of `is_verified` / `is_core` / `is_wallet`.
+    // Scam airdrops with fake high prices (the "$5000 claim my
+    // airdrop"-style entries that inflated Bob's wallet from $77k
+    // displayed to $539k) lack all three.
+    //
+    // Previously the filter only kicked in when **at least one** flag
+    // was present in the payload (`hasAnyFlag`) — if a future DeBank
+    // response stripped the flags entirely from some token (regression
+    // on their side, or a different endpoint variant), every scam
+    // would silently pass through again.
+    //
+    // Closed-by-default: require **at least one** acknowledgment flag
+    // to be true. The narrow legitimate-but-flagless case
+    // (brand-new listing on a small chain) is recovered by the
+    // `logo_url + price` heuristic — DeBank only ships a price for
+    // tokens it has indexed.
+    const debankAcknowledges =
+      tk.is_verified === true ||
+      tk.is_core === true ||
+      tk.is_wallet === true;
+    // Conservative bypass for new but-priced tokens: DeBank only
+    // surfaces prices for indexed assets, so price + logo together
+    // are a decent proxy for "we know this is real". This narrows
+    // the false-positive window without re-opening the scam doors.
+    const looksLegitWithoutFlag =
+      !debankAcknowledges &&
+      typeof tk.price === "number" &&
+      tk.price > 0 &&
+      typeof tk.logo_url === "string" &&
+      tk.logo_url.length > 0 &&
+      // Hard cap on per-token USD: a single un-flagged token claiming
+      // >$1000 value is almost certainly scam. Real-but-new tokens
+      // rarely reach that without entering DeBank's flagged set.
+      usd < 1000;
+    if (!debankAcknowledges && !looksLegitWithoutFlag) continue;
 
     tokens.push({
       symbol: tk.symbol,
@@ -83,9 +216,7 @@ export function adaptDeBankLive(args: {
       walletName: args.wallet.name,
       isStable: isStableSymbol(tk.symbol),
       logo: tk.logo_url ?? null,
-      // У DeBank пометки verified нет в этом эндпоинте, но он сам фильтрует
-      // дешёвый спам — токены с ненулевой price считаем «известными».
-      isKnown: Boolean(tk.price && tk.logo_url),
+      isKnown: debankAcknowledges || Boolean(tk.price && tk.logo_url),
     });
   }
 

@@ -7,14 +7,13 @@ import {
   Database,
   Globe,
   History,
-  KeyRound,
   Languages,
   Layers,
   Monitor,
   Moon,
   Palette,
   Save,
-  ShieldCheck,
+  SlidersHorizontal,
   Sun,
   Trash2,
   User,
@@ -32,6 +31,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label, Textarea } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/features/auth/AuthProvider";
+import { api } from "@/lib/api/client";
 import { ThemeSelector } from "@/components/theme/ThemeToggle";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { LanguageSelector } from "@/components/i18n/LanguageSelector";
@@ -47,7 +48,7 @@ type Section =
   | "profile"
   | "appearance"
   | "language"
-  | "integrations"
+  | "advanced"
   | "subscription"
   | "notifications";
 
@@ -101,12 +102,6 @@ export function SettingsPage(): JSX.Element {
             onClick={() => setSection("language")}
           />
           <SectionTab
-            icon={<KeyRound className="h-4 w-4" />}
-            label={t("settings.section.integrations")}
-            active={section === "integrations"}
-            onClick={() => setSection("integrations")}
-          />
-          <SectionTab
             icon={<CreditCard className="h-4 w-4" />}
             label="Подписка"
             active={section === "subscription"}
@@ -118,15 +113,21 @@ export function SettingsPage(): JSX.Element {
             active={section === "notifications"}
             onClick={() => setSection("notifications")}
           />
+          <SectionTab
+            icon={<SlidersHorizontal className="h-4 w-4" />}
+            label="Дополнительно"
+            active={section === "advanced"}
+            onClick={() => setSection("advanced")}
+          />
         </nav>
 
         <div className="space-y-6">
           {section === "profile" && <ProfileSection />}
           {section === "appearance" && <AppearanceSection />}
           {section === "language" && <LanguageSection />}
-          {section === "integrations" && <IntegrationsSection />}
           {section === "subscription" && <BillingPage />}
           {section === "notifications" && <PreferencesPage />}
+          {section === "advanced" && <AdvancedSection />}
         </div>
       </div>
     </div>
@@ -381,48 +382,138 @@ function LanguageSection() {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Integrations (DeBank API key)                                              */
+/*  Advanced — pipeline + кэш. Заменили старый раздел "Интеграции"             */
+/*  (Phase S4: API-ключи теперь admin-managed; user-facing раздела нет).       */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Пока в проде только EVM через DeBank. Не-EVM провайдеры скрыты до возврата
- * к Solana-стеку. Чтобы показать снова — переключите в `true` (та же константа
- * есть в LoadedWalletsProvider, держим в синхроне).
- */
-function IntegrationsSection() {
+function AdvancedSection() {
   return (
     <>
-      <ManagedByAdminBanner />
       <PipelineCard />
       <CacheCard />
+      <DangerZoneCard />
     </>
   );
 }
 
 /**
- * Phase S4: пользователь больше **не настраивает** API-ключи у себя в
- * браузере. DeBank / Helius / Etherscan уходят через backend
- * upstream-proxy с admin'овским ключом; квота защищена per-user
- * rate-limit'ом. Юзеру показываем явный info-блок, чтобы он понимал
- * почему KeyCard'ов больше нет.
+ * M16 (2026-05-14): self-service account deletion (GDPR Art. 17 / 152-ФЗ).
+ *
+ * Hard-delete from the user's own settings — calls `DELETE /api/v1/auth/me`
+ * which cascades through accounts → wallets/operations/snapshots/etc.
+ * Last-admin protection is enforced server-side, so an admin who tries
+ * this without promoting another admin first will get a clear error.
+ *
+ * Confirm-by-typing pattern (must type `email` for the button to enable)
+ * to prevent accidental clicks. After success → logout + redirect to /login.
  */
-function ManagedByAdminBanner() {
+function DangerZoneCard() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!user) return null;
+  const expectedConfirm = user.email || user.name || "delete";
+  const canConfirm =
+    confirmText.trim().toLowerCase() === expectedConfirm.toLowerCase();
+
+  async function handleDelete() {
+    setError(null);
+    setSubmitting(true);
+    try {
+      await api.delete("/v1/auth/me");
+      // Cookies are cleared server-side; force a logout-style reset
+      // locally so any in-memory token disappears and React Query
+      // caches drop.
+      await logout();
+      navigate("/login", { replace: true });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
-    <Card className="border-success/30 bg-success/5">
-      <CardContent className="p-5">
+    <Card className="border-destructive/40">
+      <CardHeader>
         <div className="flex items-start gap-3">
-          <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-success" />
-          <div className="space-y-1">
-            <h3 className="text-base font-semibold">
-              API-ключи управляются администратором
-            </h3>
-            <p className="text-sm text-muted-foreground">
-              Все запросы к DeBank, Helius, Etherscan проходят через сервер
-              Capflow и используют общий admin-ключ с per-user квотой.
-              Дополнительная настройка не требуется.
-            </p>
+          <div className="flex h-9 w-9 items-center justify-center rounded-md border border-destructive/40 bg-destructive/10 text-destructive">
+            <Trash2 className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <CardTitle className="text-base text-destructive">
+              Удалить аккаунт
+            </CardTitle>
+            <CardDescription>
+              Безвозвратное удаление аккаунта и всех связанных данных:
+              кошельков, истории операций, snapshot'ов, платежей, подписок.
+              Действие нельзя отменить. Полностью удаляет вас из системы
+              (GDPR Art. 17 / 152-ФЗ).
+            </CardDescription>
           </div>
         </div>
+      </CardHeader>
+      <CardContent>
+        {!open ? (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setOpen(true)}
+            className="border-destructive/40 text-destructive hover:bg-destructive/10"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Удалить мой аккаунт
+          </Button>
+        ) : (
+          <div className="space-y-3 rounded-md border border-destructive/30 bg-destructive/5 p-4">
+            <div className="text-sm">
+              <strong>Точно удалить?</strong> Введите{" "}
+              <code className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs">
+                {expectedConfirm}
+              </code>{" "}
+              для подтверждения:
+            </div>
+            <Input
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder={expectedConfirm}
+              autoFocus
+              autoComplete="off"
+              disabled={submitting}
+            />
+            {error && (
+              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                {error}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setOpen(false);
+                  setConfirmText("");
+                  setError(null);
+                }}
+                disabled={submitting}
+              >
+                Отмена
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleDelete}
+                disabled={!canConfirm || submitting}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {submitting ? "Удаляем…" : "Удалить навсегда"}
+              </Button>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

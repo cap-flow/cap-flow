@@ -1,5 +1,5 @@
 import { type Database, schema } from "@cap-flow/db";
-import { and, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, eq, gte, isNull, sql } from "drizzle-orm";
 
 export interface AdminAccountRow {
   readonly accountId: string;
@@ -37,64 +37,82 @@ export class AdminPortfoliosService {
   constructor(private readonly db: Database) {}
 
   async listAllAccounts(): Promise<AdminAccountRow[]> {
-    const sub24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const sub24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    const rows = await this.db
-      .select({
-        accountId: schema.accounts.id,
-        accountName: schema.accounts.name,
-        ownerId: schema.users.id,
-        ownerEmail: schema.users.email,
-        ownerName: schema.users.name,
-        isPrimary: schema.accounts.isPrimary,
-        lastSnapshotAt: sql<Date | null>`
-          (SELECT MAX(created_at) FROM ${schema.portfolioSnapshots} ps
-           WHERE ps.account_id = ${schema.accounts.id})
-        `,
-        lastSnapshotUsd: sql<number | null>`
-          (SELECT (metrics->>'totalUsd')::numeric
-           FROM ${schema.portfolioSnapshots} ps
-           WHERE ps.account_id = ${schema.accounts.id}
-           ORDER BY ps.created_at DESC LIMIT 1)
-        `,
-        lastTrigger: sql<string | null>`
-          (SELECT metrics->>'trigger'
-           FROM ${schema.portfolioSnapshots} ps
-           WHERE ps.account_id = ${schema.accounts.id}
-           ORDER BY ps.created_at DESC LIMIT 1)
-        `,
-        snapshotCount24h: sql<number>`
-          (SELECT COUNT(*)::int FROM ${schema.portfolioSnapshots} ps
-           WHERE ps.account_id = ${schema.accounts.id}
-             AND ps.created_at >= ${sub24h.toISOString()})
-        `,
-        errors24h: sql<number>`
-          (SELECT COUNT(*)::int FROM ${schema.apiUsage} au
-           WHERE au.account_id = ${schema.accounts.id}
-             AND au.created_at >= ${sub24h.toISOString()}
-             AND au.error IS NOT NULL)
-        `,
-      })
-      .from(schema.accounts)
-      .innerJoin(schema.users, eq(schema.users.id, schema.accounts.ownerId))
-      .where(isNull(schema.accounts.archivedAt))
-      .orderBy(desc(schema.accounts.createdAt));
+    // H12 (2026-05-14): single query with LATERAL joins instead of
+    // 5 correlated subqueries per row. Previous implementation ran
+    // O(N×5) queries for N accounts; under 1000 accounts that's 5000
+    // round-trips. Now O(2) total — one LATERAL for the latest
+    // snapshot, one aggregated CTE for the 24h counters.
+    //
+    // We use raw SQL via `db.execute` since Drizzle's lateral support
+    // is still rough at this version. Output shape is hand-mapped
+    // below.
+    const result = await this.db.execute<{
+      account_id: string;
+      account_name: string;
+      owner_id: string;
+      owner_email: string | null;
+      owner_name: string | null;
+      is_primary: boolean;
+      last_snapshot_at: Date | null;
+      last_snapshot_usd: string | null;
+      last_trigger: string | null;
+      snapshot_count_24h: number;
+      errors_24h: number;
+    }>(sql`
+      SELECT
+        a.id          AS account_id,
+        a.name        AS account_name,
+        u.id          AS owner_id,
+        u.email       AS owner_email,
+        u.name        AS owner_name,
+        a.is_primary  AS is_primary,
+        ls.created_at AS last_snapshot_at,
+        (ls.metrics->>'totalUsd')::numeric AS last_snapshot_usd,
+        ls.metrics->>'trigger' AS last_trigger,
+        COALESCE(s24.cnt, 0)::int AS snapshot_count_24h,
+        COALESCE(e24.cnt, 0)::int AS errors_24h
+      FROM ${schema.accounts} a
+      INNER JOIN ${schema.users} u ON u.id = a.owner_id
+      LEFT JOIN LATERAL (
+        SELECT created_at, metrics
+        FROM ${schema.portfolioSnapshots}
+        WHERE account_id = a.id
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) ls ON true
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS cnt
+        FROM ${schema.portfolioSnapshots}
+        WHERE account_id = a.id AND created_at >= ${sub24h}
+      ) s24 ON true
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS cnt
+        FROM ${schema.apiUsage}
+        WHERE account_id = a.id
+          AND created_at >= ${sub24h}
+          AND error IS NOT NULL
+      ) e24 ON true
+      WHERE a.archived_at IS NULL
+      ORDER BY a.created_at DESC
+    `);
 
-    return rows.map((r) => ({
-      accountId: r.accountId,
-      accountName: r.accountName,
-      ownerId: r.ownerId,
-      ownerEmail: r.ownerEmail,
-      ownerName: r.ownerName,
-      isPrimary: r.isPrimary,
-      lastSnapshotAt: r.lastSnapshotAt,
+    return result.rows.map((r) => ({
+      accountId: r.account_id,
+      accountName: r.account_name,
+      ownerId: r.owner_id,
+      ownerEmail: r.owner_email,
+      ownerName: r.owner_name,
+      isPrimary: r.is_primary,
+      lastSnapshotAt: r.last_snapshot_at,
       lastSnapshotUsd:
-        r.lastSnapshotUsd !== null && r.lastSnapshotUsd !== undefined
-          ? Number(r.lastSnapshotUsd)
+        r.last_snapshot_usd !== null && r.last_snapshot_usd !== undefined
+          ? Number(r.last_snapshot_usd)
           : null,
-      lastTrigger: r.lastTrigger,
-      snapshotCount24h: Number(r.snapshotCount24h ?? 0),
-      errors24h: Number(r.errors24h ?? 0),
+      lastTrigger: r.last_trigger,
+      snapshotCount24h: Number(r.snapshot_count_24h ?? 0),
+      errors24h: Number(r.errors_24h ?? 0),
     }));
   }
 

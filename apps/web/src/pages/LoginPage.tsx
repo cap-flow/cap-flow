@@ -1,11 +1,12 @@
 import { useState, type FormEvent } from "react";
-import { useLocation, useNavigate, type Location } from "react-router-dom";
+import { Link, useLocation, useNavigate, type Location } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/features/auth/AuthProvider";
+import { useT } from "@/i18n/I18nProvider";
 import { ApiError } from "@/lib/api/client";
 
 interface LoginLocationState {
@@ -15,6 +16,7 @@ interface LoginLocationState {
 export function LoginPage(): JSX.Element {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const t = useT();
   const location = useLocation() as Location & {
     state: LoginLocationState | null;
   };
@@ -36,14 +38,14 @@ export function LoginPage(): JSX.Element {
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 429) {
-          setError("Слишком много попыток. Подождите и попробуйте снова.");
+          setError(t("login.error.rateLimit"));
         } else if (err.status === 401) {
-          setError("Неверный email или пароль.");
+          setError(t("login.error.invalid"));
         } else {
-          setError(`Ошибка ${err.status}. Попробуйте позже.`);
+          setError(t("login.error.generic", String(err.status)));
         }
       } else {
-        setError("Сеть недоступна.");
+        setError(t("login.error.network"));
       }
     } finally {
       setSubmitting(false);
@@ -54,15 +56,13 @@ export function LoginPage(): JSX.Element {
     <div className="flex min-h-screen items-center justify-center px-4 app-glow">
       <Card className="w-full max-w-md">
         <CardHeader>
-          <CardTitle className="text-xl">Вход в Capflow</CardTitle>
-          <CardDescription>
-            Введите email и пароль, чтобы продолжить.
-          </CardDescription>
+          <CardTitle className="text-xl">{t("login.title")}</CardTitle>
+          <CardDescription>{t("login.subtitle")}</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4" noValidate>
             <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
+              <Label htmlFor="email">{t("login.email")}</Label>
               <Input
                 id="email"
                 type="email"
@@ -74,7 +74,7 @@ export function LoginPage(): JSX.Element {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password">Пароль</Label>
+              <Label htmlFor="password">{t("login.password")}</Label>
               <Input
                 id="password"
                 type="password"
@@ -98,8 +98,20 @@ export function LoginPage(): JSX.Element {
               className="w-full"
               disabled={submitting || !email || !password}
             >
-              {submitting ? "Входим…" : "Войти"}
+              {submitting ? t("login.submitting") : t("login.submit")}
             </Button>
+            {/* B3: previously the password-reset request page existed but
+                had no entry point from /login, locking out anyone who
+                forgot their password. Direct link here is the standard
+                recovery affordance every SaaS auth screen has. */}
+            <div className="text-center">
+              <Link
+                to="/reset-password"
+                className="text-sm text-brand-cyan hover:underline focus:underline focus:outline-none"
+              >
+                {t("login.forgotPassword")}
+              </Link>
+            </div>
           </form>
         </CardContent>
       </Card>

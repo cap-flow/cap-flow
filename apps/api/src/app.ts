@@ -20,12 +20,44 @@ import { adminBillingRoutes } from "./modules/billing/billing.routes.admin.js";
 import { BillingService } from "./modules/billing/billing.service.js";
 import { adminAuditRoutes } from "./modules/admin-audit/admin-audit.routes.js";
 import { AdminAuditService } from "./modules/admin-audit/admin-audit.service.js";
+import { adminIntegrationsRoutes } from "./modules/admin-integrations/admin-integrations.routes.js";
+import { AdminIntegrationsService } from "./modules/admin-integrations/admin-integrations.service.js";
+import {
+  decryptSecret,
+  deriveKey,
+  isEncrypted,
+} from "./modules/admin-integrations/secret-cipher.js";
 import { adminMetricsRoutes } from "./modules/admin-metrics/admin-metrics.routes.js";
 import { AdminMetricsService } from "./modules/admin-metrics/admin-metrics.service.js";
 import { adminPortfoliosRoutes } from "./modules/admin-portfolios/admin-portfolios.routes.js";
 import { AdminPortfoliosService } from "./modules/admin-portfolios/admin-portfolios.service.js";
 import { adminQueueRoutes } from "./modules/admin-queue/admin-queue.routes.js";
+import { adminHealthRoutes } from "./modules/admin-health/admin-health.routes.js";
 import { registerAdminQueueUi } from "./modules/admin-queue/admin-queue.ui.js";
+import { createCexClient } from "./modules/cex/cex.client.js";
+import { CexRepository } from "./modules/cex/cex.repository.js";
+import { cexRoutes } from "./modules/cex/cex.routes.js";
+import {
+  ChainOpsRepository,
+  walletBelongsToUser,
+} from "./modules/chain-ops/chain-ops.repository.js";
+import { ChainOpsService } from "./modules/chain-ops/chain-ops.service.js";
+import { chainOpsRoutes } from "./modules/chain-ops/chain-ops.routes.js";
+import { AnnotationsRepository } from "./modules/chain-ops/annotations.repository.js";
+import { AnnotationsService } from "./modules/chain-ops/annotations.service.js";
+import { annotationsRoutes } from "./modules/chain-ops/annotations.routes.js";
+import { SyncCoverageService } from "./modules/sync-coverage/sync-coverage.service.js";
+import { syncCoverageRoutes } from "./modules/sync-coverage/sync-coverage.routes.js";
+import { CexService } from "./modules/cex/cex.service.js";
+import { CexValuationService } from "./modules/cex/cex.valuation.service.js";
+import { CexCostBasisService } from "./modules/cex/cex.cost-basis.service.js";
+import { HistoricalFxService } from "./modules/cex/historical-fx.service.js";
+import { DepositSeedsRepository } from "./modules/cex/deposit-seeds.repository.js";
+import { DepositSeedsService } from "./modules/cex/deposit-seeds.service.js";
+import { CexTaxEventsService } from "./modules/cex/cex-tax-events.service.js";
+import { CexAssetGapService } from "./modules/cex/cex-asset-gap.service.js";
+import { createP2pClient } from "./modules/cex/cex.p2p.factory.js";
+import { CexProxyState } from "./modules/cex/cex.proxy-state.js";
 import {
   RedisRateLimitStore,
   UpstreamRateLimitService,
@@ -71,6 +103,9 @@ import { TelegramRepository } from "./modules/telegram/telegram.repository.js";
 import { telegramRoutes } from "./modules/telegram/telegram.routes.js";
 import { TelegramService } from "./modules/telegram/telegram.service.js";
 import { passwordResetRoutes } from "./modules/auth/password-reset.routes.js";
+import { emailVerificationRoutes } from "./modules/auth/email-verification.routes.js";
+import { EmailVerificationRepository } from "./modules/auth/email-verification.repository.js";
+import { EmailVerificationService } from "./modules/auth/email-verification.service.js";
 import { PasswordResetRepository } from "./modules/auth/password-reset.repository.js";
 import { PasswordResetService } from "./modules/auth/password-reset.service.js";
 import { adminInviteRoutes } from "./modules/invites/invites.routes.admin.js";
@@ -79,6 +114,7 @@ import { InvitesRepository } from "./modules/invites/invites.repository.js";
 import { InvitesService } from "./modules/invites/invites.service.js";
 import { authPlugin } from "./plugins/auth.js";
 import { dbPlugin } from "./plugins/db.js";
+import { schema } from "@cap-flow/db";
 import { errorHandlerPlugin } from "./plugins/error-handler.js";
 import { redisPlugin } from "./plugins/redis.js";
 
@@ -92,6 +128,35 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   const app = Fastify({
     logger: {
       level: env.LOG_LEVEL,
+      // H14 (2026-05-14): redact known secret-bearing fields BEFORE they
+      // hit any log sink. Affects both built-in request-log and explicit
+      // app.log.* calls. Patterns use pino's standard dot-notation.
+      //
+      // Caveat: pino redact is a fast static-path walker — anything
+      // dynamically structured (e.g. logging the full `req` object) is
+      // not deeply scanned. Use redact + careful logging together;
+      // don't log raw bodies at debug level either.
+      redact: {
+        paths: [
+          'req.headers.authorization',
+          'req.headers.cookie',
+          'req.headers["x-api-key"]',
+          'res.headers["set-cookie"]',
+          '*.password',
+          '*.passwordHash',
+          '*.password_hash',
+          '*.tokenHash',
+          '*.token_hash',
+          '*.sessionTokenHash',
+          '*.refreshToken',
+          '*.refresh_token',
+          '*.accessToken',
+          '*.access_token',
+          'body.password',
+          'body.token',
+        ],
+        censor: '[REDACTED]',
+      },
       ...(env.NODE_ENV === "development"
         ? { transport: { target: "pino-pretty" } }
         : {}),
@@ -115,8 +180,65 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   });
   await app.register(cookie, { secret: env.COOKIE_SECRET });
   await app.register(errorHandlerPlugin);
-  await app.register(dbPlugin, { connectionString: env.DATABASE_URL });
+  await app.register(dbPlugin, {
+    connectionString: env.DATABASE_URL,
+    poolMax: env.DB_POOL_MAX,
+    poolIdleMs: env.DB_POOL_IDLE_MS,
+  });
   await app.register(redisPlugin, { url: env.REDIS_URL });
+
+  // Phase S6: load DB-side integration secret overrides into process.env
+  // before any upstream client (DeBankClient/AlchemyClient/...) is
+  // constructed. DB row wins over the .env value of the same name; this
+  // means admin can edit a key via /admin/integrations and the next API
+  // boot picks it up without touching the host filesystem.
+  //
+  // B5: stored values are AES-256-GCM encrypted with a key derived from
+  // INTEGRATION_SECRETS_KEY (or COOKIE_SECRET as fallback). Legacy
+  // plaintext rows are passed through unchanged.
+  try {
+    const cipherSeed =
+      env.INTEGRATION_SECRETS_KEY && env.INTEGRATION_SECRETS_KEY.length >= 32
+        ? env.INTEGRATION_SECRETS_KEY
+        : env.COOKIE_SECRET;
+    const cipherKey = deriveKey(cipherSeed);
+    const overrides = await app.db
+      .select()
+      .from(schema.integrationSecrets);
+    let applied = 0;
+    for (const row of overrides) {
+      if (!row.value || !row.envVarName || row.envVarName.startsWith("(")) {
+        continue;
+      }
+      let plaintext: string;
+      if (isEncrypted(row.value)) {
+        try {
+          plaintext = decryptSecret(row.value, cipherKey);
+        } catch (e) {
+          app.log.warn(
+            { key: row.key, err: (e as Error).message },
+            "[integration_secrets] decrypt failed; skipping (key rotated?)"
+          );
+          continue;
+        }
+      } else {
+        plaintext = row.value; // legacy unencrypted row
+      }
+      process.env[row.envVarName] = plaintext;
+      applied += 1;
+    }
+    if (applied > 0) {
+      app.log.info(
+        { applied },
+        "[integration_secrets] DB overrides applied to process.env"
+      );
+    }
+  } catch (e) {
+    app.log.warn(
+      { err: (e as Error).message },
+      "[integration_secrets] failed to apply DB overrides (table missing? run migrate)"
+    );
+  }
   await app.register(authPlugin, {
     jwtSecret: env.JWT_SECRET,
     accessTtlMinutes: env.JWT_ACCESS_TTL_MIN,
@@ -126,9 +248,22 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   // ─── module instantiation ───────────────────────────────────────────
   const invitesRepo = new InvitesRepository(app.db);
   const accountsRepo = new AccountsRepository(app.db);
-  const accountsService = new AccountsService(accountsRepo, app.audit, {
-    userAccountLimit: 1,
+  // Refresh queue lives here (not in worker.ts) so accountsService can
+  // schedule cron + fire immediate manual refresh at account creation.
+  // Worker side imports the same `PortfolioRefreshQueue` class for the
+  // bootstrap pass over existing accounts.
+  const accountsBullConn = createBullConnection(env.REDIS_URL);
+  const accountsRefreshQueue = new PortfolioRefreshQueue(accountsBullConn);
+  app.addHook("onClose", async () => {
+    await accountsRefreshQueue.close();
+    accountsBullConn.disconnect();
   });
+  const accountsService = new AccountsService(
+    accountsRepo,
+    app.audit,
+    { userAccountLimit: 1 },
+    accountsRefreshQueue
+  );
   // AuthRepository is stateless over `app.db`; one instance is enough for
   // every module that needs DB-level access to users/sessions.
   const { AuthRepository } = await import(
@@ -158,6 +293,18 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     app.audit
   );
 
+  // Email verification — instantiated BEFORE invites so registration via
+  // invite can auto-trigger verify-email send.
+  const emailVerificationRepo = new EmailVerificationRepository(app.db);
+  const emailVerificationService = new EmailVerificationService(
+    emailVerificationRepo,
+    authRepo,
+    {
+      ttlHours: env.EMAIL_VERIFY_TTL_HOURS,
+      verifyBaseUrl: env.EMAIL_VERIFY_BASE_URL,
+    }
+  );
+
   const invitesService = new InvitesService(
     invitesRepo,
     authRepo,
@@ -170,7 +317,8 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       jwtSecret: env.JWT_SECRET,
       accessTtlMinutes: env.JWT_ACCESS_TTL_MIN,
       refreshTtlDays: env.JWT_REFRESH_TTL_DAYS,
-    }
+    },
+    emailVerificationService
   );
 
   const passwordResetRepo = new PasswordResetRepository(app.db);
@@ -184,6 +332,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       resetBaseUrl: env.PASSWORD_RESET_BASE_URL,
     }
   );
+
 
   const adminUsersService = new AdminUsersService(
     app.db,
@@ -200,6 +349,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   // ─── Phase 5: admin dashboard services ─────────────────────────────
   const adminPortfoliosService = new AdminPortfoliosService(app.db);
   const adminMetricsService = new AdminMetricsService(app.db);
+  const adminIntegrationsService = new AdminIntegrationsService(app.db, env);
   const adminAuditService = new AdminAuditService(app.db);
   const adminTechAuditService = new AdminTechAuditService(app.db);
 
@@ -224,13 +374,11 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
 
   // ─── Phase 4: portfolio refresh queue (API side only — the *worker* lives
   //              in worker.ts and pulls from this same queue) ─────────────
-  const bullConn = createBullConnection(env.REDIS_URL);
+  // Reuse the queue+connection created above for accountsService, so we
+  // don't open two TCP connections to Redis for the same logical queue.
+  const refreshQueue = accountsRefreshQueue;
+  const bullConn = accountsBullConn;
   const portfolioRepo = new PortfolioRepository(app.db);
-  const refreshQueue = new PortfolioRefreshQueue(bullConn);
-  app.addHook("onClose", async () => {
-    await refreshQueue.close();
-    bullConn.disconnect();
-  });
 
   // The API doesn't *process* jobs — it just enqueues them on
   // POST /accounts/:id/refresh and reads counts for the status endpoint.
@@ -267,6 +415,88 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     { cacheTtlSeconds: 30 }
   );
 
+  // ─── CEX integrations (CCXT) ──────────────────────────────────────
+  // Same cipher-key derivation as admin-integrations: prefer
+  // INTEGRATION_SECRETS_KEY, fall back to COOKIE_SECRET so existing
+  // deployments don't need a new env var to start using CEX features.
+  const cexCipherSeed =
+    (env.INTEGRATION_SECRETS_KEY && env.INTEGRATION_SECRETS_KEY.length >= 32
+      ? env.INTEGRATION_SECRETS_KEY
+      : env.COOKIE_SECRET) ?? "";
+  // Optional HTTPS proxy for outgoing CEX traffic (Bybit/OKX/BingX
+  // CDN geoblock RU/CIS IPs — see [cex.proxy.ts](./modules/cex/cex.proxy.ts)).
+  //
+  // CexProxyState caches the parsed agent and is refreshed when an
+  // admin updates the value in /admin/integrations → key=cex_proxy.
+  // Sources, in order: DB override → CEX_HTTPS_PROXY env → none.
+  const cexProxyState = new CexProxyState(
+    env.CEX_HTTPS_PROXY,
+    () => adminIntegrationsService.getSecret("cex_proxy"),
+    app.log
+  );
+  await cexProxyState.refresh();
+
+  const cexRepo = new CexRepository(app.db);
+  const cexService = new CexService(
+    cexRepo,
+    app.audit,
+    // Bake LIVE proxy into the factory — each connect/sync builds a
+    // fresh CCXT client, which means a fresh `currentSync()` lookup
+    // and so an updated agent after the admin edits the proxy.
+    (exchangeId, creds) =>
+      createCexClient(exchangeId, creds, cexProxyState.currentSync()),
+    { cipherKey: deriveKey(cexCipherSeed) },
+    // Same for P2P clients.
+    (exchangeId, creds) =>
+      createP2pClient(exchangeId, creds, cexProxyState.currentSync())
+  );
+  const cexValuation = new CexValuationService(
+    cexRepo,
+    pricesRepo,
+    quotedCoingecko,
+    { perUserDailyLimit: env.QUOTA_COINGECKO_PER_DAY }
+  );
+  // UCB D2: historical FX service для non-USD P2P.
+  const historicalFx = new HistoricalFxService(app.db);
+  // UCB C1: deposit seeds (client → server cost basis для CEX deposits).
+  const depositSeedsRepo = new DepositSeedsRepository(app.db);
+  const depositSeeds = new DepositSeedsService(depositSeedsRepo, app.audit);
+  const cexCostBasis = new CexCostBasisService(
+    cexRepo,
+    historicalFx,
+    depositSeeds,
+  );
+  // Tax T4: CEX-side tax events generator (server-side for trade gains).
+  const cexTaxEvents = new CexTaxEventsService(cexRepo);
+  // Bob-test #5: per-asset gap detector (flags assets where sells/withdraws
+  // exceed acquisition trail — usually missing CEX deposits).
+  const cexAssetGap = new CexAssetGapService(cexRepo);
+
+  // UCB B5: server-side cache of DeBank/Helius classified on-chain ops.
+  const chainOpsRepo = new ChainOpsRepository(app.db);
+  const chainOpsService = new ChainOpsService(
+    chainOpsRepo,
+    {
+      walletBelongsToUser: (walletId, userId) =>
+        walletBelongsToUser(app.db, walletId, userId),
+    },
+    app.audit,
+    // UCB C2: pass CexRepository для CEX hop detection
+    // (interface-compat: только метод listAllTransfersWithHashForUser).
+    cexRepo,
+  );
+
+  // UCB A3: per-op user annotations (override classifier decisions).
+  const annotationsRepo = new AnnotationsRepository(app.db);
+  const annotationsService = new AnnotationsService(
+    app.db,
+    annotationsRepo,
+    app.audit,
+  );
+
+  // UCB B4: aggregated sync coverage (wallets + CEX accounts state).
+  const syncCoverageService = new SyncCoverageService(app.db);
+
   // ─── Phase 8: billing ─────────────────────────────────────────────
   const billingRepo = new BillingRepository(app.db);
   const billingService = new BillingService(billingRepo, app.audit, {
@@ -285,7 +515,51 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   });
 
   // ─── routes ─────────────────────────────────────────────────────────
+  //
+  // H14: `/health` is the liveness probe (process still alive); `/health/ready`
+  // is the readiness probe (process can serve real traffic — DB + Redis
+  // are both reachable). Kubernetes / docker-compose / monitoring should
+  // distinguish:
+  //   - liveness fails  → restart the container
+  //   - readiness fails → take container out of load-balancer rotation
+  //                       (but DON'T restart — let it heal)
   app.get("/health", async () => ({ status: "ok", uptime: process.uptime() }));
+
+  app.get("/health/ready", async (_req, reply) => {
+    const checks = {
+      db: "ok" as "ok" | "error",
+      redis: "ok" as "ok" | "error",
+    };
+    let dbError: string | null = null;
+    let redisError: string | null = null;
+
+    try {
+      await app.db.execute(sql`SELECT 1`);
+    } catch (e) {
+      checks.db = "error";
+      dbError = (e as Error).message.slice(0, 200);
+    }
+
+    try {
+      const r = await app.redis.ping();
+      if (r !== "PONG") {
+        checks.redis = "error";
+        redisError = `Unexpected PING reply: ${r}`;
+      }
+    } catch (e) {
+      checks.redis = "error";
+      redisError = (e as Error).message.slice(0, 200);
+    }
+
+    const allOk = checks.db === "ok" && checks.redis === "ok";
+    return reply.status(allOk ? 200 : 503).send({
+      status: allOk ? "ready" : "degraded",
+      uptime: process.uptime(),
+      checks,
+      ...(dbError ? { dbError } : {}),
+      ...(redisError ? { redisError } : {}),
+    });
+  });
 
   await app.register(
     async (api) => {
@@ -297,6 +571,12 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(passwordResetRoutes, {
         service: passwordResetService,
         prefix: "/auth/password",
+      });
+      await api.register(emailVerificationRoutes, {
+        service: emailVerificationService,
+        notifications: notificationsService,
+        authRepo,
+        prefix: "/auth/email-verification",
       });
       await api.register(publicInviteRoutes, {
         invites: invitesService,
@@ -331,6 +611,27 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         service: operationsService,
         prefix: "/accounts",
       });
+      await api.register(cexRoutes, {
+        service: cexService,
+        valuation: cexValuation,
+        costBasis: cexCostBasis,
+        depositSeeds,
+        cexTaxEvents,
+        assetGap: cexAssetGap,
+        prefix: "/cex",
+      });
+      await api.register(chainOpsRoutes, {
+        service: chainOpsService,
+        prefix: "/chain-ops",
+      });
+      await api.register(annotationsRoutes, {
+        service: annotationsService,
+        prefix: "/chain-ops/annotations",
+      });
+      await api.register(syncCoverageRoutes, {
+        service: syncCoverageService,
+        prefix: "/sync-coverage",
+      });
       await api.register(adminUsageRoutes, {
         repo: apiUsageRepo,
         bucket: tokenBucket,
@@ -348,11 +649,25 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       });
       await api.register(adminPortfoliosRoutes, {
         service: adminPortfoliosService,
+        refreshQueue,
         prefix: "/admin/portfolios",
       });
       await api.register(adminMetricsRoutes, {
         service: adminMetricsService,
         prefix: "/admin/metrics",
+      });
+      await api.register(adminIntegrationsRoutes, {
+        service: adminIntegrationsService,
+        audit: app.audit,
+        // After admin saves cex_proxy in the UI we re-resolve the
+        // proxy so subsequent CEX calls pick up the new agent
+        // without a server restart.
+        onKeyChanged: {
+          cex_proxy: async () => {
+            await cexProxyState.refresh();
+          },
+        },
+        prefix: "/admin/integrations",
       });
       await api.register(adminAuditRoutes, {
         service: adminAuditService,
@@ -365,6 +680,13 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(adminQueueRoutes, {
         queue: refreshQueue,
         prefix: "/admin/queue",
+      });
+      // F3: admin health dashboard endpoint.
+      await api.register(adminHealthRoutes, {
+        db: app.db,
+        redis: app.redis,
+        queue: refreshQueue,
+        prefix: "/admin",
       });
       await api.register(adminFeatureFlagsRoutes, {
         service: featureFlagsService,
@@ -396,12 +718,21 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         ETHERSCAN_API_KEY: env.ETHERSCAN_API_KEY,
         ALCHEMY_API_KEY: env.ALCHEMY_API_KEY,
       });
-      // Per-user rate-limit (S2): 60 req/min + 600 req/hour. Tuned so a
-      // normal dashboard session (refresh + drill-downs) stays well
-      // under cap, but a runaway script can't drain DeBank Pro quota.
+      // Per-user rate-limit (S2). H3 (2026-05-14): now env-gated via
+      // UPSTREAM_RATE_PER_MIN / UPSTREAM_RATE_PER_HOUR. Defaults
+      // {60, 600} match the original "normal user" SaaS profile;
+      // override in .env for QA without re-deploying code. Hard
+      // sanity check that hour ≥ minute so a misconfig can't lock
+      // every user out forever.
+      const perMinute = env.UPSTREAM_RATE_PER_MIN;
+      const perHour = Math.max(env.UPSTREAM_RATE_PER_HOUR, perMinute);
       const upstreamRateLimit = new UpstreamRateLimitService(
         new RedisRateLimitStore(app.redis),
-        { perMinute: 60, perHour: 600 }
+        { perMinute, perHour }
+      );
+      app.log.info(
+        { perMinute, perHour },
+        "[upstream-proxy] rate-limit configured"
       );
       await api.register(upstreamProxyRoutes, {
         service: upstreamProxy,

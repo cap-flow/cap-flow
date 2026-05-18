@@ -230,7 +230,8 @@ function UserBillingPanel({ userId }: { readonly userId: string }): JSX.Element 
           {history.length === 0 ? (
             <p className="text-sm text-muted-foreground">Платежей пока нет.</p>
           ) : (
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto">
+            <table className="w-full min-w-[700px] text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
                   <th className="py-2">Дата</th>
@@ -272,6 +273,7 @@ function UserBillingPanel({ userId }: { readonly userId: string }): JSX.Element 
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </CardContent>
       </Card>

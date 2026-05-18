@@ -12,7 +12,7 @@ export type InviteStatus = z.infer<typeof inviteStatusSchema>;
 
 export const inviteRowSchema = z.object({
   id: z.string().uuid(),
-  email: z.string().email(),
+  email: z.string().email().nullable(),
   status: inviteStatusSchema,
   expiresAt: z.string().datetime(),
   consumedAt: z.string().datetime().nullable(),
@@ -31,7 +31,8 @@ export type InviteCreated = z.infer<typeof inviteCreatedSchema>;
 const inviteListSchema = z.array(inviteRowSchema);
 
 export interface CreateInviteInput {
-  readonly email: string;
+  /** Optional — omit for open invite link (recipient enters email at registration). */
+  readonly email?: string;
   readonly ttlHours?: number;
   readonly notes?: string;
 }

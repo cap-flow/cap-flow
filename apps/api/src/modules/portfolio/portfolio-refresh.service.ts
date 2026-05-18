@@ -7,6 +7,7 @@ import type { HeliusClient } from "../integrations/helius.js";
 import type { ApiUsageRepository } from "../api-usage/api-usage.repository.js";
 import type { OperationsRepository } from "../operations/operations.repository.js";
 import type { WalletsRepository } from "../wallets/wallets.repository.js";
+import type { ChainOpsRepository } from "../chain-ops/chain-ops.repository.js";
 
 import type { IPortfolioRepository } from "./portfolio.repository.js";
 
@@ -45,7 +46,14 @@ export class PortfolioRefreshService {
     private readonly helius: HeliusClient,
     private readonly apiUsage: ApiUsageRepository,
     private readonly operations: OperationsRepository,
-    private readonly chainClassifier: ChainClassifierService
+    private readonly chainClassifier: ChainClassifierService,
+    /**
+     * UCB B5.5: optional persistence для server-classified chain_operations.
+     * Если передан — после успешной классификации walker upsert'ит ops в
+     * `chain_operations` table. Без него refresh работает как раньше
+     * (тесты не нужно править — параметр optional).
+     */
+    private readonly chainOpsRepo?: ChainOpsRepository,
   ) {}
 
   async refreshAccount(args: {
@@ -420,14 +428,68 @@ export class PortfolioRefreshService {
     // breaking the refresh.
     let chainClassifier: unknown = null;
     let chainClassifierError: string | undefined;
+    let chainOpsPersistedCount = 0;
     try {
-      chainClassifier = await this.chainClassifier.analyzeAccount({
+      const classifierResult = await this.chainClassifier.analyzeAccount({
         accountId: args.accountId,
         addresses: addresses.map((a) => ({
           address: a.address,
           type: a.type,
         })),
       });
+      chainClassifier = classifierResult;
+
+      // UCB B5.5: persist classified ops в chain_operations через repo.
+      // Каждый address → walletId lookup → upsertBatch + markSyncSuccess.
+      // Idempotent (unique index per wallet+tx_hash+log_index), безопасно
+      // запускать на cron каждый час. Errors не fail'ат refresh — wallet
+      // sync_error пометит конкретные failures.
+      if (this.chainOpsRepo && classifierResult.opsByAddress.size > 0) {
+        const addrLookup = new Map<
+          string,
+          { walletId: string; type: string }
+        >();
+        for (const a of addresses) {
+          addrLookup.set(a.address.toLowerCase(), {
+            walletId: a.walletId,
+            type: a.type,
+          });
+          // Solana case-sensitive — добавляем оба варианта.
+          if (a.type === "solana") addrLookup.set(a.address, { walletId: a.walletId, type: a.type });
+        }
+        for (const [addr, ops] of classifierResult.opsByAddress) {
+          const meta = addrLookup.get(addr) ?? addrLookup.get(addr.toLowerCase());
+          if (!meta) continue;
+          if (ops.length === 0) {
+            // Empty — всё равно markSyncSuccess (sync прошёл, просто 0 ops).
+            try {
+              await this.chainOpsRepo.markSyncSuccess(meta.walletId);
+            } catch {
+              /* swallow — non-critical */
+            }
+            continue;
+          }
+          try {
+            const upsertInputs = ops.map((op) => ({
+              walletId: meta.walletId,
+              chain: op.chain,
+              txHash: op.hash.toLowerCase(),
+              logIndex: 0,
+              opType: op.type,
+              opTime: new Date(op.time * 1000),
+              status: op.status === "failed" ? "failed" : "ok",
+              raw: op,
+            }));
+            const inserted = await this.chainOpsRepo.upsertBatch(upsertInputs);
+            chainOpsPersistedCount += inserted;
+            await this.chainOpsRepo.markSyncSuccess(meta.walletId);
+          } catch (e) {
+            await this.chainOpsRepo
+              .markSyncError(meta.walletId, (e as Error).message)
+              .catch(() => undefined);
+          }
+        }
+      }
     } catch (err) {
       chainClassifierError =
         err instanceof Error ? err.message.slice(0, 200) : String(err);
@@ -548,6 +610,8 @@ export class PortfolioRefreshService {
       ...(costBasisError ? { costBasisError } : {}),
       chainClassifier,
       ...(chainClassifierError ? { chainClassifierError } : {}),
+      // UCB B5.5: stats о persistance ops в chain_operations.
+      chainOpsPersistedCount,
       generatedAt: ts.toISOString(),
     };
 

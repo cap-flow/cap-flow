@@ -5,7 +5,8 @@ export type InviteRow = typeof schema.invites.$inferSelect;
 export type InviteStatus = InviteRow["status"];
 
 export interface CreateInviteInput {
-  readonly email: string;
+  /** May be null for open invite links (user supplies email at registration). */
+  readonly email: string | null;
   readonly tokenHash: string;
   readonly createdByUserId: string;
   readonly expiresAt: Date;
@@ -30,7 +31,7 @@ export class InvitesRepository implements IInvitesRepository {
     const [row] = await this.db
       .insert(schema.invites)
       .values({
-        email: input.email.toLowerCase(),
+        email: input.email ? input.email.toLowerCase() : null,
         tokenHash: input.tokenHash,
         createdByUserId: input.createdByUserId,
         expiresAt: input.expiresAt,

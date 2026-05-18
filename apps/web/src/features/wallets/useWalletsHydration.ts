@@ -3,7 +3,7 @@ import { useQueries } from "@tanstack/react-query";
 
 import { walletsApi, type WalletAddress } from "./api";
 import { useWallets as useApiWallets } from "./hooks";
-import { usePrimaryAccount } from "@/features/accounts/hooks";
+import { useActiveAccount } from "@/features/accounts/hooks";
 import {
   useWallets,
   type SavedWallet,
@@ -36,8 +36,10 @@ import {
  * to localStorage. Phase F6b will remove the legacy store entirely.
  */
 export function useWalletsHydration(): void {
-  const primary = usePrimaryAccount();
-  const accountId = primary?.id;
+  // Was `usePrimaryAccount` — switched to active so multi-account users
+  // see THEIR currently-selected account's wallets, not just the primary.
+  const active = useActiveAccount();
+  const accountId = active?.id;
   const { state, replace } = useWallets();
 
   // Sources the canonical SaaS-side wallet list. Same query key as

@@ -75,8 +75,8 @@ export function AdminQueuePage(): JSX.Element {
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
           Recurring schedulers ({data?.recurringSchedules.length ?? 0})
         </h2>
-        <div className="overflow-hidden rounded-lg border border-border bg-card/40">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto rounded-lg border border-border bg-card/40">
+          <table className="w-full min-w-[900px] text-sm">
             <thead className="bg-card/80 text-left text-xs uppercase tracking-wider text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 font-medium">Scheduler key</th>

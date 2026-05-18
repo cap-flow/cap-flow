@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { usePrimaryAccount } from "@/features/accounts/hooks";
+import { useActiveAccount } from "@/features/accounts/hooks";
 import type {
   AddressType,
   Wallet,
@@ -34,7 +34,7 @@ import {
  * since the beta limit is "1 active account per user".
  */
 export function WalletsPage(): JSX.Element {
-  const primary = usePrimaryAccount();
+  const primary = useActiveAccount();
 
   if (primary === undefined) {
     return (

@@ -15,6 +15,7 @@ import {
   signAccessToken,
 } from "../auth/tokens.js";
 import type { NotificationsService } from "../notifications/notifications.service.js";
+import type { EmailVerificationService } from "../auth/email-verification.service.js";
 
 import type {
   IInvitesRepository,
@@ -31,7 +32,11 @@ export interface InvitesConfig {
 }
 
 export interface CreateInviteParams {
-  readonly email: string;
+  /**
+   * Optional. When omitted, invite link is "open" — recipient enters
+   * their own email at /invite/:token. Recommended flow for Phase S7+.
+   */
+  readonly email?: string | undefined;
   readonly ttlHours?: number | undefined;
   readonly notes?: string | undefined;
   readonly createdByUserId: string;
@@ -45,8 +50,14 @@ export interface InviteCreatedResult {
 
 export interface RegisterParams {
   readonly token: string;
+  /**
+   * Required only if invite was created without a pre-bound email (open
+   * invite link). Ignored otherwise — server uses invite.email.
+   */
+  readonly email?: string | undefined;
   readonly password: string;
-  readonly name: string;
+  /** Optional display name. Falls back to email-local-part if empty. */
+  readonly name?: string | undefined;
   readonly userAgent: string | null;
   readonly ip: string | null;
 }
@@ -58,26 +69,36 @@ export class InvitesService {
     private readonly accounts: AccountsRepository,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
-    private readonly config: InvitesConfig
+    private readonly config: InvitesConfig,
+    /**
+     * B4: optional email-verification trigger. When provided, registration
+     * via invite immediately mints+sends a verify email so the user lands
+     * in their inbox with a confirm link. If unavailable (e.g. tests),
+     * registration still succeeds — verification can be triggered later
+     * from POST /auth/email-verification/send.
+     */
+    private readonly emailVerification?: EmailVerificationService
   ) {}
 
   async createInvite(p: CreateInviteParams): Promise<InviteCreatedResult> {
-    const email = p.email.toLowerCase();
-
-    // 1. Already a user with this email? — refuse, admin should reset their password instead.
-    const existing = await this.auth.findUserByEmail(email);
-    if (existing) {
-      throw new ConflictError(
-        `User with email '${email}' already exists. Use password reset instead.`
-      );
-    }
-
-    // 2. Already a pending invite? — revoke it; only one live invite per email.
-    const pending = await this.invites.pendingByEmail(email);
+    const email = p.email ? p.email.toLowerCase() : null;
     const now = new Date();
-    for (const inv of pending) {
-      if (inv.expiresAt.getTime() < now.getTime()) continue;
-      await this.invites.revoke(inv.id, now);
+
+    // Email-bound flow: extra checks. Open invite (no email) skips these
+    // — admin gets a generic link to forward, and the recipient is
+    // identified at registration time.
+    if (email) {
+      const existing = await this.auth.findUserByEmail(email);
+      if (existing) {
+        throw new ConflictError(
+          `User with email '${email}' already exists. Use password reset instead.`
+        );
+      }
+      const pending = await this.invites.pendingByEmail(email);
+      for (const inv of pending) {
+        if (inv.expiresAt.getTime() < now.getTime()) continue;
+        await this.invites.revoke(inv.id, now);
+      }
     }
 
     const ttlHours = p.ttlHours ?? this.config.defaultTtlHours;
@@ -96,21 +117,24 @@ export class InvitesService {
     await this.audit.log({
       actorUserId: p.createdByUserId,
       action: "invite.created",
-      target: email,
-      payload: { inviteId: invite.id, expiresAt: expiresAt.toISOString() },
+      target: email ?? `open-link:${invite.id}`,
+      payload: {
+        inviteId: invite.id,
+        expiresAt: expiresAt.toISOString(),
+        kind: email ? "email-bound" : "open-link",
+      },
     });
 
     const inviteUrl = `${this.config.inviteBaseUrl}/${rawToken}`;
 
-    // Send the invite email. The admin response *also* contains the URL,
-    // so a manual hand-off path always works even if Resend is unconfigured
-    // — the email is for convenience, not a hard requirement.
-    try {
-      await this.notifications.sendInvite(email, inviteUrl, null);
-    } catch {
-      // Audit row was already written by notifications service; swallow so
-      // the admin's POST still succeeds — they still have the URL to
-      // forward by hand.
+    // Email delivery only when we have an address. Open links are
+    // forwarded by the admin manually — that's the whole point.
+    if (email) {
+      try {
+        await this.notifications.sendInvite(email, inviteUrl, null);
+      } catch {
+        /* notifications-service writes its own audit row; swallow */
+      }
     }
 
     return { invite, rawToken, inviteUrl };
@@ -145,11 +169,16 @@ export class InvitesService {
 
   /** Public: validate a raw token, return safe public-facing info. */
   async previewByToken(rawToken: string): Promise<{
-    email: string;
+    email: string | null;
     expiresAt: Date;
+    notes: string | null;
   }> {
     const invite = await this.findValidPendingInvite(rawToken);
-    return { email: invite.email, expiresAt: invite.expiresAt };
+    return {
+      email: invite.email,
+      expiresAt: invite.expiresAt,
+      notes: invite.notes,
+    };
   }
 
   /**
@@ -163,18 +192,33 @@ export class InvitesService {
   async registerByToken(p: RegisterParams): Promise<AuthTokensBundle> {
     const invite = await this.findValidPendingInvite(p.token);
 
-    // Defensive: someone might race to register the same email via another invite.
-    const dupe = await this.auth.findUserByEmail(invite.email);
+    // Email resolution:
+    //   - email-bound invite → server-trusted invite.email
+    //   - open invite → user-supplied p.email (validated by zod upstream)
+    const resolvedEmail = invite.email ?? p.email?.toLowerCase().trim();
+    if (!resolvedEmail) {
+      throw new ConflictError(
+        "Email is required for this open invite link."
+      );
+    }
+
+    // Defensive: someone might race to register the same email via another
+    // invite or via a future signup endpoint.
+    const dupe = await this.auth.findUserByEmail(resolvedEmail);
     if (dupe) {
       throw new ConflictError(
-        `User with email '${invite.email}' already exists.`
+        `User with email '${resolvedEmail}' already exists.`
       );
     }
 
     const passwordHash = await hashPassword(p.password);
+    // Display name: explicit > email-local-part. Lets the registration
+    // form skip the name field entirely for the simplest UX.
+    const displayName =
+      p.name?.trim() || resolvedEmail.split("@")[0] || resolvedEmail;
     const newUser = await this.auth.createUser({
-      email: invite.email,
-      name: p.name,
+      email: resolvedEmail,
+      name: displayName,
       passwordHash,
       role: "user",
     });
@@ -191,15 +235,42 @@ export class InvitesService {
     await this.audit.log({
       actorUserId: newUser.id,
       action: "invite.consumed",
-      target: invite.email,
-      payload: { inviteId: invite.id },
+      target: resolvedEmail,
+      payload: {
+        inviteId: invite.id,
+        kind: invite.email ? "email-bound" : "open-link",
+      },
     });
     await this.audit.log({
       actorUserId: newUser.id,
       action: "user.registered",
-      target: invite.email,
+      target: resolvedEmail,
       payload: { source: "invite", inviteId: invite.id },
     });
+
+    // B4: mint + send an email verification link right after signup.
+    // Best-effort: failure here MUST NOT block registration — user can
+    // request a resend after login via POST /auth/email-verification/send.
+    if (this.emailVerification) {
+      try {
+        const issued = await this.emailVerification.issueToken(newUser.id);
+        if (!issued.alreadyVerified && issued.url) {
+          await this.notifications.sendEmailVerification(newUser, issued.url);
+        }
+      } catch (e) {
+        // Log to audit so we can spot delivery failures during rollout;
+        // never throw — registration must remain transactional.
+        await this.audit.log({
+          actorUserId: newUser.id,
+          action: "email_verification.send_failed",
+          target: resolvedEmail,
+          payload: {
+            inviteId: invite.id,
+            error: (e as Error).message.slice(0, 500),
+          },
+        });
+      }
+    }
 
     // Auto-login: create session + tokens via the same primitives auth uses.
     const refreshToken = generateRefreshToken();

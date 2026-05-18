@@ -6,6 +6,10 @@ export const en = {
   "nav.risk": "Risk",
   "nav.insights": "Insights",
   "nav.registry": "Operations registry",
+  "nav.assets": "Assets",
+  "nav.coverage": "Sync coverage",
+  "nav.timeline": "Timeline",
+  "nav.tax": "Tax export",
   "nav.wallets": "Wallets",
   "nav.billing": "Billing",
   "nav.preferences": "Notifications",
@@ -447,6 +451,29 @@ export const en = {
 
   // Brand tagline
   "brand.tagline": "Control your capital flow",
+
+  // M13 (2026-05-14): auth flow extracted strings.
+  "login.title": "Sign in to Capflow",
+  "login.subtitle": "Enter your email and password to continue.",
+  "login.email": "Email",
+  "login.password": "Password",
+  "login.submit": "Sign in",
+  "login.submitting": "Signing in…",
+  "login.forgotPassword": "Forgot password?",
+  "login.error.invalid": "Wrong email or password.",
+  "login.error.rateLimit": "Too many attempts. Please wait and try again.",
+  "login.error.network": "Network unavailable.",
+  "login.error.generic": "Error {0}. Try again later.",
+
+  "verifyEmail.title": "Email verification",
+  "verifyEmail.checking": "Checking the link…",
+  "verifyEmail.success": "Email verified. Thanks!",
+  "verifyEmail.alreadyVerified": "This email was already verified earlier.",
+  "verifyEmail.error.notFound": "Link not found. It may have been used already.",
+  "verifyEmail.error.expired":
+    "Link expired or already used. Request a new one from settings after login.",
+  "verifyEmail.goLogin": "To sign-in page",
+  "verifyEmail.goHome": "To dashboard",
 } as const;
 
 export type TranslationKey = keyof typeof en;

@@ -169,3 +169,111 @@ gunzip -c backups/pre-deploy/20260512-120000-abc1234.sql.gz | \
   hard restart is acceptable; durable state is in Postgres.
 - **No log aggregation yet** (P6.4) — `docker compose logs` is the
   current observability story.
+
+---
+
+## 9. Bare-metal deploy (F1) — alternative к Docker Compose
+
+Если по какой-то причине нужен deploy без Docker (e.g. shared VPS,
+hardened systemd policy, debug locally) — есть systemd-первая
+конфигурация в `infra/systemd/`.
+
+### 9.1. Provision
+
+```bash
+# Создать user без shell login.
+sudo useradd --system --shell /usr/sbin/nologin --home /srv/capflow capflow
+sudo mkdir -p /srv/capflow /etc/capflow /var/backups/capflow
+sudo chown -R capflow:capflow /srv/capflow /var/backups/capflow
+
+# Скопировать built артефакты (после `pnpm build`):
+sudo rsync -a apps/api/dist /srv/capflow/apps/api/
+sudo rsync -a packages/db/dist /srv/capflow/packages/db/
+
+# Env файл (НЕ в git):
+sudo tee /etc/capflow/api.env <<'EOF'
+NODE_ENV=production
+LOG_LEVEL=info
+DATABASE_URL=postgres://capflow:***@localhost:5432/capflow
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=<64-char hex>
+COOKIE_DOMAIN=cap-flow.ru
+COOKIE_SECURE=true
+EOF
+sudo chmod 640 /etc/capflow/api.env
+sudo chown root:capflow /etc/capflow/api.env
+```
+
+### 9.2. Install systemd units
+
+```bash
+sudo cp infra/systemd/capflow-api.service /etc/systemd/system/
+sudo cp infra/systemd/capflow-worker.service /etc/systemd/system/
+sudo cp infra/systemd/capflow-backup.service /etc/systemd/system/
+sudo cp infra/systemd/capflow-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# Запустить core services
+sudo systemctl enable --now capflow-api capflow-worker
+
+# Backup timer (если /etc/capflow/backup.env настроен)
+sudo systemctl enable --now capflow-backup.timer
+```
+
+### 9.3. Verify
+
+```bash
+sudo systemctl status capflow-api capflow-worker
+journalctl -u capflow-api -f       # follow logs
+curl http://localhost:3000/health  # liveness
+infra/scripts/healthcheck.sh       # readiness + liveness
+```
+
+### 9.4. Health monitoring
+
+Внешний uptime monitor (Uptime Kuma / healthchecks.io / Pingdom):
+- URL: `https://cap-flow.ru/api/health/ready`
+- HTTP 200 = healthy, 503 = DB/Redis down
+- Recommended interval: 60s
+
+Admin UI (`/admin/health`, F3) — внутри-приложения snapshot всех
+subsystems (DB pool, Redis ping, BullMQ queue, wallets/CEX sync state).
+Refresh каждые 15s, требует admin role.
+
+### 9.5. Backup
+
+`infra/scripts/backup-postgres.sh` запускается через
+`capflow-backup.timer` daily @ 03:00 UTC. Конфигурация в
+`/etc/capflow/backup.env`:
+
+```bash
+POSTGRES_HOST=localhost
+POSTGRES_USER=capflow
+POSTGRES_DB=capflow
+PGPASSWORD=<secret>
+BACKUP_DIR=/var/backups/capflow
+RETENTION_DAYS=14
+BACKUP_REMOTE_URL=s3:capflow-backups/postgres   # optional, requires rclone
+```
+
+Восстановление:
+```bash
+gunzip -c /var/backups/capflow/capflow-<TS>.sql.gz | psql -U capflow -d capflow_new
+```
+
+### 9.6. Production checklist (pre-launch)
+
+- [ ] DNS A-records настроены (cap-flow.ru + www.cap-flow.ru)
+- [ ] TLS работает (Caddy auto-ACME ИЛИ Let's Encrypt cert)
+- [ ] `JWT_SECRET` уникальный, ≥64 chars
+- [ ] `COOKIE_SECURE=true` (HTTPS only)
+- [ ] `COOKIE_DOMAIN` совпадает с production hostname
+- [ ] `CORS_ORIGIN` whitelist'ит только production frontend domain
+- [ ] PostgreSQL backup настроен + первый тестовый restore сделан
+- [ ] External uptime monitor зарегистрирован на `/health/ready`
+- [ ] Admin user'ы засеяны (через invite или DB seed)
+- [ ] Все migrations применены: `pnpm db:migrate` или `docker compose run migrate`
+- [ ] `/admin/health` показывает overall='ok' для всех secrets-зависимых subsystems
+- [ ] Sentry / error tracking настроен (если в стэке)
+- [ ] `notes/DEPLOY.md` § 0–9 пройден полностью (на новой VPS)
+- [ ] Smoke test: register user → connect wallet → видит positions

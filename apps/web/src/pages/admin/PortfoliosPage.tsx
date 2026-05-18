@@ -1,13 +1,22 @@
 import { useState } from "react";
-import { AlertTriangle, Database, DollarSign, Users, Zap } from "lucide-react";
+import {
+  AlertTriangle,
+  Database,
+  DollarSign,
+  RefreshCw,
+  Users,
+  Zap,
+} from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/features/auth/AuthProvider";
 import {
+  useAdminPortfolioRefreshOne,
   useAdminPortfolios,
   useAdminPortfoliosAggregate,
+  useAdminPortfoliosRefreshAll,
 } from "@/features/admin/portfolios/hooks";
 import type { AdminAccountRow } from "@/features/admin/portfolios/api";
 import { useImpersonateUser } from "@/features/admin/users/hooks";
@@ -17,25 +26,53 @@ import { PageHeader } from "./_PageHeader";
 export function AdminPortfoliosPage(): JSX.Element {
   const list = useAdminPortfolios();
   const agg = useAdminPortfoliosAggregate();
+  const refreshAll = useAdminPortfoliosRefreshAll();
+  const [lastEnqueued, setLastEnqueued] = useState<number | null>(null);
 
   return (
     <div>
       <PageHeader
         title="Портфели"
-        description="Все аккаунты платформы: текущий капитал, последний refresh, ошибки за 24ч. Кликни по строке — провалишься в дашборд этого пользователя (impersonation)."
+        description="Все аккаунты платформы: текущий капитал, последний refresh, ошибки за 24ч. Кликни по строке — провалишься в дашборд этого пользователя (impersonation). Кнопка «Обновить» ставит задачу refresh для ВСЕХ активных аккаунтов; снэпшоты подтянутся в течение 30-60 сек."
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              list.refetch();
-              agg.refetch();
-            }}
-          >
-            Обновить
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                list.refetch();
+                agg.refetch();
+              }}
+              disabled={list.isFetching || agg.isFetching}
+            >
+              Перезагрузить таблицу
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              onClick={async () => {
+                const res = await refreshAll.mutateAsync();
+                setLastEnqueued(res.enqueued);
+              }}
+              disabled={refreshAll.isPending}
+            >
+              <RefreshCw
+                className={`mr-1.5 h-3.5 w-3.5 ${refreshAll.isPending ? "animate-spin" : ""}`}
+              />
+              {refreshAll.isPending
+                ? "Запускаю refresh…"
+                : "Обновить все портфели"}
+            </Button>
+          </div>
         }
       />
+
+      {lastEnqueued !== null && !refreshAll.isPending && (
+        <p className="mt-2 rounded-md border border-brand-cyan/30 bg-brand-cyan/10 px-3 py-2 text-xs text-brand-cyan">
+          В очередь поставлено {lastEnqueued} задач refresh. Снапшоты
+          появятся в таблице через 30-60 сек (auto-poll каждые 5 / 30 сек).
+        </p>
+      )}
 
       <KpiGrid
         aggregate={agg.data}
@@ -49,8 +86,8 @@ export function AdminPortfoliosPage(): JSX.Element {
         </p>
       )}
 
-      <div className="mt-4 overflow-hidden rounded-lg border border-border bg-card/40">
-        <table className="w-full text-sm">
+      <div className="mt-4 overflow-x-auto rounded-lg border border-border bg-card/40">
+        <table className="w-full min-w-[1100px] text-sm">
           <thead className="bg-card/80 text-left text-xs uppercase tracking-wider text-muted-foreground">
             <tr>
               <th className="px-4 py-3 font-medium">Аккаунт</th>
@@ -60,13 +97,14 @@ export function AdminPortfoliosPage(): JSX.Element {
               <th className="px-4 py-3 font-medium">Trigger</th>
               <th className="px-4 py-3 font-medium text-right">24ч</th>
               <th className="px-4 py-3 font-medium text-right">Ошибок 24ч</th>
+              <th className="px-4 py-3 font-medium text-right">Refresh</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {list.isLoading && (
               <tr>
                 <td
-                  colSpan={7}
+                  colSpan={8}
                   className="px-4 py-8 text-center text-muted-foreground"
                 >
                   Загрузка…
@@ -76,7 +114,7 @@ export function AdminPortfoliosPage(): JSX.Element {
             {!list.isLoading && list.data?.length === 0 && (
               <tr>
                 <td
-                  colSpan={7}
+                  colSpan={8}
                   className="px-4 py-8 text-center text-muted-foreground"
                 >
                   Нет активных аккаунтов.
@@ -95,6 +133,7 @@ function Row({ row }: { readonly row: AdminAccountRow }) {
   const { user: me, startImpersonation } = useAuth();
   const navigate = useNavigate();
   const impersonate = useImpersonateUser();
+  const refreshOne = useAdminPortfolioRefreshOne();
   const [busy, setBusy] = useState(false);
 
   const isSelf = me?.id === row.ownerId;
@@ -175,6 +214,25 @@ function Row({ row }: { readonly row: AdminAccountRow }) {
         }`}
       >
         {row.errors24h}
+      </td>
+      <td className="px-4 py-3 text-right">
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={refreshOne.isPending}
+          // Останавливаем bubbling, чтобы не сработала impersonation
+          // (handleDrillIn навешен на всю строку).
+          onClick={(e) => {
+            e.stopPropagation();
+            refreshOne.mutate(row.accountId);
+          }}
+          onKeyDown={(e) => e.stopPropagation()}
+          aria-label={`Запустить refresh для ${row.accountName}`}
+        >
+          <RefreshCw
+            className={`h-3.5 w-3.5 ${refreshOne.isPending ? "animate-spin" : ""}`}
+          />
+        </Button>
       </td>
     </tr>
   );

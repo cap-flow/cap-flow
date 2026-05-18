@@ -8,10 +8,12 @@ import { AdminApiUsagePage } from "./pages/admin/ApiUsagePage";
 import { AdminAuditPage } from "./pages/admin/AuditPage";
 import { AdminBillingPage } from "./pages/admin/BillingPage";
 import { AdminFeatureFlagsPage } from "./pages/admin/FeatureFlagsPage";
+import { AdminIntegrationsPage } from "./pages/admin/IntegrationsPage";
 import { AdminInvitesPage } from "./pages/admin/InvitesPage";
 import { AdminMetricsPage } from "./pages/admin/MetricsPage";
 import { AdminPortfoliosPage } from "./pages/admin/PortfoliosPage";
 import { AdminQueuePage } from "./pages/admin/QueuePage";
+import { AdminHealthPage } from "./pages/admin/HealthPage";
 import { AdminTechAuditPage } from "./pages/admin/TechAuditPage";
 import { AdminUsersPage } from "./pages/admin/UsersPage";
 import { BillingPage } from "./pages/BillingPage";
@@ -27,8 +29,15 @@ import {
 } from "./pages/PasswordResetPage";
 import { PreferencesPage } from "./pages/PreferencesPage";
 import { RegistryPage } from "./pages/RegistryPage";
+import { CoveragePage } from "./pages/CoveragePage";
+import { AssetsPage } from "./pages/AssetsPage";
+import { PositionDetailPage } from "./pages/PositionDetailPage";
+import { TimelinePage } from "./pages/TimelinePage";
+import { TaxPage } from "./pages/TaxPage";
+import { OnboardingPage } from "./pages/OnboardingPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { UsersPage } from "./pages/UsersPage";
+import { VerifyEmailPage } from "./pages/VerifyEmailPage";
 import { WalletDetailPage, WalletExplorePage } from "./pages/WalletDetailPage";
 import { WalletsPage } from "./pages/WalletsPage";
 
@@ -53,7 +62,9 @@ function AdminRoutes() {
           <Route path="audit" element={<AdminAuditPage />} />
           <Route path="tech-audit" element={<AdminTechAuditPage />} />
           <Route path="queue" element={<AdminQueuePage />} />
+          <Route path="health" element={<AdminHealthPage />} />
           <Route path="api-usage" element={<AdminApiUsagePage />} />
+          <Route path="integrations" element={<AdminIntegrationsPage />} />
           <Route path="billing" element={<AdminBillingPage />} />
           <Route path="feature-flags" element={<AdminFeatureFlagsPage />} />
           <Route path="*" element={<NotFound />} />
@@ -70,8 +81,14 @@ function UserRoutes() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/performance" element={<OpenPositionsPage />} />
+          <Route path="/positions/:positionId" element={<PositionDetailPage />} />
+          <Route path="/timeline" element={<TimelinePage />} />
+          <Route path="/tax" element={<TaxPage />} />
+          <Route path="/onboarding" element={<OnboardingPage />} />
           <Route path="/closed" element={<ClosedPositionsPage />} />
           <Route path="/registry" element={<RegistryPage />} />
+          <Route path="/coverage" element={<CoveragePage />} />
+          <Route path="/assets" element={<AssetsPage />} />
           <Route path="/wallet/explore" element={<WalletExplorePage />} />
           <Route path="/wallet/:walletId" element={<WalletDetailPage />} />
           <Route path="/users" element={<UsersPage />} />
@@ -94,6 +111,7 @@ export function App(): JSX.Element {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/invite/:token" element={<InvitePage />} />
+        <Route path="/verify-email/:token" element={<VerifyEmailPage />} />
         <Route path="/reset-password" element={<PasswordResetRequestPage />} />
         <Route
           path="/reset-password/:token"

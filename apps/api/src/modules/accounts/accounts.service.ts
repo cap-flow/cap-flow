@@ -5,6 +5,7 @@ import {
 } from "../../core/errors.js";
 import type { AuditService } from "../audit/audit.service.js";
 import type { AuthUser } from "../auth/auth.types.js";
+import type { PortfolioRefreshQueue } from "../queue/portfolio-refresh.queue.js";
 
 import type {
   AccountRow,
@@ -12,6 +13,13 @@ import type {
   IAccountsRepository,
   UpdateAccountInput,
 } from "./accounts.repository.js";
+
+/**
+ * Cron-cadence для авто-refresh новых аккаунтов. Совпадает с константами
+ * в worker.ts — keep in sync.
+ */
+const NEW_ACCOUNT_REFRESH_EVERY_MS = 60 * 60 * 1000; // 1 hour
+const NEW_ACCOUNT_REFRESH_JITTER_MS = 5 * 60 * 1000; // 5 min spread
 
 /**
  * Accounts service.
@@ -31,7 +39,16 @@ export class AccountsService {
     private readonly audit: AuditService,
     private readonly options: { userAccountLimit: number } = {
       userAccountLimit: 1,
-    }
+    },
+    /**
+     * Опциональная очередь для cron-refresh. Если задана — при создании
+     * нового аккаунта мы сразу регистрируем recurring refresh, чтобы
+     * пользователь видел снапшоты без ожидания рестарта worker'а
+     * (без этого новый аккаунт получит cron только при следующем
+     * worker bootstrap'е, что для via.irk@gmail.com обернулось
+     * пустой строкой в admin/portfolios).
+     */
+    private readonly refreshQueue?: PortfolioRefreshQueue
   ) {}
 
   async listForCurrentUser(actor: AuthUser): Promise<AccountRow[]> {
@@ -87,6 +104,31 @@ export class AccountsService {
       accountId: created.id,
       payload: { name: created.name, isPrimary: created.isPrimary },
     });
+
+    // Schedule recurring refresh + fire one immediate manual refresh.
+    // Без этого первый снапшот придёт только через 1 час (cron), а в
+    // admin/portfolios строка будет «TVL —» до тех пор.
+    if (this.refreshQueue) {
+      try {
+        await this.refreshQueue.scheduleRecurring(created.id, {
+          everyMs: NEW_ACCOUNT_REFRESH_EVERY_MS,
+          jitterMs: NEW_ACCOUNT_REFRESH_JITTER_MS,
+        });
+        await this.refreshQueue.enqueueManual(
+          created.id,
+          actor.id,
+          actor.role === "admin" ? "admin" : "user"
+        );
+      } catch (e) {
+        // Не фейлим create — кэш / расписание восстановятся при
+        // следующем worker bootstrap'е.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[accounts.service] failed to schedule refresh for new account ${created.id}:`,
+          e
+        );
+      }
+    }
 
     return created;
   }
@@ -144,14 +186,21 @@ export class AccountsService {
 
   // ─── tenant-isolation helpers (used by middleware too) ──────────────
 
-  /** Throws ForbiddenError if `actor` is neither the owner nor an admin. */
+  /**
+   * M1 (2026-05-14): throws **NotFoundError** (not Forbidden) when caller
+   * isn't the owner — collapses the response code to a single 404 for
+   * "doesn't exist for you" regardless of the underlying reason. Without
+   * this, an attacker could enumerate valid account UUIDs by observing
+   * `403` (exists, just not yours) vs `404` (doesn't exist at all).
+   * Industry standard (GitHub, GitLab, Stripe all do this).
+   *
+   * Admin still gets through unconditionally because their job depends
+   * on cross-tenant visibility.
+   */
   assertOwnerOrAdmin(account: AccountRow, actor: AuthUser): void {
     if (actor.role === "admin") return;
     if (account.ownerId !== actor.id) {
-      // Return Forbidden — not NotFound — only after we already confirmed the
-      // row exists. Routes that find-then-assert are safe; if you assert on
-      // an unknown id you'd leak existence. Callers should `findById` first.
-      throw new ForbiddenError("You do not have access to this account.");
+      throw new NotFoundError(`Account '${account.id}' not found.`);
     }
   }
 }

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  NO_RETRY,
   UpstreamProxyService,
   UpstreamProxyError,
   type ProxyEnv,
@@ -24,7 +25,17 @@ const ENV: ProxyEnv = {
 };
 
 function makeSvc(envOverride?: Partial<ProxyEnv>): UpstreamProxyService {
-  return new UpstreamProxyService({ ...ENV, ...envOverride });
+  // Existing tests assume one-shot fetch. Disable retries so 5xx/network
+  // responses surface immediately without backoff sleeps.
+  return new UpstreamProxyService({ ...ENV, ...envOverride }, NO_RETRY);
+}
+
+/** Variant for tests that need to exercise the retry path. */
+function makeRetrySvc(envOverride?: Partial<ProxyEnv>): UpstreamProxyService {
+  return new UpstreamProxyService(
+    { ...ENV, ...envOverride },
+    { maxRetries: 3, baseBackoffMs: 1, maxBackoffMs: 2, maxRetryAfterSec: 1 }
+  );
 }
 
 beforeEach(() => {
@@ -83,6 +94,40 @@ describe("UpstreamProxyService — DeBank", () => {
       svc.forward({ provider: "debank", method: "GET", path: "admin/keys" })
     ).rejects.toBeInstanceOf(UpstreamProxyError);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  // L2 (2026-05-14): error message must not echo raw user input.
+  // Defends against log-injection and reflected-output via UI.
+  it("L2: sanitizes special characters in forbidden_path error message", async () => {
+    const svc = makeSvc();
+    const malicious = "<script>alert(1)</script>\n[FAKE] admin granted";
+    try {
+      await svc.forward({
+        provider: "debank",
+        method: "GET",
+        path: malicious,
+      });
+      throw new Error("expected throw");
+    } catch (e) {
+      const msg = (e as Error).message;
+      // No raw `<script>` tag, no newline injection, no brackets.
+      expect(msg).not.toContain("<script>");
+      expect(msg).not.toContain("\n");
+      expect(msg).not.toContain("</script>");
+      expect(msg).not.toContain("[FAKE]");
+    }
+  });
+
+  it("L2: truncates absurdly long paths in the error message", async () => {
+    const svc = makeSvc();
+    const long = "a".repeat(5000);
+    try {
+      await svc.forward({ provider: "debank", method: "GET", path: long });
+      throw new Error("expected throw");
+    } catch (e) {
+      // Cap at a sane preview length (~100 chars max for the path token).
+      expect((e as Error).message.length).toBeLessThan(200);
+    }
   });
 
   it("rejects when API key not configured", async () => {
@@ -262,6 +307,139 @@ describe("UpstreamProxyService — general", () => {
         query: { id: "0xabc" },
       })
     ).rejects.toMatchObject({ name: "UpstreamProxyError", kind: "network" });
+  });
+});
+
+/* ------------------------- retry-with-backoff ----------------------------- */
+
+describe("UpstreamProxyService — retry on transient failures", () => {
+  it("retries 429 once and returns success on second attempt", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(
+        new Response("rate limited", {
+          status: 429,
+          headers: { "Retry-After": "0" },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true }), { status: 200 })
+      );
+    const svc = makeRetrySvc();
+    const r = await svc.forward({
+      provider: "debank",
+      method: "GET",
+      path: "v1/user/total_balance",
+      query: { id: "0xabc" },
+    });
+    expect(r.status).toBe(200);
+    expect(r.retries).toBe(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries 502 with exponential backoff and returns success", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true }), { status: 200 })
+      );
+    const svc = makeRetrySvc();
+    const r = await svc.forward({
+      provider: "debank",
+      method: "GET",
+      path: "v1/user/total_balance",
+    });
+    expect(r.status).toBe(200);
+    expect(r.retries).toBe(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("after MAX_RETRIES of 429, surfaces the final 429 response (not synthetic error)", async () => {
+    // Use mockImplementation so each attempt gets a *fresh* Response —
+    // Response bodies are single-use, mockResolvedValue would return the
+    // same consumed instance on retry and fail with "Body is unusable".
+    fetchSpy.mockImplementation(
+      async () =>
+        new Response("rate limited forever", { status: 429 })
+    );
+    const svc = makeRetrySvc();
+    const r = await svc.forward({
+      provider: "debank",
+      method: "GET",
+      path: "v1/user/total_balance",
+    });
+    expect(r.status).toBe(429);
+    expect(r.retries).toBe(3);
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it("non-retryable 404 returns immediately without retry", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response("not found", { status: 404 })
+    );
+    const svc = makeRetrySvc();
+    const r = await svc.forward({
+      provider: "debank",
+      method: "GET",
+      path: "v1/user/total_balance",
+    });
+    expect(r.status).toBe(404);
+    expect(r.retries).toBe(0);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("respects Retry-After header value (capped) for 429", async () => {
+    const before = Date.now();
+    fetchSpy
+      .mockResolvedValueOnce(
+        new Response("rate limited", {
+          status: 429,
+          headers: { "Retry-After": "1" },
+        })
+      )
+      .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+    const svc = makeRetrySvc(); // maxRetryAfterSec = 1
+    const r = await svc.forward({
+      provider: "debank",
+      method: "GET",
+      path: "v1/user/total_balance",
+    });
+    const elapsed = Date.now() - before;
+    expect(r.status).toBe(200);
+    expect(r.retries).toBe(1);
+    expect(elapsed).toBeGreaterThanOrEqual(900); // ~1s sleep
+  });
+
+  it("network errors retry then surface as UpstreamProxyError kind=network", async () => {
+    fetchSpy.mockRejectedValue(new Error("ECONNRESET"));
+    const svc = makeRetrySvc();
+    await expect(
+      svc.forward({
+        provider: "debank",
+        method: "GET",
+        path: "v1/user/total_balance",
+      })
+    ).rejects.toMatchObject({ name: "UpstreamProxyError", kind: "network" });
+    expect(fetchSpy).toHaveBeenCalledTimes(4); // 1 + 3 retries
+  });
+
+  it("aborted signal between retries throws immediately", async () => {
+    const controller = new AbortController();
+    fetchSpy.mockImplementationOnce(async () => {
+      controller.abort();
+      return new Response("rate limited", { status: 429 });
+    });
+    const svc = makeRetrySvc();
+    await expect(
+      svc.forward({
+        provider: "debank",
+        method: "GET",
+        path: "v1/user/total_balance",
+        signal: controller.signal,
+      })
+    ).rejects.toBeInstanceOf(UpstreamProxyError);
+    // Only the first attempt happened; second was short-circuited by abort.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });
 

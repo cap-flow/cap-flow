@@ -18,6 +18,7 @@ export const meSchema = z.object({
   role: userRoleSchema,
   createdAt: z.string(),
   lastLoginAt: z.string().nullable(),
+  emailVerifiedAt: z.string().nullable(),
   impersonation: impersonationInfoSchema.nullable(),
 });
 export type Me = z.infer<typeof meSchema>;

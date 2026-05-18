@@ -34,7 +34,9 @@ export const invites = pgTable(
   "invites",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    email: varchar("email", { length: 320 }).notNull(),
+    // Email may be pre-bound by admin (legacy flow) or `null` for "open"
+    // invite links where the user enters their email at /invite/:token.
+    email: varchar("email", { length: 320 }),
     tokenHash: text("token_hash").notNull(),
     status: inviteStatusEnum("status").notNull().default("pending"),
     createdByUserId: uuid("created_by_user_id")

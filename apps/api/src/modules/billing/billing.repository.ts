@@ -90,6 +90,17 @@ export class BillingRepository {
 
   // ─── payment ledger ───────────────────────────────────────────────
 
+  /**
+   * Most recent NON-REFUNDED subscription for a user.
+   *
+   * Fix B1 (2026-05-14): previous implementation returned any latest
+   * subscription regardless of whether a `kind=refund` row pointed at it,
+   * letting refunded users retain access until original `period_end`.
+   * The `NOT EXISTS` subquery excludes any subscription that has been
+   * refunded — admin's `BillingService.refundForUser` now correctly
+   * downgrades the user to `beta` (or to the next-most-recent valid
+   * subscription, if any).
+   */
   async latestActiveSubscription(
     userId: string
   ): Promise<UserPaymentRow | null> {
@@ -100,7 +111,12 @@ export class BillingRepository {
         and(
           eq(schema.userPayments.userId, userId),
           eq(schema.userPayments.kind, "subscription"),
-          isNotNull(schema.userPayments.periodEnd)
+          isNotNull(schema.userPayments.periodEnd),
+          sql`NOT EXISTS (
+            SELECT 1 FROM ${schema.userPayments} r
+            WHERE r.kind = 'refund'
+              AND r.refunded_payment_id = ${schema.userPayments.id}
+          )`
         )
       )
       .orderBy(desc(schema.userPayments.periodEnd))

@@ -1,0 +1,49 @@
+[Unit]
+# Capflow BullMQ worker — separate long-running process, distinct from api.
+# Drains portfolio-refresh + payment-monitor queues. Must be running for
+# scheduled hourly refresh to fire.
+#
+# Usage:
+#   sudo cp infra/systemd/capflow-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now capflow-worker
+#
+# For HA — instantiate multiple copies: capflow-worker@1, capflow-worker@2
+# (BullMQ uses Redis-atomic job locks; safe to scale horizontally).
+Description=Capflow BullMQ worker
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=capflow
+Group=capflow
+WorkingDirectory=/srv/capflow/apps/api
+EnvironmentFile=/etc/capflow/api.env
+ExecStart=/usr/bin/node /srv/capflow/apps/api/dist/worker.js
+Restart=on-failure
+RestartSec=10s
+MemoryMax=768M
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+
+# Security hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/capflow/var/log
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=capflow-worker
+
+[Install]
+WantedBy=multi-user.target

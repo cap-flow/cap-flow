@@ -8,6 +8,10 @@ export const ru: Record<TranslationKey, string> = {
   "nav.risk": "Риски",
   "nav.insights": "Аналитика",
   "nav.registry": "Реестр операций",
+  "nav.assets": "Активы",
+  "nav.coverage": "Покрытие данных",
+  "nav.timeline": "Лента событий",
+  "nav.tax": "Налоги",
   "nav.wallets": "Кошельки",
   "nav.billing": "Подписка",
   "nav.preferences": "Уведомления",
@@ -447,4 +451,28 @@ export const ru: Record<TranslationKey, string> = {
   "pending.dialog.save": "Сохранить",
 
   "brand.tagline": "Управляй потоком капитала",
+
+  // M13 (2026-05-14): extracted strings for auth flow (highest ROI
+  // when expanding to EN — public-facing surface area).
+  "login.title": "Вход в Capflow",
+  "login.subtitle": "Введите email и пароль, чтобы продолжить.",
+  "login.email": "Email",
+  "login.password": "Пароль",
+  "login.submit": "Войти",
+  "login.submitting": "Входим…",
+  "login.forgotPassword": "Забыли пароль?",
+  "login.error.invalid": "Неверный email или пароль.",
+  "login.error.rateLimit": "Слишком много попыток. Подождите и попробуйте снова.",
+  "login.error.network": "Сеть недоступна.",
+  "login.error.generic": "Ошибка {0}. Попробуйте позже.",
+
+  "verifyEmail.title": "Подтверждение email",
+  "verifyEmail.checking": "Проверяем ссылку…",
+  "verifyEmail.success": "Email успешно подтверждён. Спасибо!",
+  "verifyEmail.alreadyVerified": "Этот email уже был подтверждён ранее.",
+  "verifyEmail.error.notFound": "Ссылка не найдена. Возможно, уже использована.",
+  "verifyEmail.error.expired":
+    "Ссылка истекла или уже использована. Запросите новую через настройки после входа.",
+  "verifyEmail.goLogin": "На страницу входа",
+  "verifyEmail.goHome": "В личный кабинет",
 };

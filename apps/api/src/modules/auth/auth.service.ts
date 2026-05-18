@@ -105,8 +105,41 @@ export class AuthService {
     meta: { userAgent: string | null; ip: string | null }
   ): Promise<AuthTokensBundle> {
     const tokenHash = hashToken(refreshToken);
-    const session = await this.repo.findActiveSessionByTokenHash(tokenHash);
+    // H1: look up the session even if it was already revoked, so we can
+    // distinguish "this token was rotated already (= reuse, possibly a
+    // stolen-token attack)" from "this token never existed".
+    const session = await this.repo.findAnySessionByTokenHash(tokenHash);
     if (!session) throw new UnauthorizedError("Refresh session not found.");
+
+    if (session.revokedAt) {
+      // The token was already consumed (either by rotation, logout, or
+      // admin action). If it was rotated, the legitimate user has
+      // already moved on to a fresh token — anyone presenting THIS one
+      // again is either an attacker replaying a stolen token or the
+      // legitimate user via an out-of-sync tab/cache. Either way the
+      // safe response is to revoke the entire family: legitimate user
+      // re-authenticates with password, attacker is locked out.
+      if (session.revokedReason === "rotated" && session.familyId) {
+        const n = await this.repo.revokeSessionFamily(
+          session.familyId,
+          new Date(),
+          "reuse_detected"
+        );
+        await this.audit.log({
+          actorUserId: session.userId,
+          action: "auth.refresh_reuse_detected",
+          ip: meta.ip,
+          userAgent: meta.userAgent,
+          payload: {
+            sessionId: session.id,
+            familyId: session.familyId,
+            revokedCount: n,
+          },
+        });
+      }
+      throw new UnauthorizedError("Refresh session no longer valid.");
+    }
+
     if (session.expiresAt.getTime() < Date.now()) {
       throw new UnauthorizedError("Refresh session expired.");
     }
@@ -115,8 +148,10 @@ export class AuthService {
 
     const now = new Date();
 
-    // Rotation: revoke old, mint new. Limits replay if a refresh token leaks.
-    await this.repo.revokeSession(session.id, now);
+    // Rotation: revoke old with reason="rotated" so reuse-detection knows
+    // this was a legitimate consumption (not a logout). Mint new in the
+    // same family so the chain stays linkable.
+    await this.repo.revokeSession(session.id, now, "rotated");
 
     const newRefreshToken = generateRefreshToken();
     const newRefreshTokenHash = hashToken(newRefreshToken);
@@ -137,6 +172,7 @@ export class AuthService {
       userAgent: meta.userAgent,
       ip: meta.ip,
       expiresAt: newRefreshExpires,
+      ...(session.familyId ? { familyId: session.familyId } : {}),
       ...(isImpersonation && session.impersonatedById
         ? {
             impersonatedById: session.impersonatedById,
@@ -150,6 +186,23 @@ export class AuthService {
       this.config.jwtSecret,
       this.config.accessTtlMinutes
     );
+
+    // L1 (2026-05-14): close audit-trail gap. Pre-L1 refresh-rotation
+    // (the most frequent auth event — every ~15 min for active users)
+    // emitted nothing. For SOC2 / 152-ФЗ compliance every security-
+    // relevant event must be logged; for forensics ("where was this
+    // user the last 24h?") the row makes the rotation chain visible.
+    await this.audit.log({
+      actorUserId: user.id,
+      action: "auth.refresh_rotated",
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      payload: {
+        sessionId: newSession.id,
+        parentSessionId: session.id,
+        familyId: session.familyId ?? newSession.familyId ?? newSession.id,
+      },
+    });
 
     return {
       accessToken: access.token,
@@ -174,7 +227,9 @@ export class AuthService {
       hashToken(refreshToken)
     );
     if (!session) return;
-    await this.repo.revokeSession(session.id, new Date());
+    // H1: tag with explicit reason so reuse-detector doesn't trigger on
+    // a legitimate logout if the token resurfaces somehow.
+    await this.repo.revokeSession(session.id, new Date(), "logout");
     await this.audit.log({
       actorUserId: session.userId,
       action: "auth.logout",

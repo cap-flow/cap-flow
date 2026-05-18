@@ -1,4 +1,4 @@
-import { Check, Copy, MailPlus, X } from "lucide-react";
+import { Check, Copy, LinkIcon, MailPlus, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/label";
 import {
   useCreateInvite,
   useInvites,
@@ -19,6 +20,8 @@ import type {
 import { ApiError } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
 
+import { PageHeader } from "./_PageHeader";
+
 const STATUS_TABS: Array<{ value: InviteStatus | ""; label: string }> = [
   { value: "", label: "Все" },
   { value: "pending", label: "Pending" },
@@ -27,9 +30,32 @@ const STATUS_TABS: Array<{ value: InviteStatus | ""; label: string }> = [
   { value: "expired", label: "Expired" },
 ];
 
-import { PageHeader } from "./_PageHeader";
-
+/**
+ * Standalone admin page. Now also embeddable inside `/admin/users` as a
+ * sub-tab — see `InvitesPanel` below.
+ */
 export function AdminInvitesPage(): JSX.Element {
+  return (
+    <div>
+      <PageHeader
+        title="Приглашения"
+        description="Одноразовая invite-ссылка с TTL. Нажмите «Создать» — получите ссылку, скопируйте и отправьте пользователю любым удобным способом. Пользователь перейдёт по ссылке, введёт email + пароль, аккаунт создастся автоматически."
+      />
+      <InvitesPanel />
+    </div>
+  );
+}
+
+/**
+ * Reusable invites UI without a page header. Used both as the standalone
+ * page above and as a sub-tab inside `/admin/users` (so admin doesn't have
+ * to navigate between two pages to manage the same user lifecycle).
+ *
+ * Exposes a `showHeader` flag (default true) so it can render its own
+ * filter row + create button when embedded — but the embed wraps it in
+ * its own header so we let the parent control that placement.
+ */
+export function InvitesPanel(): JSX.Element {
   const [status, setStatus] = useState<InviteStatus | "">("");
   const [createOpen, setCreateOpen] = useState(false);
   const [created, setCreated] = useState<InviteCreated | null>(null);
@@ -38,48 +64,43 @@ export function AdminInvitesPage(): JSX.Element {
 
   return (
     <div>
-      <PageHeader
-        title="Приглашения"
-        description="Invite-ссылки на регистрацию. Email-bound + одноразовые + TTL."
-        actions={
-          <>
-            <Button variant="outline" size="sm" onClick={() => list.refetch()}>
-              Обновить
-            </Button>
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <MailPlus className="h-4 w-4" /> Создать
-            </Button>
-          </>
-        }
-      />
-
-      <div className="mb-3 inline-flex rounded-md border border-border bg-card/40 p-1">
-        {STATUS_TABS.map((t) => (
-          <button
-            key={t.value}
-            type="button"
-            onClick={() => setStatus(t.value)}
-            className={cn(
-              "rounded px-3 py-1 text-xs font-medium transition-colors",
-              status === t.value
-                ? "bg-accent text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <div className="inline-flex rounded-md border border-border bg-card/40 p-1">
+          {STATUS_TABS.map((t) => (
+            <button
+              key={t.value}
+              type="button"
+              onClick={() => setStatus(t.value)}
+              className={cn(
+                "rounded px-3 py-1 text-xs font-medium transition-colors",
+                status === t.value
+                  ? "bg-accent text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="ml-auto flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => list.refetch()}>
+            Обновить
+          </Button>
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <MailPlus className="h-4 w-4" /> Создать ссылку
+          </Button>
+        </div>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-border bg-card/40">
-        <table className="w-full text-sm">
+      <div className="overflow-x-auto rounded-lg border border-border bg-card/40">
+        <table className="w-full min-w-[900px] text-sm">
           <thead className="bg-card/80 text-left text-xs uppercase tracking-wider text-muted-foreground">
             <tr>
-              <th className="px-3 py-2 font-medium">Email</th>
+              <th className="px-3 py-2 font-medium">Получатель</th>
               <th className="px-3 py-2 font-medium">Статус</th>
               <th className="px-3 py-2 font-medium">Истекает</th>
               <th className="px-3 py-2 font-medium">Создан</th>
-              <th className="px-3 py-2 font-medium">Заметка</th>
+              <th className="px-3 py-2 font-medium">Заметка для юзера</th>
               <th className="px-3 py-2 text-right font-medium">Действия</th>
             </tr>
           </thead>
@@ -94,7 +115,7 @@ export function AdminInvitesPage(): JSX.Element {
             {!list.isLoading && list.data?.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-3 py-6 text-center text-muted-foreground">
-                  Нет invite-ссылок.
+                  Нет приглашений. Нажмите «Создать ссылку».
                 </td>
               </tr>
             )}
@@ -112,10 +133,7 @@ export function AdminInvitesPage(): JSX.Element {
         }}
       />
 
-      <CreatedInviteDialog
-        invite={created}
-        onClose={() => setCreated(null)}
-      />
+      <CreatedInviteDialog invite={created} onClose={() => setCreated(null)} />
     </div>
   );
 }
@@ -135,7 +153,14 @@ function InviteTableRow({ row }: { readonly row: InviteRow }) {
 
   return (
     <tr className="hover:bg-card/60">
-      <td className="px-3 py-2 font-medium">{row.email}</td>
+      <td className="px-3 py-2 font-medium">
+        {row.email ?? (
+          <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+            <LinkIcon className="h-3 w-3" />
+            <span className="italic">открытая ссылка</span>
+          </span>
+        )}
+      </td>
       <td className="px-3 py-2">
         <StatusBadge status={row.status} />
       </td>
@@ -145,8 +170,10 @@ function InviteTableRow({ row }: { readonly row: InviteRow }) {
       <td className="px-3 py-2 text-muted-foreground">
         {formatDate(row.createdAt)}
       </td>
-      <td className="px-3 py-2 text-xs text-muted-foreground max-w-xs truncate">
-        {row.notes ?? "—"}
+      <td className="px-3 py-2 max-w-xs text-xs text-muted-foreground">
+        <div className="line-clamp-2 whitespace-pre-wrap">
+          {row.notes ?? "—"}
+        </div>
       </td>
       <td className="px-3 py-2 text-right">
         {row.status === "pending" && (
@@ -181,8 +208,6 @@ function CreateInviteDialog({
   readonly onClose: () => void;
   readonly onCreated: (i: InviteCreated) => void;
 }) {
-  const [email, setEmail] = useState("");
-  const [ttlHours, setTtlHours] = useState<number | "">("");
   const [notes, setNotes] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const create = useCreateInvite();
@@ -192,12 +217,9 @@ function CreateInviteDialog({
     setErr(null);
     try {
       const i = await create.mutateAsync({
-        email: email.trim().toLowerCase(),
-        ...(typeof ttlHours === "number" ? { ttlHours } : {}),
+        // Email left empty → backend issues an "open" invite link.
         ...(notes.trim() ? { notes: notes.trim() } : {}),
       });
-      setEmail("");
-      setTtlHours("");
       setNotes("");
       onCreated(i);
     } catch (e) {
@@ -209,57 +231,36 @@ function CreateInviteDialog({
     <Dialog
       open={open}
       onClose={onClose}
-      title="Создать invite"
-      description="Email-bound одноразовый токен. После создания ссылка показывается один раз."
+      title="Создать invite-ссылку"
+      description="Получите уникальную одноразовую ссылку для регистрации. Email и пароль пользователь введёт сам после перехода."
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
             Отмена
           </Button>
-          <Button
-            onClick={handleSubmit}
-            disabled={!email || create.isPending}
-          >
-            Создать
+          <Button onClick={handleSubmit} disabled={create.isPending}>
+            {create.isPending ? "Создаём…" : "Создать"}
           </Button>
         </>
       }
     >
       <form onSubmit={handleSubmit} className="space-y-3">
         <div className="space-y-1.5">
-          <Label htmlFor="invite-email">Email</Label>
-          <Input
-            id="invite-email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-            autoFocus
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="invite-ttl">TTL, часов (по умолчанию 72)</Label>
-          <Input
-            id="invite-ttl"
-            type="number"
-            min={1}
-            max={24 * 30}
-            value={ttlHours}
-            onChange={(e) =>
-              setTtlHours(e.target.value === "" ? "" : Number(e.target.value))
-            }
-            placeholder="72"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="invite-notes">Заметка (опционально)</Label>
-          <Input
+          <Label htmlFor="invite-notes">
+            Заметка для пользователя (опционально)
+          </Label>
+          <Textarea
             id="invite-notes"
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             maxLength={2000}
-            placeholder="Контекст: кому, зачем"
+            rows={3}
+            placeholder='Например: "Привет, Иван! Это твой персональный invite в Capflow. Срок действия 72 часа."'
           />
+          <p className="text-[11px] text-muted-foreground">
+            Эта заметка будет показана пользователю на странице регистрации.
+            Также её увидите вы в списке приглашений для ориентации.
+          </p>
         </div>
         {err && (
           <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -271,6 +272,20 @@ function CreateInviteDialog({
   );
 }
 
+const INSTRUCTION_TEMPLATE = (url: string, expiresAt: string) => `Здравствуйте! Это персональная invite-ссылка для регистрации в Capflow:
+
+🔗 ${url}
+
+Что нужно сделать:
+1. Перейдите по ссылке выше.
+2. Введите свой email и пароль (минимум 12 символов).
+3. Готово — вы попадёте в личный кабинет.
+
+⭐ Важно: после регистрации сохраните адрес сайта как закладку в браузере (Ctrl+D / Cmd+D) или закрепите вкладку, чтобы потом не потерять — в дальнейшем туда же вы будете заходить под своим логином и паролем.
+
+Ссылка одноразовая и действует до ${expiresAt}.
+Если возникнут вопросы — отвечайте на это сообщение.`;
+
 function CreatedInviteDialog({
   invite,
   onClose,
@@ -278,59 +293,106 @@ function CreatedInviteDialog({
   readonly invite: InviteCreated | null;
   readonly onClose: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedTemplate, setCopiedTemplate] = useState(false);
 
-  async function copyUrl() {
-    if (!invite) return;
+  async function copy(text: string, kind: "url" | "template") {
     try {
-      await navigator.clipboard.writeText(invite.inviteUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      await navigator.clipboard.writeText(text);
+      if (kind === "url") {
+        setCopiedUrl(true);
+        setTimeout(() => setCopiedUrl(false), 1500);
+      } else {
+        setCopiedTemplate(true);
+        setTimeout(() => setCopiedTemplate(false), 1500);
+      }
     } catch {
       /* ignore */
     }
   }
 
+  if (!invite) return null;
+
+  const expiresHuman = formatDate(invite.expiresAt);
+  const instruction = INSTRUCTION_TEMPLATE(invite.inviteUrl, expiresHuman);
+
   return (
     <Dialog
-      open={!!invite}
+      open
       onClose={onClose}
-      title="Invite создан"
-      description="Ссылка показывается ОДИН раз. Скопируйте и отправьте пользователю."
-      footer={
-        <Button onClick={onClose}>Закрыть</Button>
-      }
+      size="lg"
+      title="Invite-ссылка готова"
+      description="Скопируйте ссылку или готовое сообщение и отправьте пользователю любым удобным способом (Telegram, email, мессенджер)."
+      footer={<Button onClick={onClose}>Закрыть</Button>}
     >
-      {invite && (
-        <div className="space-y-3 text-sm">
-          <div>
-            <div className="text-xs uppercase tracking-wider text-muted-foreground">
-              Получатель
+      <div className="space-y-4 text-sm">
+        {invite.notes && (
+          <div className="rounded-md border border-border bg-secondary/30 px-3 py-2">
+            <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
+              Заметка (увидит пользователь)
             </div>
-            <div className="mt-0.5 font-medium">{invite.email}</div>
-          </div>
-          <div>
-            <div className="text-xs uppercase tracking-wider text-muted-foreground">
-              Ссылка
-            </div>
-            <div className="mt-1 flex items-stretch gap-2">
-              <code className="flex-1 break-all rounded-md border border-border bg-background px-2 py-1.5 font-mono text-[11px]">
-                {invite.inviteUrl}
-              </code>
-              <Button variant="outline" size="icon" onClick={copyUrl}>
-                {copied ? (
-                  <Check className="h-4 w-4 text-success" />
-                ) : (
-                  <Copy className="h-4 w-4" />
-                )}
-              </Button>
+            <div className="mt-1 whitespace-pre-wrap text-foreground">
+              {invite.notes}
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">
-            Истекает {formatDate(invite.expiresAt)}.
+        )}
+
+        <div>
+          <div className="text-xs uppercase tracking-wider text-muted-foreground">
+            Уникальная ссылка
+          </div>
+          <div className="mt-1 flex items-stretch gap-2">
+            <code className="flex-1 break-all rounded-md border border-border bg-background px-2 py-1.5 font-mono text-[11px]">
+              {invite.inviteUrl}
+            </code>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => copy(invite.inviteUrl, "url")}
+            >
+              {copiedUrl ? (
+                <>
+                  <Check className="h-4 w-4 text-success" /> Скопировано
+                </>
+              ) : (
+                <>
+                  <Copy className="h-4 w-4" /> Копировать
+                </>
+              )}
+            </Button>
+          </div>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Истекает {expiresHuman}. Ссылка одноразовая — после регистрации
+            становится недействительной.
           </p>
         </div>
-      )}
+
+        <div>
+          <div className="flex items-center justify-between">
+            <div className="text-xs uppercase tracking-wider text-muted-foreground">
+              Готовое сообщение для отправки
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => copy(instruction, "template")}
+            >
+              {copiedTemplate ? (
+                <>
+                  <Check className="h-4 w-4 text-success" /> Скопировано
+                </>
+              ) : (
+                <>
+                  <Copy className="h-4 w-4" /> Копировать
+                </>
+              )}
+            </Button>
+          </div>
+          <pre className="mt-1 whitespace-pre-wrap rounded-md border border-border bg-background p-3 text-xs leading-relaxed text-foreground">
+            {instruction}
+          </pre>
+        </div>
+      </div>
     </Dialog>
   );
 }
@@ -347,9 +409,8 @@ function formatDate(iso: string): string {
 
 function formatError(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.status === 409)
-      return "Уже есть pending invite на этот email. Сначала отзови старый.";
-    if (e.status === 400) return "Некорректный email или TTL.";
+    if (e.status === 409) return "Конфликт. Попробуйте ещё раз.";
+    if (e.status === 400) return "Некорректные данные.";
     return `Ошибка ${e.status}.`;
   }
   return "Сеть недоступна.";

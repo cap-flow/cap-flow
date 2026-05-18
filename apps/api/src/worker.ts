@@ -35,6 +35,7 @@ import { FeatureFlagsService } from "./modules/feature-flags/feature-flags.servi
 import { DeBankClient } from "./modules/integrations/debank.js";
 import { HeliusClient } from "./modules/integrations/helius.js";
 import { OperationsRepository } from "./modules/operations/operations.repository.js";
+import { ChainOpsRepository } from "./modules/chain-ops/chain-ops.repository.js";
 import { PortfolioRefreshService } from "./modules/portfolio/portfolio-refresh.service.js";
 import { PortfolioRepository } from "./modules/portfolio/portfolio.repository.js";
 import { WalletsRepository } from "./modules/wallets/wallets.repository.js";
@@ -67,7 +68,13 @@ async function main(): Promise<void> {
 
   logger.info("[worker] starting…");
 
-  const dbClient = createDbClient({ connectionString: env.DATABASE_URL });
+  // M8: worker uses a smaller pool by default — its BullMQ concurrency
+  // cap already throttles parallel DB usage, no need for API-sized pool.
+  const dbClient = createDbClient({
+    connectionString: env.DATABASE_URL,
+    max: env.DB_POOL_MAX_WORKER,
+    idleTimeoutMillis: env.DB_POOL_IDLE_MS,
+  });
   const bullConn = createBullConnection(env.REDIS_URL);
 
   const accountsRepo = new AccountsRepository(dbClient.db);
@@ -79,6 +86,7 @@ async function main(): Promise<void> {
   const debankClient = new DeBankClient(env.DEBANK_API_KEY);
   const heliusClient = new HeliusClient(env.HELIUS_API_KEY);
   const operationsRepo = new OperationsRepository(dbClient.db);
+  const chainOpsRepo = new ChainOpsRepository(dbClient.db);
 
   // Feature-flags resolver — needed by ChainClassifierService (P5.7).
   // A dedicated ioredis connection (separate from BullMQ's) backs the
@@ -121,7 +129,8 @@ async function main(): Promise<void> {
     heliusClient,
     apiUsageRepo,
     operationsRepo,
-    chainClassifier
+    chainClassifier,
+    chainOpsRepo, // UCB B5.5: persist classified ops в chain_operations
   );
   const processor = new PortfolioRefreshProcessor(refreshService);
   const refreshQueue = new PortfolioRefreshQueue(bullConn);

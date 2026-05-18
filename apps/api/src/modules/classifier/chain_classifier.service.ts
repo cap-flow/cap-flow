@@ -61,6 +61,13 @@ export interface ChainClassifierResult {
   readonly skippedSolana: number;
   readonly skippedEvm: number;
   readonly errors: string[];
+  /**
+   * UCB B5.5: classified ops grouped by address. Caller (portfolio-refresh
+   * service) persists их в `chain_operations` через `ChainOpsRepository`.
+   * Server-side classification теперь даёт background sync без зависимости
+   * от client'а — Phase 1 push (B5.3) был интерактивный, это автономный.
+   */
+  readonly opsByAddress: ReadonlyMap<string, readonly ClassifiedOp[]>;
 }
 
 interface FlagResolver {
@@ -94,10 +101,12 @@ export class ChainClassifierService {
         skippedSolana: 0,
         skippedEvm: 0,
         errors: [],
+        opsByAddress: new Map(),
       };
     }
 
     const allOps: ClassifiedOp[] = [];
+    const opsByAddress = new Map<string, ClassifiedOp[]>();
     const errors: string[] = [];
     let skippedEvm = 0;
     let skippedSolana = 0;
@@ -122,6 +131,7 @@ export class ChainClassifierService {
           cex: bundle.cex_dict,
         });
         for (const op of classified) allOps.push(op);
+        opsByAddress.set(a.address.toLowerCase(), classified);
       } catch (err) {
         errors.push(
           err instanceof Error ? err.message.slice(0, 200) : String(err)
@@ -144,6 +154,7 @@ export class ChainClassifierService {
           ownAddresses,
         });
         for (const op of classified) allOps.push(op);
+        opsByAddress.set(a.address, classified);
       } catch (err) {
         errors.push(
           err instanceof Error ? err.message.slice(0, 200) : String(err)
@@ -166,6 +177,7 @@ export class ChainClassifierService {
       skippedSolana,
       skippedEvm,
       errors,
+      opsByAddress,
     };
   }
 }

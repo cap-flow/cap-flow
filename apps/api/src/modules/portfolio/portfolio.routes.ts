@@ -16,6 +16,18 @@ const refreshResponseSchema = z.object({
   accountId: z.string().uuid(),
 });
 
+const historyResponseSchema = z.object({
+  accountId: z.string().uuid(),
+  /** Granularity hint for the chart. "hour" for short periods, "day" for long. */
+  granularity: z.enum(["hour", "day"]),
+  points: z.array(
+    z.object({
+      t: z.number(), // unix ms
+      totalUsd: z.number(),
+    })
+  ),
+});
+
 const statusResponseSchema = z.object({
   accountId: z.string().uuid(),
   lastSnapshot: z
@@ -37,6 +49,27 @@ const statusResponseSchema = z.object({
     })
   ),
 });
+
+/**
+ * Bucket-and-pick downsampling: split time-range into `target` slots and
+ * take the LAST observation in each. Preserves the rightmost edge of
+ * the series (most-recent point). O(n).
+ */
+function downsample<T extends { t: number }>(arr: T[], target: number): T[] {
+  if (arr.length === 0 || target <= 0) return arr;
+  const first = arr[0]!.t;
+  const last = arr[arr.length - 1]!.t;
+  if (last <= first) return arr;
+  const slot = (last - first) / target;
+  const buckets = new Map<number, T>();
+  for (const p of arr) {
+    const idx = Math.min(target - 1, Math.floor((p.t - first) / slot));
+    buckets.set(idx, p); // overwrite → keep the latest in each slot
+  }
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, v]) => v);
+}
 
 interface PortfolioRoutesOptions {
   readonly accounts: AccountsService;
@@ -66,9 +99,10 @@ export async function portfolioRoutes(
         response: { 202: refreshResponseSchema },
       },
       config: {
-        // Each manual refresh consumes upstream API calls; keep the per-IP
-        // ceiling tight so a runaway client can't loop on this endpoint.
-        rateLimit: { max: 10, timeWindow: "1 minute" },
+        // Beta-test mode: ceiling raised so admin/QA can hammer manual
+        // refresh while shaking out the SaaS pipeline. Restore to a
+        // tighter cap (e.g. max: 10 / 1 minute) before public launch.
+        rateLimit: { max: 1000, timeWindow: "1 minute" },
       },
     },
     async (req, reply) => {
@@ -76,11 +110,19 @@ export async function portfolioRoutes(
       if (!u) throw new UnauthorizedError();
       const account = await opts.accounts.getById(req.params.id, u);
 
-      // Phase 8: gate manual refresh on subscription. Admins are never
-      // blocked (they pay implicitly + need ops access). For others,
-      // `expired` (past grace) is the only state that fails — `grace`
-      // still lets them keep working while we nudge them to pay.
-      if (u.role !== "admin") {
+      // H4 (2026-05-14): restored subscription-expired gate.
+      //
+      // Admin bypasses (ops access + they implicitly pay). For everyone
+      // else, only `status === "expired"` (past graceDays) blocks —
+      // `active` and `grace` both still allow refresh so we nudge
+      // gently before cutting off.
+      //
+      // Impersonation: when an admin is acting-as-user we keep the
+      // bypass — otherwise debugging an expired user's portfolio is
+      // impossible.
+      const isAdminContext =
+        u.role === "admin" || !!u.impersonation;
+      if (!isAdminContext) {
         const sub = await opts.billing.getSubscription(account.ownerId);
         if (sub.status === "expired") {
           throw new ForbiddenError(
@@ -92,6 +134,62 @@ export async function portfolioRoutes(
       const trigger: "admin" | "user" = u.role === "admin" ? "admin" : "user";
       const jobId = await opts.queue.enqueueManual(account.id, u.id, trigger);
       return reply.status(202).send({ jobId, accountId: account.id });
+    }
+  );
+
+  /**
+   * H17 (2026-05-14): TVL historical chart endpoint.
+   *
+   * Returns `[{t, totalUsd}]` points for the last `days` days. Server
+   * downsamples to ≤ 200 points to keep payloads small and Recharts
+   * snappy. Granularity hint lets the frontend pick a sensible x-axis
+   * tick format.
+   */
+  route.get(
+    "/:id/history",
+    {
+      schema: {
+        params: idParam,
+        querystring: z.object({
+          days: z.coerce.number().int().positive().max(365).default(30),
+        }),
+        response: { 200: historyResponseSchema },
+      },
+    },
+    async (req) => {
+      const u = req.user;
+      if (!u) throw new UnauthorizedError();
+      const account = await opts.accounts.getById(req.params.id, u);
+      const days = req.query.days;
+      const since = new Date(Date.now() - days * 86_400_000);
+
+      const snaps = await opts.portfolio.snapshotsSince(account.id, since);
+
+      // Extract totalUsd from `metrics` JSON. Missing/non-numeric → skip.
+      // Snapshots written before metrics had `totalUsd` are silently
+      // dropped from the series so the chart doesn't dip to 0.
+      const raw: Array<{ t: number; totalUsd: number }> = [];
+      for (const s of snaps) {
+        const m = s.metrics as { totalUsd?: unknown } | null;
+        const v = m && typeof m.totalUsd === "number" ? m.totalUsd : null;
+        if (v === null || !Number.isFinite(v)) continue;
+        raw.push({ t: s.createdAt.getTime(), totalUsd: v });
+      }
+
+      // Downsample: keep ≤200 points. For 30d at 1pt/hr we'd have 720
+      // points → reduce 3-4×. Strategy: bucket the time-range into N
+      // equal slots, take the LAST point inside each slot (so the chart
+      // shows the most recent value, which matches user intuition).
+      const TARGET = 200;
+      const points =
+        raw.length <= TARGET ? raw : downsample(raw, TARGET);
+
+      const granularity = days > 7 ? "day" : "hour";
+      return {
+        accountId: account.id,
+        granularity,
+        points,
+      };
     }
   );
 

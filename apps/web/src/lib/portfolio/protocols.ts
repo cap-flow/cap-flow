@@ -80,6 +80,23 @@ const PATTERNS: { match: RegExp; category: ProtocolCategory; name?: string }[] =
 /**
  * Классифицирует DeBank project по подстроке его id или имени.
  */
+import {
+  getProtocolMetadataSync,
+  mapDefiLlamaToProtocolCategory,
+} from "@/lib/defillama_protocols";
+
+/**
+ * Классифицирует DeBank project в три ступени:
+ *   1. PATTERNS — топ-50 hard-coded по TVL (быстро, никаких сетевых вызовов).
+ *   2. DefiLlama protocols catalog — `getProtocolMetadataSync` ищет в уже
+ *      загруженном in-memory snapshot'е ~5000 протоколов. Снапшот
+ *      бутстрапится при загрузке приложения через `loadLlamaProtocols()`
+ *      в `main.tsx`. Это позволяет ловить нишевые V3/V4 DEX'ы, новые
+ *      lending-маркеты и пр., не дописывая каждый раз hardcoded whitelist.
+ *   3. Fallback "other" — если catalog ещё не загружен (cold start
+ *      первого визита) или DefiLlama не знает протокол. В этом случае
+ *      classifier пойдёт по дженерик-веткам (swap / transfer_in / out).
+ */
 export function classifyProtocol(
   projectId: string | null | undefined,
   projectName: string | null | undefined,
@@ -96,6 +113,15 @@ export function classifyProtocol(
     }
   }
   if (projectId || projectName) {
+    // DefiLlama-fallback: ищем в их каталоге по slug/id/name.
+    const meta = getProtocolMetadataSync(projectId ?? "", projectName ?? "");
+    if (meta?.llama?.category) {
+      return {
+        id: projectId ?? projectName!,
+        name: projectName ?? meta.llama.name ?? projectId!,
+        category: mapDefiLlamaToProtocolCategory(meta.llama.category),
+      };
+    }
     return {
       id: projectId ?? projectName!,
       name: projectName ?? projectId!,
@@ -152,17 +178,69 @@ export function isEurStableSymbol(symbol: string): boolean {
 }
 
 /**
+ * Liquid-staking ETH derivatives → ETH family.
+ *
+ * UCB D4: для **display rollup** (E1 AssetsPage) LSTs объединяются с
+ * нативным ETH чтобы пользователь видел «суммарный ETH-экспозьюр». Цена
+ * 1 stETH ≈ 1 ETH (slight premium/discount from accrued yield), но в
+ * USD-units сумма корректна.
+ *
+ * **Важно**: lot tracker (normalizeSymbol в lot_tracker.ts) их **НЕ**
+ * объединяет — каждый stETH-лот хранит свой cost basis отдельно от ETH,
+ * чтобы при unstake (Lido → ETH) cost basis передавался через supply chain.
+ * Объединение здесь — чисто косметика для group-by-family.
+ */
+const LST_TO_ETH = new Set([
+  "STETH", "WSTETH",
+  "RETH",
+  "CBETH",
+  "FRXETH", "SFRXETH",
+  "EETH", "WEETH",
+  "EZETH",
+  "WBETH",
+  "OETH",   // Origin ETH
+  "SWETH",  // Swell
+  "ANKRETH",
+  "OSETH",  // StakeWise V3
+  "METH",   // Mantle staked ETH
+  "RSWETH", // Renzo restaked swETH
+  "RSETH",  // Kelp restaked ETH
+]);
+
+/**
+ * Liquid-staked / wrapped BTC variants → BTC family.
+ * 1:1 pegged or yield-bearing claims on BTC.
+ */
+const LST_TO_BTC = new Set([
+  "WBTC", "TBTC", "CBBTC",
+  "LBTC",  // Lombard BTC
+  "EBTC",  // Etherfi BTC
+  "FBTC",  // Ignition FBTC
+  "MBTC",  // Manta merlin BTC
+  "SOLVBTC", "SOLVBTCBBN", // Solv BTC + babylon-staked
+  "STBTC", // Lorenzo staked BTC
+  "PUMPBTC",
+  "UNIBTC", // Bedrock uniBTC
+]);
+
+/**
  * Нормализованное «семейство» токена — для группировки разных сетевых
  * вариантов одного актива. Примеры:
  *  - `USD₮0` → `USDT` (юникодный T → ASCII)
  *  - `USDC.e` → `USDC` (Avalanche bridged)
- *  - `WETH` → `ETH`, `WBTC` → `BTC`, `WSOL` → `SOL`
+ *  - `WETH` / `stETH` / `rETH` → `ETH` (UCB D4)
+ *  - `WBTC` / `LBTC` / `cbBTC` → `BTC`
  *  - `USDT0` → `USDT` (Arbitrum обёртка)
+ *  - `sDAI` → `DAI` (savings DAI — yield-bearing wrapper)
  *
  * Используется для:
  *  - Поиска в реестре операций (запрос «usdt» находит `USD₮0` тоже)
  *  - Группировки токенов в bulk-разметке фиата
- *  - Аналитики: «по семействам токенов»
+ *  - Аналитики: «по семействам токенов» (asset rollup, realized PnL)
+ *
+ * **Не используется** для cost-basis pooling в lot tracker — там работает
+ * только `normalizeSymbol` (WETH→ETH, всё остальное как есть), чтобы
+ * сохранять precise cost basis между LST/native pairs.
  */
 export function tokenFamily(symbol: string): string {
   if (!symbol) return "";
@@ -171,13 +249,22 @@ export function tokenFamily(symbol: string): string {
   // Срезаем суффиксы вариантов: USDC.E → USDC, USDT0 → USDT, USDT.0 → USDT.
   s = s.replace(/\.[A-Z0-9]+$/, ""); // .E, .0, .B и т.д.
   s = s.replace(/(?<=[A-Z])0+$/, ""); // USDT0 → USDT
-  // Wrapped → base
-  if (s === "WETH") return "ETH";
-  if (s === "WBTC" || s === "TBTC" || s === "CBBTC") return "BTC";
+  // ETH family (нативный + WETH + LSTs)
+  if (s === "WETH" || LST_TO_ETH.has(s)) return "ETH";
+  // BTC family (wrapped + LSTs)
+  if (LST_TO_BTC.has(s)) return "BTC";
+  // Other simple wrappers
   if (s === "WSOL") return "SOL";
   if (s === "WBNB") return "BNB";
   if (s === "WMATIC") return "MATIC";
   if (s === "WAVAX") return "AVAX";
+  // Savings stables → base stable family (UCB D4):
+  //   sDAI = yield-bearing DAI deposit receipt → DAI family
+  //   sUSDS = sky savings → USDS family (но USDS уже в STABLES,
+  //   а SUSDS отдельно; объединяем здесь чтобы пользователь видел
+  //   «total USDS exposure»).
+  if (s === "SDAI") return "DAI";
+  if (s === "SUSDS") return "USDS";
   return s;
 }
 
