@@ -340,8 +340,24 @@ export function getPositionLotCostBasis(
             m.amount > 0 &&
             !isGas(m),
         );
-        // 1) Considerstable OUT cost.
-        let totalCost = stableOuts.reduce((s, m) => s + m.amount, 0);
+        // UCB C8: async-deposit (GMX V2/Adrena/GMSOL/Flash) — Tx B (mint)
+        // только receipt IN, USDC paid was в Tx A. async_deposit_linker
+        // пишет `linkedCostBasisUsd` на Tx B. Если set → используем как
+        // authoritative total cost (не double-count с stable/non-stable
+        // OUT loops — для Tx B их нет вообще).
+        const linkedCost = (op as { linkedCostBasisUsd?: number })
+          .linkedCostBasisUsd;
+        const useLinkedCost =
+          linkedCost != null &&
+          Number.isFinite(linkedCost) &&
+          linkedCost > 0;
+
+        // 1) Consider stable OUT cost (skipped if using linked cost — Tx B
+        //    обычно не имеет stable OUT, а Tx A не должна попасть сюда
+        //    т.к. не имеет receiptIn).
+        let totalCost = useLinkedCost
+          ? linkedCost!
+          : stableOuts.reduce((s, m) => s + m.amount, 0);
         // 2) Consume non-stable OUT (underlying tokens) and accumulate
         //    их cost basis (из ранее acquired lots).
         for (const m of nonStableOuts) {
@@ -352,7 +368,7 @@ export function getPositionLotCostBasis(
             tokenId: m.tokenId,
             chain: op.chain,
           });
-          // Если в tracker'е не было нужных lots — fallback на hist USD.
+          if (useLinkedCost) continue; // linked cost is authoritative
           if (r.totalAmount > 0) {
             totalCost += r.totalCostUsd;
           } else {

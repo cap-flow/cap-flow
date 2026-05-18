@@ -292,8 +292,28 @@ function handleSupply(
   const isReceipt = (m: TokenMovement) =>
     isReceiptOfProtocol(m.symbol, protoId, m.tokenId);
 
+  // UCB C8: async-deposit pattern (GMX V2 GM/GLV, Adrena, GMSOL, Flash Trade).
+  // `async_deposit_linker.ts` pair'ит:
+  //   Tx A: lp_add с notes ['yield-deposit'] — sends only (USDC OUT)
+  //   Tx B: lp_add с notes ['yield-deposit-fill'] — receives only (receipt IN)
+  // и пишет `linkedCostBasisUsd = Σ outgoing.usd Tx A` на Tx B (mint side).
+  //
+  // Для Tx B нет underlying OUT в этой же tx, поэтому loop ниже не насчитает
+  // totalCostUsd через `tracker.consume(...)`. Без C8 receipt получал бы cost
+  // = 0 → fallback на m.usd (market price, который ниже реально paid из-за
+  // GMX fees + waiting period slippage). Это affecting ALL users с GMX V2.
+  //
+  // C8 fix: если `linkedCostBasisUsd` set → используем как authoritative
+  // totalCostUsd. Underlying OUT loop tracker.consume на Tx A correctly
+  // pays from USDC pool (lot consumed); Tx B приобретает receipt с правильным
+  // cost.
+  const linkedCost = (op as { linkedCostBasisUsd?: number })
+    .linkedCostBasisUsd;
+  const useLinkedCost =
+    linkedCost != null && Number.isFinite(linkedCost) && linkedCost > 0;
+
   // Consume all out-side underlying (non-receipt, non-gas).
-  let totalCostUsd = 0;
+  let totalCostUsd = useLinkedCost ? linkedCost! : 0;
   for (const m of op.movement) {
     if (m.direction !== "out" || m.amount <= 0) continue;
     if (isGas(m)) continue;
@@ -309,7 +329,8 @@ function handleSupply(
       });
       continue;
     }
-    // Underlying out → consume from lots, прибавляем cost к totalCostUsd.
+    // Underlying out → consume from lots, прибавляем cost к totalCostUsd
+    // (только если НЕ используем linked cost — otherwise это double-count).
     const consumed = tracker.consume({
       symbol: m.symbol,
       tokenId: m.tokenId,
@@ -318,15 +339,17 @@ function handleSupply(
       consumedAt: op.time,
       walletId,
     });
-    if (consumed.totalCostUsd > 0) {
-      totalCostUsd += consumed.totalCostUsd;
-    } else {
-      // Fallback: если LotTracker не нашёл cost (token не отслеживался),
-      // берём hist price.
-      const fallbackUsd = isStableSymbol(m.symbol)
-        ? m.amount
-        : movementUsd(m, op.chain, op.time, histPrices);
-      totalCostUsd += fallbackUsd;
+    if (!useLinkedCost) {
+      if (consumed.totalCostUsd > 0) {
+        totalCostUsd += consumed.totalCostUsd;
+      } else {
+        // Fallback: если LotTracker не нашёл cost (token не отслеживался),
+        // берём hist price.
+        const fallbackUsd = isStableSymbol(m.symbol)
+          ? m.amount
+          : movementUsd(m, op.chain, op.time, histPrices);
+        totalCostUsd += fallbackUsd;
+      }
     }
   }
 
@@ -334,6 +357,19 @@ function handleSupply(
   const receiptIns = op.movement.filter(
     (m) => m.direction === "in" && isReceipt(m) && m.amount > 0,
   );
+  // UCB C8 fallback: standalone async-fill mint (receipt IN, no OUT, no
+  // linkedCostBasisUsd) — fallback to m.usd чтобы receipt всё-таки получил
+  // cost basis. Без этого orphan mint lost cost entirely. Linker normally
+  // sets linkedCostBasisUsd, но если он failed (e.g. вне ±30s window) — m.usd.
+  if (
+    receiptIns.length > 0 &&
+    totalCostUsd <= 0 &&
+    !useLinkedCost
+  ) {
+    for (const m of receiptIns) {
+      if (m.usd != null && m.usd > 0) totalCostUsd += m.usd;
+    }
+  }
   if (receiptIns.length > 0 && totalCostUsd > 0) {
     const totalRecv = receiptIns.reduce((s, m) => s + m.amount, 0);
     for (const m of receiptIns) {
