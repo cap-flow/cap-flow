@@ -1,9 +1,84 @@
 ---
-updated: 2026-05-18 (UCB C3 cross-wallet transfer/bridge inheritance)
+updated: 2026-05-18 (UCB C4 popup SoT consistency)
 ---
 
 
 # ROADMAP
+
+## 🔧 UCB C4 — PurchaseHistoryPopup → LotTracker SoT consistency (2026-05-18)
+
+**Bug**: popup в позиции "История покупок underlying" показывал **3-4
+несовместимых числа** одновременно:
+- WAC line-sum = $35,943.57
+- LIFO line-sum = $33,501.54
+- FIFO line-sum = $36,779.19
+- Footer = $33,930.96 (одинаковый для всех методов)
+- Position summary в таблице /performance = $31,785.03 (после моих C2/C3)
+
+Root cause: **три параллельных движка** на одной странице:
+1. `position_lot_cost_basis.getPositionLotCostBasis()` — lot-list display
+2. `position_coverage.computePositionCoverage()` — footer total
+3. `LotTracker SoT` (после моего refactor'а) — position summary в таблице
+
+Каждый использует свой источник cost basis, разный набор операций,
+разный consume amount. Footer label "$33,930 = 10.624 × $3193" — ложный
+(line items не суммируются в это число).
+
+**Fix**: rewire popup to use single source of truth:
+
+1. `getPositionLotCostBasis` теперь принимает `costBasisOverrideByHash`
+   (merged A4 + D3 + C2 + C3). Применяется к acquire'ам для
+   `swap`, `deposit_fiat`, `transfer_in` → lot costs reflect inheritance.
+2. Новый параметр `useNetSuppliedAmount: true` — consume amount =
+   `Σ lend_supply.out - Σ lend_withdraw.in` (исключает yield). Для
+   via.irk POS-002: было consume 10.717 (с yield), теперь 10.624 (только
+   principal). Yield (0.093 ETH) не вкладывается в cost basis.
+3. Footer popup'а теперь = `lotCb.totalCostUsd` (= sum of line items).
+   By-construction line-sum == footer для каждой методики.
+4. `costBasisOverrideByHash` prop добавлен в `PurchaseHistoryPopup`,
+   прокинут из `useLoadedWallets()` в `OpenPositionsPage`.
+
+**Результат для via.irk POS-002 popup'а**:
+
+| Lot date | Amount | New cost | Source |
+|---|---:|---:|---|
+| Aug 12 deposit_fiat | 2.165 ETH | ~$9,646 | **C2 inherited** from cowswap |
+| Nov 17 deposit_fiat | 1.618 ETH | $3,422 | market (orphan, Nov 17 не имеет withdraw match) |
+| Jan 4 swap A | 1.229 ETH | $3,857 | stable_sum |
+| Jan 4 swap B | 2.229 ETH | $7,000 | stable_sum |
+| Jan 31 swap C | 1.138 ETH | $3,000 | stable_sum |
+| Feb 1 transfer_in | 0.623 ETH | $1,318 | hist price (orphan) |
+| Feb 4 swap D | 1.382 ETH | $2,998 | stable_sum |
+| Mar 27 unwrap WETH | 0.280 ETH | ~$591 | WETH lot cost (lp_close inherited) |
+| ... | ... | ... | ... |
+| **Σ** (net supplied 10.624 ETH) | | **~$31,785** | matches column /performance ✅ |
+
+Все 3 методики (WAC/LIFO/FIFO) теперь дают **same total** = $31,785
+(потому что user supplied 10.6 ETH из ~13.6 ETH acquired — все 10.6
+вычерпываются из пула в любой методике). Per-lot allocation может
+варьироваться, но totals идентичны.
+
+| File | Change | Tests |
+|---|---|:-:|
+| `position_lot_cost_basis.ts` | + `costBasisOverrideByHash` param + `useNetSuppliedAmount` param | — |
+| `position_lot_cost_basis.test.ts` | New: invariant (Σ lots == total), C2 override, C3 transfer_in override, net supplied vs live | 5/5 ✅ |
+| `PurchaseHistoryPopup.tsx` | New prop `costBasisOverrideByHash`, footer = `lotCb.totalCostUsd` | — |
+| `OpenPositionsPage.tsx` | Pipe `costBasisOverrideByHash` в popup | — |
+
+**Cumulative**: 217/217 portfolio tests · tsc clean.
+
+## ✅ Data quality issues найдены при verification
+
+При сверке via.irk данных:
+1. **Bitget historical sync gap**: `cex_transfers` для via.irk содержит только 2 transfers (May 14 round-trip). Aug 12 transit через Bitget (~2.16 ETH) **отсутствует** — Bitget API не вернул historical data. **Compensation**: мой C2 on-chain matching покрывает этот случай через withdraw_fiat ↔ deposit_fiat.
+2. **Bitget trades не синкаются**: `last_trades_sync_at = NULL`. D3 server-side cost basis trail невозможен. Nov 17 ETH (orphan) не получает inheritance — нужен manual A4 annotation.
+3. **3× duplicate `transfer_out` 2.1629 ETH на eth chain Aug 12-14**: indexer noise (4 разных tx hashes, same amount). Не влияет на POS-002 (Fluid на arb), но засоряет eth balance accounting.
+4. **Apr 26 "unknown" op type 0.764 ETH OUT**: classifier не разобрал Uniswap V3 операцию.
+
+**Backlog**:
+- CEX historical backfill (Bitget API → support periodic full history sync)
+- Indexer dedup для eth-chain (Alchemy/DeBank возвращают повторы)
+- Improved classifier coverage для V3 NFT close
 
 ## 🔧 UCB C3 — cross-wallet transfer/bridge cost basis inheritance (2026-05-18)
 

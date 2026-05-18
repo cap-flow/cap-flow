@@ -12,6 +12,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Link } from "react-router-dom";
 import { Archive, Eye, EyeOff, History, Info, Landmark, Pencil, RefreshCw, Settings2, SlidersHorizontal, Wallet, X } from "lucide-react";
 
 import {
@@ -33,8 +34,11 @@ import {
   type PositionKind,
 } from "@/lib/portfolio/open_positions";
 import { PurchaseHistoryPopup } from "@/components/PurchaseHistoryPopup";
+import { useCexWithdrawalCostBasis } from "@/features/cex/hooks";
+import type { CexCostBasisMatch } from "@/lib/portfolio/position_coverage";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
 import { applyLendingCostBasisOverride } from "@/lib/portfolio/lending_cost_basis_override";
+import { applyCexInheritanceCostBasisOverride } from "@/lib/portfolio/cex_inheritance_cost_basis_override";
 import type { ClassifiedOp } from "@/lib/portfolio/types";
 import { useLotMethodology } from "@/lib/lot_methodology";
 import { LotMethodologyHelpDialog } from "@/components/LotMethodologyHelpDialog";
@@ -146,7 +150,8 @@ export function OpenPositionsPage(): JSX.Element {
 function OpenPositionsPageInner(): JSX.Element {
   const _t = useT();
   const { locale } = useI18n();
-  const { loadedById, busyId, loadAll } = useLoadedWallets();
+  const { loadedById, busyId, loadAll, costBasisOverrideByHash } =
+    useLoadedWallets();
   const [integrations] = useIntegrations();
   const alchemyKey = (integrations.alchemyApiKey ?? "").trim();
 
@@ -154,6 +159,23 @@ function OpenPositionsPageInner(): JSX.Element {
     () => Object.values(loadedById).sort((a, b) => a.loadedAt - b.loadedAt),
     [loadedById],
   );
+
+  // CEX-withdrawal cost basis по tx-hash: позволяет атрибутировать
+  // transfer_in события (с биржи) к реальному cost из WAC-пула на бирже
+  // (P2P → trades → withdrawal). Без этого "куплено 3.2%" — остальное
+  // числилось как "пришло без цены". Прокидываем в PurchaseHistoryPopup.
+  const cexCostBasisQ = useCexWithdrawalCostBasis();
+  const cexCostBasisByHash = useMemo(() => {
+    const m = new Map<string, CexCostBasisMatch>();
+    for (const c of cexCostBasisQ.data ?? []) {
+      m.set(c.txHash.toLowerCase(), {
+        costBasisUsd: c.costBasisUsd,
+        source: c.source,
+        asset: c.asset,
+      });
+    }
+    return m;
+  }, [cexCostBasisQ.data]);
 
   const v3 = useV3Positions(loadedList, alchemyKey);
   // V3 cumulative cost basis через IncreaseLiquidity events.
@@ -276,9 +298,18 @@ function OpenPositionsPageInner(): JSX.Element {
           histPrices,
           v3MintPoolPrices: v3MintPoolPrices.data,
           v3MintCgPrices: v3MintCgPrices.data,
+          // UCB single-source-of-truth: D3 CEX inheritance + A4 manual
+          // annotations → consistent cost basis с lot-by-lot display.
+          costBasisOverrideByHash,
         },
       ),
-    [loadedList, histPrices, v3MintPoolPrices.data, v3MintCgPrices.data],
+    [
+      loadedList,
+      histPrices,
+      v3MintPoolPrices.data,
+      v3MintCgPrices.data,
+      costBasisOverrideByHash,
+    ],
   );
 
   // Применяем ручные метки «кредитная» поверх алгоритмической атрибуции +
@@ -381,8 +412,26 @@ function OpenPositionsPageInner(): JSX.Element {
     if (lendingResult.overriddenCount > 0) {
       for (const w of lendingResult.warnings) console.warn(w);
     }
-    return lendingResult.positions;
-  }, [positions, v3.data, v3CostBasisHook.data, loadedList, walletHistPrices.histPrices, lotMethodology]);
+    working = lendingResult.positions;
+    // 3. CEX-withdrawal + LP-unwind inheritance override: для позиций
+    // где underlying пришёл с биржи (matched по tx-hash) или из закрытой
+    // LP — подставляем blended WAC из server-side P2P→trade→withdrawal
+    // пула. Срабатывает ТОЛЬКО когда direct-buy покрытие < 95% (т.е.
+    // lending FIFO не сработал, потому что у tracker'а нет lot'ов).
+    if (cexCostBasisByHash.size > 0) {
+      const cexResult = applyCexInheritanceCostBasisOverride(
+        working,
+        opsByWallet,
+        cexCostBasisByHash,
+        walletHistPrices.histPrices,
+      );
+      if (cexResult.overriddenCount > 0) {
+        for (const w of cexResult.warnings) console.warn(w);
+      }
+      working = cexResult.positions;
+    }
+    return working;
+  }, [positions, v3.data, v3CostBasisHook.data, loadedList, walletHistPrices.histPrices, lotMethodology, cexCostBasisByHash]);
 
 
 
@@ -846,7 +895,20 @@ function OpenPositionsPageInner(): JSX.Element {
             </p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              {/*
+                M12 (2026-05-14): give the table an explicit min-width
+                proportional to its column count so phones render the
+                actual layout (scrollable horizontally) instead of
+                squishing columns into unreadable 6px-wide stripes.
+                Default w-full was making columns collapse below
+                readable thresholds on iPhone-SE-class widths.
+              */}
+              <table
+                className="w-full text-sm"
+                style={{
+                  minWidth: `${Math.max(720, visibleColumns.length * 110)}px`,
+                }}
+              >
                 <thead className="border-y border-border bg-secondary/40 text-xs uppercase tracking-wider text-muted-foreground">
                   <tr>
                     {visibleColumns.map((c) => (
@@ -972,6 +1034,8 @@ function OpenPositionsPageInner(): JSX.Element {
           protocolId={activePurchasePosition.protocol.id}
           chain={activePurchasePosition.chain}
           histPrices={walletHistPrices.histPrices}
+          cexCostBasisByHash={cexCostBasisByHash}
+          costBasisOverrideByHash={costBasisOverrideByHash}
         />
       )}
     </div>
@@ -1084,7 +1148,13 @@ function PositionRow({
     id: () => (
       <td key="id" className={cn(cellPad, "font-mono")}>
         <div className="flex items-center gap-1">
-          <span>{p.id}</span>
+          <Link
+            to={`/positions/${p.id}`}
+            className="text-brand-cyan hover:underline"
+            title="Открыть детальную страницу позиции (UCB E2)"
+          >
+            {p.id}
+          </Link>
           <button
             type="button"
             onClick={onToggleHidden}
@@ -1278,26 +1348,54 @@ function PositionRow({
       </td>
       );
     },
-    startUsd: () => (
-      <td key="startUsd" className={cn(cellPad, "text-right tabular-nums")}>
-        <span className="inline-flex items-center gap-1">
-          {formatUsd(p.startUsd, locale)}
-          {p.kind === "lending" && p.supplyTokens.length > 0 && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenPurchaseHistory();
-              }}
-              className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-brand-cyan/50 bg-brand-cyan/15 text-[9px] font-bold text-brand-cyan hover:bg-brand-cyan/30 hover:border-brand-cyan transition-colors"
-              title="История покупок underlying — как формируется Стартовая $"
-            >
-              ?
-            </button>
-          )}
-        </span>
-      </td>
-    ),
+    startUsd: () => {
+      // UCB D7: показываем net startUsd для leveraged lending позиций.
+      // Расхождение > 1% означает значимый borrow leg — выделяем "net"
+      // отдельной строкой ниже gross, чтобы user видел реальные затраты.
+      const hasMeaningfulBorrow =
+        p.startUsd > 0 &&
+        p.netStartUsd >= 0 &&
+        p.startUsd - p.netStartUsd > Math.max(1, p.startUsd * 0.01);
+      const leverage =
+        hasMeaningfulBorrow && p.netStartUsd > 0
+          ? p.startUsd / p.netStartUsd
+          : null;
+      return (
+        <td key="startUsd" className={cn(cellPad, "text-right tabular-nums")}>
+          <div className="flex flex-col items-end gap-0.5">
+            <span className="inline-flex items-center gap-1">
+              {formatUsd(p.startUsd, locale)}
+              {p.kind === "lending" && p.supplyTokens.length > 0 && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenPurchaseHistory();
+                  }}
+                  className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-brand-cyan/50 bg-brand-cyan/15 text-[9px] font-bold text-brand-cyan hover:bg-brand-cyan/30 hover:border-brand-cyan transition-colors"
+                  title="История покупок underlying — как формируется Стартовая $"
+                >
+                  ?
+                </button>
+              )}
+            </span>
+            {hasMeaningfulBorrow && (
+              <span
+                className="text-[10px] text-muted-foreground"
+                title={`Net = collateral cost − borrow proceeds. Leverage ≈ ${leverage?.toFixed(2)}×.`}
+              >
+                net {formatUsd(p.netStartUsd, locale)}
+                {leverage != null && (
+                  <span className="ml-1 text-brand-cyan">
+                    · {leverage.toFixed(2)}×
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+        </td>
+      );
+    },
     currentUsd: () => (
       <td key="currentUsd" className={cn(cellPad, "text-right tabular-nums")}>
         <EditableUsdCell

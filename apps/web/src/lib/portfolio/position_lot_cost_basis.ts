@@ -42,12 +42,26 @@ function movementUsd(
   histPrices: Map<string, number>,
 ): number {
   if (m.amount <= 0) return 0;
-  if (isStableSymbol(m.symbol)) return m.amount;
+  // H11 (2026-05-14): stables now also go through DefiLlama hist-price
+  // lookup first. GHO traded at $0.97 for weeks in 2024, AUSD at $1.02
+  // on launch — pegging at hardcoded $1 silently inflated/deflated
+  // cost basis by ~3-5% during depeg windows. We accept the small extra
+  // lookup cost for accuracy; $1 stays the safe fallback when DefiLlama
+  // has no data (new stable, exotic chain).
   const coin = defillamaCoinKey(chain, m.tokenId, m.symbol);
   if (coin) {
     const hp = priceFromMap(histPrices, coin, time);
-    if (hp != null && hp > 0) return m.amount * hp;
+    if (hp != null && hp > 0) {
+      // Sanity clamp: refuse obvious nonsense (a "stable" reported at
+      // $50 is wrong data, not a depeg). For non-stables this branch
+      // is unreachable.
+      if (isStableSymbol(m.symbol) && (hp < 0.5 || hp > 2)) {
+        return m.amount;
+      }
+      return m.amount * hp;
+    }
   }
+  if (isStableSymbol(m.symbol)) return m.amount;
   if (m.usd != null && m.usd > 0) return m.usd;
   return 0;
 }
@@ -85,6 +99,27 @@ interface Args {
   currentAmount?: number;
   methodology?: LotMethodology;
   histPrices?: Map<string, number>;
+  /**
+   * UCB C4: per-tx cost basis overrides из merged map (A4 manual /
+   * D3 CEX / C2 fiat-hop / C3 cross-wallet inheritance). Применяется
+   * при регистрации acquisitions (swap / deposit_fiat / transfer_in).
+   * Multiple in-movements в одной tx делятся пропорционально amount.
+   *
+   * Без этого popup'е cost basis для inherited lots показывался как
+   * market m.usd → расхождение с position summary (LotTracker SoT).
+   */
+  costBasisOverrideByHash?: ReadonlyMap<string, number>;
+  /**
+   * UCB C4: если true (рекомендовано для lending позиций), consume
+   * amount = `Σ lend_supply.out - Σ lend_withdraw.in` для этой
+   * (protocolId, chain, symbol). Это исключает yield (rebase-style) из
+   * cost basis расчёта. Default `false` для обратной совместимости.
+   *
+   * Example: user supplied 10 ETH к Fluid, yield 0.1 ETH → live = 10.1.
+   * - false (legacy): consume 10.1 ETH из purchase pool → over-counts cost.
+   * - true: consume 10.0 ETH (net supplied) → правильный cost basis.
+   */
+  useNetSuppliedAmount?: boolean;
 }
 
 /**
@@ -103,6 +138,7 @@ export function getPositionLotCostBasis(
   const methodology = args.methodology ?? "FIFO";
   const target = normalizeSymbol(args.symbol);
   const histPrices = args.histPrices ?? new Map<string, number>();
+  const overrides = args.costBasisOverrideByHash ?? new Map<string, number>();
   const tracker = new LotTracker(methodology);
 
   const sorted = [...args.ops].sort((a, b) => a.time - b.time);
@@ -141,10 +177,16 @@ export function getPositionLotCostBasis(
       }
 
       if (stableSum > 0 && totalIn > 0) {
-        // Swap from stable → token (чистая покупка)
+        // Swap from stable → token (чистая покупка).
+        // UCB C4: A4 override replaces derived `stableSum` если задан.
+        const override = overrides.get(op.hash.toLowerCase());
+        const effectivePaid =
+          override != null && Number.isFinite(override) && override >= 0
+            ? override
+            : stableSum;
         for (const m of ins) {
           if (isStableSymbol(m.symbol) || m.amount <= 0) continue;
-          const sharePaid = stableSum * (m.amount / totalIn);
+          const sharePaid = effectivePaid * (m.amount / totalIn);
           const costPerUnit = sharePaid / m.amount;
           tracker.acquire({
             walletId: args.walletId,
@@ -198,13 +240,25 @@ export function getPositionLotCostBasis(
     }
 
     if (op.type === "deposit_fiat") {
-      // Только явные fiat-deposits регистрируем как acquire. transfer_in
-      // НЕ обрабатываем — это может быть cross-wallet перевод который
-      // double-count'ится с оригинальной покупкой на другом кошельке.
-      for (const m of op.movement) {
-        if (m.direction !== "in" || m.amount <= 0) continue;
-        if (m.isProtocolToken) continue;
-        const usd = movementUsd(m, op.chain, op.time, histPrices);
+      // UCB C4: override replaces derived m.usd, делим пропорционально
+      // amount если несколько in-movements (rare для deposit_fiat).
+      const override = overrides.get(op.hash.toLowerCase());
+      const ins = op.movement.filter(
+        (m) => m.direction === "in" && m.amount > 0 && !m.isProtocolToken,
+      );
+      const totalInAmount = ins.reduce((s, m) => s + m.amount, 0);
+      for (const m of ins) {
+        let usd: number;
+        if (
+          override != null &&
+          Number.isFinite(override) &&
+          override >= 0 &&
+          totalInAmount > 0
+        ) {
+          usd = override * (m.amount / totalInAmount);
+        } else {
+          usd = movementUsd(m, op.chain, op.time, histPrices);
+        }
         if (usd <= 0) continue;
         tracker.acquire({
           walletId: args.walletId,
@@ -342,15 +396,112 @@ export function getPositionLotCostBasis(
       continue;
     }
 
-    // НЕ обрабатываем (избегаем double-counting / некорректные acquires):
-    //   - transfer_in — может быть cross-wallet дубль
-    //   - lend_supply (receipt-less, как Fluid/Morpho Blue) — оставляем
-    //     underlying lots в tracker'е для consume позицией
-    //   - borrow / repay — это долг, отдельная сущность
+    // H7 (2026-05-14): transfer_in with a reliable historical price.
+    //
+    // Previous behavior dropped ALL transfer_in events to avoid the
+    // "user moves token from CEX → wallet → suppliеs to Aave" case
+    // double-counting against the CEX-side acquire. That cut works
+    // when both wallets are tracked in the same Capflow account — but
+    // the common reality is:
+    //   - user has 5 wallets, only this one tracked
+    //   - or buys on CEX (untracked) → withdraws to this wallet → supplies
+    //
+    // In those cases we previously returned uncoveredAmount = current,
+    // effective PnL = 0 forever. Now: if the transfer has a confident
+    // historical price (DefiLlama 4h-window hit) AND the movement
+    // already carries a real USD value, treat it as an acquire at that
+    // price. We mark `acquiredVia: "transfer_in"` so cross-wallet
+    // duplication detectors downstream can still subtract these out
+    // when both wallets are observed.
+    if (op.type === "transfer_in") {
+      // UCB C4: если override задан (C3 cross-wallet inheritance / A4),
+      // используем его — это authoritative cost basis. Иначе fallback на
+      // hist-price logic (см. H7 комментарий ниже).
+      const override = overrides.get(op.hash.toLowerCase());
+      const ins = op.movement.filter(
+        (m) =>
+          m.direction === "in" &&
+          m.amount > 0 &&
+          !m.isProtocolToken &&
+          !isGas(m),
+      );
+      const totalInAmount = ins.reduce((s, m) => s + m.amount, 0);
+      const overrideValid =
+        override != null && Number.isFinite(override) && override >= 0;
+
+      for (const m of ins) {
+        let costPerUnit: number | null = null;
+        if (overrideValid && totalInAmount > 0) {
+          costPerUnit = (override * (m.amount / totalInAmount)) / m.amount;
+        } else {
+          // H7: legacy hist-price logic для случаев без override.
+          const isStable = isStableSymbol(m.symbol);
+          if (isStable) {
+            costPerUnit = 1;
+          } else {
+            const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
+            if (coin) {
+              const hp = priceFromMap(histPrices, coin, op.time);
+              if (hp != null && hp > 0) costPerUnit = hp;
+            }
+          }
+        }
+        if (costPerUnit == null || costPerUnit <= 0) continue;
+        tracker.acquire({
+          walletId: args.walletId,
+          symbol: m.symbol,
+          amount: m.amount,
+          costPerUnitUsd: costPerUnit,
+          tokenId: m.tokenId,
+          chain: op.chain,
+          acquiredAt: op.time,
+          acquiredVia: "transfer_in",
+          sourceHash: op.hash,
+        });
+      }
+      continue;
+    }
+
+    // NOT processed (avoiding double-counting / incorrect acquires):
+    //   - lend_supply (receipt-less like Fluid/Morpho Blue) — leave
+    //     underlying lots in tracker so the position consumes them
+    //   - borrow / repay — separate debt entity
   }
 
-  // Теперь consume currentAmount из purchase-tracker по выбранной методике.
-  if (args.currentAmount == null || args.currentAmount <= 0) {
+  // UCB C4: вычислить consume amount.
+  //   - Default (useNetSuppliedAmount=false): currentAmount as-is (legacy).
+  //   - useNetSuppliedAmount=true: `Σ lend_supply.out - Σ lend_withdraw.in`
+  //     для этого (protocolId, chain, symbol). Это исключает yield
+  //     (rebase-style accruals) из cost basis расчёта.
+  let consumeAmount = args.currentAmount;
+  if (args.useNetSuppliedAmount === true) {
+    let supplied = 0;
+    let withdrawn = 0;
+    for (const op of sorted) {
+      if (op.status === "failed") continue;
+      if (op.protocol?.id !== args.protocolId) continue;
+      if (op.chain !== args.chain) continue;
+      if (op.type === "lend_supply" || op.type === "lp_add") {
+        for (const m of op.movement) {
+          if (m.direction !== "out" || m.amount <= 0) continue;
+          if (normalizeSymbol(m.symbol) !== target) continue;
+          if (m.isProtocolToken) continue;
+          supplied += m.amount;
+        }
+      } else if (op.type === "lend_withdraw" || op.type === "lp_remove") {
+        for (const m of op.movement) {
+          if (m.direction !== "in" || m.amount <= 0) continue;
+          if (normalizeSymbol(m.symbol) !== target) continue;
+          if (m.isProtocolToken) continue;
+          withdrawn += m.amount;
+        }
+      }
+    }
+    const netSupplied = Math.max(0, supplied - withdrawn);
+    if (netSupplied > 0) consumeAmount = netSupplied;
+  }
+
+  if (consumeAmount == null || consumeAmount <= 0) {
     return {
       methodology,
       consumedLots: [],
@@ -364,7 +515,7 @@ export function getPositionLotCostBasis(
   const result = tracker.consume({
     walletId: args.walletId,
     symbol: target,
-    amount: args.currentAmount,
+    amount: consumeAmount,
   });
 
   const consumedLots: SuppliedLotConsumption[] = result.consumed.map((c) => ({
@@ -383,7 +534,7 @@ export function getPositionLotCostBasis(
     effectiveWac:
       result.totalAmount > 0 ? result.totalCostUsd / result.totalAmount : 0,
     uncoveredAmount: result.insufficient
-      ? args.currentAmount - result.totalAmount
+      ? consumeAmount - result.totalAmount
       : 0,
   };
 }

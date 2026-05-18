@@ -26,6 +26,12 @@ import {
 } from "@/lib/portfolio/purchase_history";
 import { getPositionLotCostBasis } from "@/lib/portfolio/position_lot_cost_basis";
 import { getActualSuppliedTokens } from "@/lib/portfolio/actual_supplied_tokens";
+import {
+  computePositionCoverage,
+  enrichPurchaseEventsForCoverage,
+  type CexCostBasisMatch,
+  type EnrichedPurchaseEvent,
+} from "@/lib/portfolio/position_coverage";
 import type { ClassifiedOp } from "@/lib/portfolio/types";
 
 const KIND_LABEL: Record<PurchaseEventKind, string> = {
@@ -69,6 +75,22 @@ export interface PurchaseHistoryPopupProps {
   /** chain — для фильтрации lend_supply ops. */
   chain: string;
   histPrices?: Map<string, number>;
+  /**
+   * Cost basis от CEX-withdrawal-ов (по lowercase tx-hash). Если задано,
+   * `transfer_in` события подменяющиеся с CEX-выводом получают атрибуцию
+   * cost basis из биржевого WAC-пула (P2P → trades → withdrawals). Без
+   * него такие переводы остаются «непокрытыми». См.
+   * `useCexWithdrawalCostBasis()` хук + `cex.cost-basis.service.ts`.
+   */
+  cexCostBasisByHash?: ReadonlyMap<string, CexCostBasisMatch>;
+  /**
+   * UCB C4 merged overrides: A4 manual + D3 CEX + C2 fiat-hop + C3
+   * cross-wallet inheritance. Применяется в `getPositionLotCostBasis`
+   * чтобы lot-by-lot отображение совпадало с position summary
+   * (LotTracker SoT). Без этого popup'е cost basis для inherited
+   * lots показывался как market m.usd → расхождение с column в таблице.
+   */
+  costBasisOverrideByHash?: ReadonlyMap<string, number>;
 }
 
 export function PurchaseHistoryPopup({
@@ -83,6 +105,8 @@ export function PurchaseHistoryPopup({
   protocolId,
   chain,
   histPrices,
+  cexCostBasisByHash,
+  costBasisOverrideByHash,
 }: PurchaseHistoryPopupProps) {
   const [methodologyOpen, setMethodologyOpen] = useState(false);
   const [helpDialogOpen, setHelpDialogOpen] = useState(false);
@@ -107,7 +131,18 @@ export function PurchaseHistoryPopup({
         : supplyTokens;
     return tokensToShow.map((t) => {
       const allEvents = getPurchaseHistory(ops, t.symbol, histPrices);
-      const events = allEvents.filter((e) => e.affectsWac);
+      // Расширенный список ивентов для отображения: direct buys +
+      // CEX-matched transfer_in (с реальным cost basis из биржевого
+      // WAC-пула) + lp_close_attribution + unmatched transfer_in (с
+      // costSource='unknown', costUsd=0 — debug-режим, чтобы пользователь
+      // видел сами hash'и непокрытых переводов и понимал почему coverage
+      // низкое: возможно биржа не подключена / withdrawal не synced).
+      const events = enrichPurchaseEventsForCoverage(
+        allEvents,
+        cexCostBasisByHash ?? new Map(),
+        t.symbol,
+        { includeUnmatched: true },
+      );
       const wac = summarizeWac(allEvents, ops, t.symbol, histPrices);
       // Lot-aware breakdown — для информационного отображения «какие lots
       // ушли в позицию» по выбранной методике (FIFO/LIFO/WAC toggle).
@@ -121,38 +156,81 @@ export function PurchaseHistoryPopup({
         symbol: t.symbol,
         currentAmount: t.amount,
         methodology: lotMethodology,
+        // UCB C4: SoT consistency — inherits A4/D3/C2/C3 overrides и
+        // использует net supplied (исключает yield) для consume.
+        useNetSuppliedAmount: true,
+        ...(costBasisOverrideByHash && { costBasisOverrideByHash }),
         ...(histPrices && { histPrices }),
       });
+      // Расширенное покрытие: direct buy + CEX-withdrawal inheritance + LP
+      // unwind inheritance. Закрывает дыру когда токен пришёл с биржи
+      // (P2P→trades→withdrawal) — без этого был бы "transfer_in без цены".
+      const coverage = computePositionCoverage({
+        totalAmount: t.amount,
+        events: allEvents,
+        cexCostBasisByHash: cexCostBasisByHash ?? new Map(),
+        targetSymbol: t.symbol,
+      });
+      // UCB B7: правильный приоритет cost basis:
+      //   1. `coverage.wac` (direct + CEX inheritance + LP unwind) —
+      //      это **реальные траты $$ / реальное amount**, honest UCB.
+      //   2. `lotCb.effectiveWac` — FIFO lot tracker, использует m.usd
+      //      DeBank spot для transfer_in → ВРАНЬЁ когда asset пришёл
+      //      с CEX по carry-over cost basis ниже spot-цены.
+      //   3. `wac.currentTrackerWac` — legacy fallback.
+      // Раньше: lot_tracker > coverage → POS-007 показывал WAC $109,876
+      // (= 0.176 × spot $110k + 0.005 × $99k) при реальной WAC $83,362
+      // (= $14,723 / 0.1766). Теперь coverage.wac выигрывает первым.
       const effectiveWac =
-        lotCb.effectiveWac > 0
-          ? lotCb.effectiveWac
-          : wac.currentTrackerWac ?? wac.wac;
-      const coveragePct =
+        coverage.wac > 0
+          ? coverage.wac
+          : lotCb.effectiveWac > 0
+            ? lotCb.effectiveWac
+            : wac.currentTrackerWac ?? wac.wac;
+      const directCoveragePct =
         t.amount > 0 ? (wac.totalAmountBought / t.amount) * 100 : 0;
-      const wacBasedStartUsd = t.amount * effectiveWac;
-      const honestSpentUsd = wac.totalCostUsd;
+      // UCB-correct startUsd:
+      //   - Атрибутированная часть (covered) — используем РЕАЛЬНЫЕ траты
+      //     (coverage.coveredUsd), без extrapolation на market.
+      //   - Неатрибутированная часть (unknown amount) — extrapolate через
+      //     effectiveWac (которая теперь = coverage.wac, тоже honest).
+      // Так избегаем case'а «WAC × current = $19,407» когда реально
+      // потрачено $14,723.
+      const uncoveredAmount = Math.max(0, t.amount - coverage.coveredAmount);
+      const wacBasedStartUsd =
+        coverage.coveredUsd + uncoveredAmount * effectiveWac;
+      const honestSpentUsd = coverage.coveredUsd;
       return {
         ...t,
         events,
         wac,
         effectiveWac,
         wacBasedStartUsd,
-        coveragePct,
+        coveragePct: coverage.coveragePct,
+        directCoveragePct,
         honestSpentUsd,
         lotCb,
+        coverage,
       };
     });
-  }, [ops, supplyTokens, histPrices, walletId, protocolId, chain, lotMethodology]);
+  }, [ops, supplyTokens, histPrices, walletId, protocolId, chain, lotMethodology, cexCostBasisByHash, costBasisOverrideByHash]);
 
   const totalWacBased = perSymbol.reduce((s, p) => s + p.wacBasedStartUsd, 0);
   const totalHonestSpent = perSymbol.reduce((s, p) => s + p.honestSpentUsd, 0);
   const totalAmount = perSymbol.reduce((s, p) => s + p.amount, 0);
-  const totalBought = perSymbol.reduce(
-    (s, p) => s + p.wac.totalAmountBought,
+  // Расширенное покрытие: direct + CEX inheritance + LP unwind.
+  const totalCovered = perSymbol.reduce((s, p) => s + p.coverage.coveredAmount, 0);
+  const overallCoverage =
+    totalAmount > 0 ? Math.min(100, (totalCovered / totalAmount) * 100) : 0;
+  // Сколько cost пришло из CEX и LP — для breakdown в footer'е.
+  const totalCexInheritedUsd = perSymbol.reduce(
+    (s, p) => s + p.coverage.cexInheritance.usd,
     0,
   );
-  const overallCoverage =
-    totalAmount > 0 ? (totalBought / totalAmount) * 100 : 0;
+  const totalLpInheritedUsd = perSymbol.reduce(
+    (s, p) => s + p.coverage.lpUnwind.usd,
+    0,
+  );
 
   return (
     <Dialog
@@ -341,7 +419,7 @@ export function PurchaseHistoryPopup({
                     Куплено:{" "}
                     <strong
                       className={
-                        sym.coveragePct < 50
+                        sym.directCoveragePct < 50
                           ? "text-warning"
                           : "text-foreground"
                       }
@@ -349,8 +427,53 @@ export function PurchaseHistoryPopup({
                       {formatNumber(sym.wac.totalAmountBought, locale, 6)}{" "}
                       {sym.symbol}
                     </strong>{" "}
-                    ({sym.coveragePct.toFixed(1)}% покрытие)
+                    ({sym.directCoveragePct.toFixed(1)}%)
                   </div>
+                  {/* Breakdown по источникам cost basis — показываем только
+                      если есть что-то кроме direct buy. */}
+                  {(sym.coverage.cexInheritance.amount > 0 ||
+                    sym.coverage.lpUnwind.amount > 0) && (
+                    <div className="text-[11px] text-muted-foreground space-y-0.5 mt-0.5">
+                      {sym.coverage.cexInheritance.amount > 0 && (
+                        <div title="Cost basis вытащен на бирже через P2P → trades → withdrawal. Hash match с CEX-withdrawal.">
+                          С биржи:{" "}
+                          <strong className="text-success">
+                            {formatNumber(
+                              sym.coverage.cexInheritance.amount,
+                              locale,
+                              6,
+                            )}{" "}
+                            {sym.symbol}
+                          </strong>{" "}
+                          ({formatUsd(sym.coverage.cexInheritance.usd, locale)})
+                        </div>
+                      )}
+                      {sym.coverage.lpUnwind.amount > 0 && (
+                        <div title="Cost basis унаследован от lp_add через cost_basis_tracker.">
+                          Из LP:{" "}
+                          <strong className="text-violet-400">
+                            {formatNumber(sym.coverage.lpUnwind.amount, locale, 6)}{" "}
+                            {sym.symbol}
+                          </strong>{" "}
+                          ({formatUsd(sym.coverage.lpUnwind.usd, locale)})
+                        </div>
+                      )}
+                      <div className="text-foreground">
+                        Итого покрытие:{" "}
+                        <strong
+                          className={
+                            sym.coveragePct < 50
+                              ? "text-warning"
+                              : sym.coveragePct < 95
+                                ? "text-foreground"
+                                : "text-success"
+                          }
+                        >
+                          {sym.coveragePct.toFixed(1)}%
+                        </strong>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div className="text-right">
                   <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -362,36 +485,45 @@ export function PurchaseHistoryPopup({
                       : "—"}
                   </div>
                   <div className="text-xs tabular-nums text-muted-foreground">
-                    {sym.wac.purchasesCount} покупок ·{" "}
-                    {formatUsd(sym.wac.totalCostUsd, locale)}
+                    {sym.events.length} ивентов ·{" "}
+                    {formatUsd(sym.coverage.coveredUsd, locale)}
                   </div>
                 </div>
               </div>
-              {/* Warning если покрытие низкое */}
-              {sym.coveragePct < 95 && sym.wac.totalAmountBought > 0 && (
+              {/* Warning если покрытие низкое (с учётом ВСЕХ источников).
+                  Показываем и когда coveredAmount=0 — без cost basis вообще,
+                  чтобы пользователь понимал что startUsd — extrapolation. */}
+              {sym.coveragePct < 95 && (
                 <div className="border-b border-warning/30 bg-warning/5 px-3 py-2 text-xs">
                   <div className="font-medium text-warning">
-                    ⚠️ Покрытие покупками только {sym.coveragePct.toFixed(1)}%
+                    ⚠️ Покрытие cost basis только {sym.coveragePct.toFixed(1)}%
                   </div>
                   <div className="mt-0.5 text-muted-foreground">
-                    Из {formatNumber(sym.amount, locale, 6)} {sym.symbol} в позиции
-                    только{" "}
+                    Из <strong>{formatNumber(sym.amount, locale, 6)} {sym.symbol}</strong>{" "}
+                    в позиции атрибутировано{" "}
                     <strong>
-                      {formatNumber(sym.wac.totalAmountBought, locale, 6)}
+                      {formatNumber(sym.coverage.coveredAmount, locale, 6)}
                     </strong>{" "}
-                    были куплены ($
-                    {formatNumber(sym.wac.totalCostUsd, locale, 2)}). Остальные{" "}
+                    ($
+                    {formatNumber(sym.coverage.coveredUsd, locale, 2)}: direct
+                    buy + CEX-withdrawal + LP-unwind). Непокрыто{" "}
                     <strong>
                       {formatNumber(
-                        sym.amount - sym.wac.totalAmountBought,
+                        Math.max(0, sym.amount - sym.coverage.coveredAmount),
                         locale,
                         6,
                       )}{" "}
                       {sym.symbol}
-                    </strong>{" "}
-                    пришли через transfer_in / lp_remove / другие источники.
-                    «Стартовая $» по WAC экстраполирует cost basis на ВСЁ кол-во
-                    — это приближение.
+                    </strong>
+                    {sym.coverage.unknown.count > 0 && (
+                      <>
+                        {" "}({sym.coverage.unknown.count} transfer_in без
+                        match'а — см. таблицу ниже, помечены как «Перевод без
+                        атрибуции»; наведи курсор для рекомендаций)
+                      </>
+                    )}
+                    . «Стартовая $» экстраполирует cost basis на ВСЁ кол-во —
+                    это приближение.
                   </div>
                 </div>
               )}
@@ -420,7 +552,7 @@ export function PurchaseHistoryPopup({
                     </tr>
                   </thead>
                   <tbody>
-                    {sym.events.map((e: PurchaseEvent, idx) => {
+                    {sym.events.map((e: EnrichedPurchaseEvent, idx) => {
                       const date = new Date(e.time * 1000);
                       const dateStr = date.toLocaleDateString(
                         locale === "ru" ? "ru-RU" : "en-US",
@@ -436,6 +568,45 @@ export function PurchaseHistoryPopup({
                         Math.abs(e.pricePerUnit - e.marketPriceAtOp) /
                           e.marketPriceAtOp >
                           0.15;
+                      // Подменяем label/color по costSource: для CEX-matched
+                      // transfer_in показываем "С биржи" (а не дефолтное
+                      // «Перевод», который вводит в заблуждение — теперь
+                      // транзакция имеет реальный cost basis).
+                      // CEX-matched, но cost basis = 0 — это значит withdrawal
+                      // нашёлся, но server-side WAC-пул пустой (нет trades /
+                      // P2P для пары). Показываем как "С биржи" но без cost.
+                      const cexNoCost =
+                        e.costSource === "cex" && e.costUsd === 0;
+                      const labelOverride =
+                        e.costSource === "cex"
+                          ? cexNoCost
+                            ? "С биржи (нет cost)"
+                            : "С биржи"
+                          : e.costSource === "lp"
+                            ? "Из LP"
+                            : e.costSource === "unknown"
+                              ? "Перевод без атрибуции"
+                              : KIND_LABEL[e.kind];
+                      const colorOverride =
+                        e.costSource === "cex"
+                          ? cexNoCost
+                            ? "text-warning"
+                            : "text-success"
+                          : e.costSource === "lp"
+                            ? "text-violet-400"
+                            : e.costSource === "unknown"
+                              ? "text-muted-foreground italic"
+                              : KIND_COLOR[e.kind];
+                      const sourceTooltip =
+                        e.costSource === "cex"
+                          ? cexNoCost
+                            ? `Withdrawal найден на бирже (${e.inheritanceSource ?? "unknown"}), но cost basis = $0: WAC-пул на бирже пуст. Причина: на этой бирже не synced trades / P2P через которые asset был куплен. Что делать: 1) дать API-key permission "read trade history" на бирже (на BingX в скриншоте — false) 2) re-sync аккаунта 3) либо вручную пометить как фиатную покупку в Реестре. Hash: ${e.hash}`
+                            : `Cost basis из CEX-withdrawal'а (${e.inheritanceSource ?? "unknown"}). Точность зависит от того, был ли фиатный leg в P2P-цепочке.`
+                          : e.costSource === "lp"
+                            ? "Cost basis унаследован от lp_add через cost_basis_tracker."
+                            : e.costSource === "unknown"
+                              ? `Этот transfer_in не нашёл match с CEX-withdrawal. Чтобы атрибутировать cost: 1) подключите биржу с которой пришёл этот transfer 2) запустите Sync Transfers — это вытащит withdrawal record с этим же tx-hash 3) либо отметьте как фиатную покупку в Реестре. Hash: ${e.hash}`
+                              : counterpartTitle;
                       return (
                         <tr
                           key={`${e.hash}-${idx}`}
@@ -445,10 +616,10 @@ export function PurchaseHistoryPopup({
                             {dateStr}
                           </td>
                           <td
-                            className={`px-3 py-1 ${KIND_COLOR[e.kind]}`}
-                            title={counterpartTitle}
+                            className={`px-3 py-1 ${colorOverride}`}
+                            title={sourceTooltip}
                           >
-                            {KIND_LABEL[e.kind]}
+                            {labelOverride}
                           </td>
                           <td className="px-3 py-1 text-right tabular-nums">
                             +{formatNumber(e.amount, locale, 6)}
@@ -463,7 +634,10 @@ export function PurchaseHistoryPopup({
                                 : undefined
                             }
                           >
-                            {formatUsd(e.pricePerUnit, locale)}
+                            {e.costSource === "unknown" ||
+                            (e.costSource === "cex" && e.costUsd === 0)
+                              ? "—"
+                              : formatUsd(e.pricePerUnit, locale)}
                           </td>
                           <td className="px-3 py-1 text-right tabular-nums text-muted-foreground/70">
                             {e.marketPriceAtOp != null
@@ -471,7 +645,10 @@ export function PurchaseHistoryPopup({
                               : "—"}
                           </td>
                           <td className="px-3 py-1 text-right tabular-nums font-medium">
-                            {formatUsd(e.costUsd, locale)}
+                            {e.costSource === "unknown" ||
+                            (e.costSource === "cex" && e.costUsd === 0)
+                              ? "—"
+                              : formatUsd(e.costUsd, locale)}
                           </td>
                         </tr>
                       );
@@ -480,7 +657,9 @@ export function PurchaseHistoryPopup({
                 </table>
               ) : (
                 <div className="px-3 py-3 text-xs text-muted-foreground">
-                  Нет событий-покупок (только переводы / продажи / deploy).
+                  Нет событий с известным cost basis: ни on-chain покупок,
+                  ни CEX-withdrawal с matched tx-hash, ни LP-unwind. Все
+                  токены пришли как transfer_in без атрибуции.
                 </div>
               )}
 
@@ -536,16 +715,23 @@ export function PurchaseHistoryPopup({
                 </div>
               )}
 
-              {/* Per-symbol summary */}
-              {sym.effectiveWac > 0 && (
+              {/* Per-symbol summary.
+                  UCB C4: footer = sum of line-items (lotCb.totalCostUsd).
+                  Раньше использовался coverage.coveredUsd + ... — другой
+                  движок → расхождение с line items. Теперь by-construction
+                  line-sum == footer. Amount показываем supplied (не live),
+                  чтобы yield не «прибавлялся» к cost basis. */}
+              {sym.lotCb.totalCostUsd > 0 && (
                 <div className="border-t border-border/60 bg-secondary/20 px-3 py-2 text-xs">
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">
-                      {formatNumber(sym.amount, locale, 6)} {sym.symbol} ×{" "}
-                      {formatUsd(sym.effectiveWac, locale)} ({lotMethodology})
+                      {formatNumber(sym.lotCb.totalAmountSupplied, locale, 6)}{" "}
+                      {sym.symbol} ×{" "}
+                      {formatUsd(sym.lotCb.effectiveWac, locale)} (
+                      {lotMethodology})
                     </span>
                     <span className="font-bold tabular-nums">
-                      = {formatUsd(sym.wacBasedStartUsd, locale)}
+                      = {formatUsd(sym.lotCb.totalCostUsd, locale)}
                     </span>
                   </div>
                 </div>
@@ -554,7 +740,8 @@ export function PurchaseHistoryPopup({
           ))}
         </div>
 
-        {/* Aggregate comparison — sticky bottom */}
+        {/* UCB B7: footer теперь показывает ТОЛЬКО реальные траты.
+            Раньше было 2 цифры (extrapolation + honest) — сбивало юзера. */}
         <div className="shrink-0 rounded-md border border-brand-cyan/30 bg-brand-cyan/5 px-3 py-2 text-xs">
           <div className="flex justify-between py-0.5">
             <span className="text-muted-foreground">
@@ -564,38 +751,65 @@ export function PurchaseHistoryPopup({
               {formatUsd(startUsdShown, locale)}
             </span>
           </div>
-          <div className="flex justify-between py-0.5">
-            <span className="text-muted-foreground">
-              По WAC × current_amount{" "}
+          <div className="flex justify-between py-0.5 border-t border-border/40 pt-1.5">
+            <span className="text-foreground font-medium">
+              Реально потрачено $ на актив
               {overallCoverage < 95 && (
-                <span className="text-warning">
-                  ({overallCoverage.toFixed(0)}% покрытие)
+                <span className="ml-1 text-warning">
+                  (покрытие {overallCoverage.toFixed(0)}%)
                 </span>
               )}
             </span>
-            <span className="font-mono font-bold tabular-nums">
-              {formatUsd(totalWacBased, locale)}
-            </span>
-          </div>
-          <div className="flex justify-between py-0.5">
-            <span className="text-muted-foreground">
-              Реально потрачено на покупки
-            </span>
             <span
-              className={`font-mono font-bold tabular-nums ${overallCoverage < 95 ? "text-warning" : ""}`}
+              className={`font-mono font-bold tabular-nums ${
+                overallCoverage < 95 ? "text-warning" : "text-success"
+              }`}
             >
               {formatUsd(totalHonestSpent, locale)}
             </span>
           </div>
-          {overallCoverage < 95 && totalBought > 0 && (
+          {overallCoverage < 95 && (
+            <div className="flex justify-between py-0.5 text-[11px] text-muted-foreground">
+              <span>
+                + extrapolation для unattributed amount (WAC × {(100 - overallCoverage).toFixed(0)}%)
+              </span>
+              <span className="font-mono tabular-nums">
+                {formatUsd(totalWacBased - totalHonestSpent, locale)}
+              </span>
+            </div>
+          )}
+          {/* Breakdown по источникам — показываем только если есть
+              inheritance, иначе скрываем чтобы не шуметь. */}
+          {(totalCexInheritedUsd > 0 || totalLpInheritedUsd > 0) && (
+            <div className="mt-1 space-y-0.5 border-t border-border/40 pt-1 text-[11px] text-muted-foreground">
+              {totalCexInheritedUsd > 0 && (
+                <div className="flex justify-between">
+                  <span>↳ Из CEX (P2P→trade→withdrawal)</span>
+                  <span className="tabular-nums text-success">
+                    {formatUsd(totalCexInheritedUsd, locale)}
+                  </span>
+                </div>
+              )}
+              {totalLpInheritedUsd > 0 && (
+                <div className="flex justify-between">
+                  <span>↳ Из закрытых LP (inherited)</span>
+                  <span className="tabular-nums text-violet-400">
+                    {formatUsd(totalLpInheritedUsd, locale)}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+          {overallCoverage < 95 && totalCovered > 0 && (
             <p className="mt-1.5 border-t border-warning/30 pt-1.5 text-[11px] leading-relaxed text-muted-foreground">
               ⚠️ Только{" "}
               <strong className="text-warning">
                 {overallCoverage.toFixed(1)}%
               </strong>{" "}
-              underlying токенов в позиции имеют историю покупок в этом
-              кошельке. Остальное пришло через transfer_in (с другого
-              кошелька) / lp_remove / другие источники без явной цены покупки.
+              underlying токенов в позиции имеют известный cost basis (direct
+              buy + CEX-withdrawal + LP-unwind). Остальное — transfer_in без
+              атрибуции (внутренние переводы / airdrops). «Стартовая $» по
+              WAC экстраполирует cost basis на ВСЁ кол-во — это приближение.
             </p>
           )}
         </div>
