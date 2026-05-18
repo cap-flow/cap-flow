@@ -21,13 +21,16 @@ export type AcquiredVia =
   | "buy_with_stable" // swap: stable out, token in
   | "swap" // swap: token A out, token B in
   | "transfer_in" // плавный приход (CEX deposit, external transfer)
-  | "claim_rewards" // протокольные награды (LP fees, staking rewards)
+  | "claim_rewards" // [legacy] протокольные награды до UCB D6 (cost=market)
+  | "received_as_reward" // UCB D6: yield/staking/LP rewards, cost basis = 0
   | "airdrop" // airdrop (cost = 0 по умолчанию)
   | "lp_close" // выход из LP с attributed cost basis
   | "lend_withdraw" // withdraw из lending с накопл. yield
   | "borrow" // занятые средства (cost = 0, но debt!)
+  | "borrow_self_loop" // UCB C10: borrow same asset as supplied (Morpho leverage loop) — inherits collateral cost
   | "manual_seed" // ручная разметка стартового капитала пользователем
-  | "linked_async_fill"; // async-deposit fill (cost из linked Tx A)
+  | "linked_async_fill" // async-deposit fill (cost из linked Tx A)
+  | "bridge_in"; // UCB D5: cross-chain bridge с inherited cost basis
 
 export interface Lot {
   /** Token symbol — нормализован (UPPERCASE, WETH→ETH). */
@@ -48,6 +51,17 @@ export interface Lot {
   readonly sourceHash: string;
   /** Wallet ID — лоты разделены по кошелькам. */
   readonly walletId: string;
+  /**
+   * UCB D6: FMV (fair-market value) в USD на момент приобретения.
+   * Заполняется ТОЛЬКО для `received_as_reward` лотов (rewards,
+   * staking yield, LP fees), где `costPerUnitUsd = 0` по UCB-методике,
+   * но мы сохраняем market-price на момент получения для:
+   *   - future income reporting (US-tax: reward FMV = ordinary income)
+   *   - аналитики «доход от стейкинга» отдельно от capital gains
+   *
+   * Для всех остальных `acquiredVia` поле undefined.
+   */
+  readonly fmvAtAcquisitionUsd?: number;
 }
 
 /**
@@ -63,7 +77,21 @@ export interface LotConsumption {
   readonly costAttributedUsd: number;
 }
 
-export type LotMethodology = "WAC" | "FIFO" | "LIFO";
+/**
+ * Lot consume methodology — определяет порядок забора лотов при consume.
+ *
+ * - **WAC**: weighted-average cost. Consume пропорционально из всех лотов
+ *   по running average. Стабильно, не зависит от sale-ordering.
+ * - **FIFO**: first-in-first-out. Старые лоты first. US-default до 2018,
+ *   часто требует regulator'ов где-то.
+ * - **LIFO**: last-in-first-out. Новые лоты first. Может minimize gains в
+ *   бычьем рынке (если recent buys были по высокой цене).
+ * - **HIFO** (Highest-In-First-Out): consume лоты с наибольшим cost basis
+ *   первыми. Это **tax-optimal** методология для minimizing capital gains:
+ *   реализуем наименьший gain (или наибольший loss). Разрешено в US как
+ *   "Specific ID" вариант, в RU/EU — обычно требует явного выбора.
+ */
+export type LotMethodology = "WAC" | "FIFO" | "LIFO" | "HIFO";
 
 export interface ConsumeResult {
   /** Список лотов и сколько из каждого взято. */
@@ -86,6 +114,8 @@ export interface AcquireOptions {
   acquiredVia: AcquiredVia;
   sourceHash: string;
   walletId: string;
+  /** UCB D6: FMV at receipt — required for `received_as_reward`, optional иначе. */
+  fmvAtAcquisitionUsd?: number;
 }
 
 export interface ConsumeOptions {

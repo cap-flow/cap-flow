@@ -112,6 +112,19 @@ export function buildLotTrackerFromOps(
   // bridge_in матчится (one-shot).
   const lastBridgeOutWac = new Map<string, number>();
 
+  // UCB C10: "self-loop state" — отслеживает collateral cost basis для
+  // receipt-less протоколов (Morpho Blue). Когда user supply'ит asset Y
+  // в protocol X (без receipt token mint), мы запоминаем сколько $ было
+  // consumed. Если потом user borrow'ит тот же asset Y из protocol X
+  // (leverage loop) — borrowed lot inherits cost basis из stored state.
+  //
+  // Без C10: strict UCB ставит borrow @ $0 → leverage loops "теряют"
+  // cost basis. С C10: vladimir's Morpho WBTC supply→borrow самозамкнутая
+  // loop properly наследует $20k через borrow → Fluid.
+  //
+  // Key: `walletId|protocolId|symbol`. Value: { amount, totalCost }.
+  const selfLoopCollateral = new Map<string, { amount: number; totalCost: number }>();
+
   const sorted = [...ops].sort((a, b) => a.time - b.time);
 
   for (const op of sorted) {
@@ -127,7 +140,7 @@ export function buildLotTrackerFromOps(
       case "lp_add":
       case "lend_supply":
       case "stake":
-        handleSupply(op, tracker, walletId, histPrices);
+        handleSupply(op, tracker, walletId, histPrices, selfLoopCollateral);
         break;
       case "lp_remove":
       case "lend_withdraw":
@@ -135,7 +148,7 @@ export function buildLotTrackerFromOps(
         handleWithdraw(op, tracker, walletId, histPrices);
         break;
       case "borrow":
-        handleBorrow(op, tracker, walletId);
+        handleBorrow(op, tracker, walletId, selfLoopCollateral);
         break;
       case "repay":
         handleRepay(op, tracker, walletId);
@@ -286,6 +299,7 @@ function handleSupply(
   tracker: LotTracker,
   walletId: string,
   histPrices: Map<string, number>,
+  selfLoopCollateral?: Map<string, { amount: number; totalCost: number }>,
 ): void {
   // Receipt-token (если есть) получает lot с cost = USD из out-side underlying.
   const protoId = op.protocol?.id ?? "";
@@ -339,17 +353,23 @@ function handleSupply(
       consumedAt: op.time,
       walletId,
     });
+    const consumedCost = consumed.totalCostUsd > 0
+      ? consumed.totalCostUsd
+      : (isStableSymbol(m.symbol) ? m.amount : movementUsd(m, op.chain, op.time, histPrices));
     if (!useLinkedCost) {
-      if (consumed.totalCostUsd > 0) {
-        totalCostUsd += consumed.totalCostUsd;
-      } else {
-        // Fallback: если LotTracker не нашёл cost (token не отслеживался),
-        // берём hist price.
-        const fallbackUsd = isStableSymbol(m.symbol)
-          ? m.amount
-          : movementUsd(m, op.chain, op.time, histPrices);
-        totalCostUsd += fallbackUsd;
-      }
+      totalCostUsd += consumedCost;
+    }
+    // UCB C10: record consumed collateral cost basis для self-loop borrow
+    // inheritance. Only for receipt-less protocols (Morpho Blue) where
+    // collateral cost basis иначе теряется. Receipt protocols (Aave a-token,
+    // Compound c-token) keep cost in receipt — self-loop тоже работает но
+    // через receipt chain.
+    if (selfLoopCollateral && !isReceipt(m)) {
+      const key = `${walletId}|${protoId}|${m.symbol.toUpperCase()}`;
+      const cur = selfLoopCollateral.get(key) ?? { amount: 0, totalCost: 0 };
+      cur.amount += m.amount;
+      cur.totalCost += consumedCost;
+      selfLoopCollateral.set(key, cur);
     }
   }
 
@@ -474,18 +494,48 @@ function handleBorrow(
   op: ClassifiedOp,
   tracker: LotTracker,
   walletId: string,
+  selfLoopCollateral?: Map<string, { amount: number; totalCost: number }>,
 ): void {
-  // Borrow: in-side получает lot с cost = 0 (это занятые средства).
+  // UCB C10: self-loop inheritance. Если borrow asset Y из protocol X
+  // matches previously consumed collateral of Y in X, borrowed lot
+  // наследует cost basis от collateral pro-rata. Иначе default $0 (strict
+  // UCB — debt is not own money).
+  const protoId = op.protocol?.id ?? "";
   for (const m of op.movement) {
     if (m.direction !== "in" || m.amount <= 0) continue;
+
+    let costPerUnitUsd = 0;
+    let acquiredVia: AcquiredVia = "borrow";
+
+    if (selfLoopCollateral) {
+      const key = `${walletId}|${protoId}|${m.symbol.toUpperCase()}`;
+      const pool = selfLoopCollateral.get(key);
+      if (pool && pool.amount > 0 && pool.totalCost > 0) {
+        // Self-loop detected: borrow inherits cost pro-rata from collateral
+        const inheritAmount = Math.min(m.amount, pool.amount);
+        const pricePerUnit = pool.totalCost / pool.amount;
+        const inheritedCost = inheritAmount * pricePerUnit;
+        // For the borrow lot, cost = inherited share (or 0 if borrow > pool)
+        costPerUnitUsd = inheritAmount >= m.amount
+          ? pricePerUnit
+          : inheritedCost / m.amount; // pro-rata: inherited part, rest @ 0
+        acquiredVia = "borrow_self_loop";
+        // Decrement pool (consumed inheritance)
+        pool.amount -= inheritAmount;
+        pool.totalCost -= inheritedCost;
+        if (pool.amount <= 1e-9) selfLoopCollateral.delete(key);
+        else selfLoopCollateral.set(key, pool);
+      }
+    }
+
     tracker.acquire({
       symbol: m.symbol,
       tokenId: m.tokenId,
       chain: op.chain,
       amount: m.amount,
-      costPerUnitUsd: 0,
+      costPerUnitUsd,
       acquiredAt: op.time,
-      acquiredVia: "borrow",
+      acquiredVia,
       sourceHash: op.hash,
       walletId,
     });
