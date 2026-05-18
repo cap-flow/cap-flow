@@ -73,6 +73,7 @@ import {
 } from "@/lib/cache";
 import { findInternalTransferPairs } from "@/lib/portfolio/internal_transfers";
 import { computeFiatHopCostBasisOverrides } from "@/lib/portfolio/lots/fiat_hop_cost_basis";
+import { computeCrossWalletCostBasisOverrides } from "@/lib/portfolio/lots/cross_wallet_cost_basis";
 import {
   useCexTransfersWithHash,
   useCexWithdrawalCostBasis,
@@ -1342,23 +1343,49 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
   // Priority при merge:
   //   A4 manual (runUcbPipelineForWallet) > D3 CEX (server) > C2 fiat-hop (local).
   // Server-validated CEX inheritance бьёт local heuristic; manual бьёт всё.
-  const fiatHopCostBasisByHash = useMemo(() => {
-    const opsByWallet = new Map<string, ClassifiedOp[]>();
+  const opsByWalletForInheritance = useMemo(() => {
+    const m = new Map<string, ClassifiedOp[]>();
     for (const id of Object.keys(loadedById)) {
       const l = loadedById[id]!;
       const realWalletId = l.wallet.id.startsWith("api:")
         ? (l.wallet.id.split(":")[1] ?? l.wallet.id)
         : l.wallet.id;
-      opsByWallet.set(realWalletId, l.ops);
+      m.set(realWalletId, l.ops);
     }
-    return computeFiatHopCostBasisOverrides(opsByWallet, cexCostBasisByHash);
-  }, [loadedById, cexCostBasisByHash]);
+    return m;
+  }, [loadedById]);
+
+  const fiatHopCostBasisByHash = useMemo(
+    () =>
+      computeFiatHopCostBasisOverrides(
+        opsByWalletForInheritance,
+        cexCostBasisByHash,
+      ),
+    [opsByWalletForInheritance, cexCostBasisByHash],
+  );
+
+  // UCB C3: cross-wallet transfer/bridge inheritance — закрывает gap для
+  // direct on-chain transfers без CEX (EOA→EOA, незаклассифицированные
+  // bridges). Same-wallet skip (D5 + C2 покрывают). Принимает уже
+  // вычисленные C2 + D3 overrides как preExisting → multi-source chain
+  // inheritance работает.
+  const crossWalletCostBasisByHash = useMemo(() => {
+    const preExisting = new Map<string, number>(fiatHopCostBasisByHash);
+    for (const [k, v] of cexCostBasisByHash) preExisting.set(k, v);
+    return computeCrossWalletCostBasisOverrides(
+      opsByWalletForInheritance,
+      preExisting,
+    );
+  }, [opsByWalletForInheritance, fiatHopCostBasisByHash, cexCostBasisByHash]);
 
   const mergedCostBasisByHash = useMemo(() => {
-    const m = new Map<string, number>(fiatHopCostBasisByHash);
-    for (const [k, v] of cexCostBasisByHash) m.set(k, v); // CEX overwrites fiat-hop
+    // Priority order (lowest → highest):
+    //   C3 cross-wallet < C2 fiat-hop < D3 CEX (server) < A4 manual (runUcb...)
+    const m = new Map<string, number>(crossWalletCostBasisByHash);
+    for (const [k, v] of fiatHopCostBasisByHash) m.set(k, v);
+    for (const [k, v] of cexCostBasisByHash) m.set(k, v);
     return m;
-  }, [fiatHopCostBasisByHash, cexCostBasisByHash]);
+  }, [crossWalletCostBasisByHash, fiatHopCostBasisByHash, cexCostBasisByHash]);
 
   // UCB C5.4: per-wallet lot+position trackers через orchestrator.
   // Раньше эта useMemo сама делала applyAnnotations → merge cost-basis →

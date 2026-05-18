@@ -1,9 +1,64 @@
 ---
-updated: 2026-05-18 (UCB C2 fiat-hop cost basis inheritance)
+updated: 2026-05-18 (UCB C3 cross-wallet transfer/bridge inheritance)
 ---
 
 
 # ROADMAP
+
+## 🔧 UCB C3 — cross-wallet transfer/bridge cost basis inheritance (2026-05-18)
+
+**Дополняет C2**. C2 покрывал `withdraw_fiat`↔`deposit_fiat` (CEX-loops).
+**C3 — cross-wallet** `{transfer_out, bridge_out, withdraw_fiat}` ↔
+`{transfer_in, bridge_in, deposit_fiat}` mixed pairs.
+
+**Закрывает gap'ы**:
+- Cross-wallet bridges (bridge_out wallet A → bridge_in wallet B): A2
+  matcher marks как internal но не propagate cost basis. Теперь — да.
+- Direct EOA→EOA transfers (transfer_out → transfer_in между своими
+  wallets, без bridges и без CEX): аналогично.
+- Mixed type pairs (transfer_out → deposit_fiat и т.п.): classifier
+  иногда не consistent помечает направления.
+
+**Same-wallet skip**: D5 уже handles same-wallet bridge_out → bridge_in,
+C2 handles same-wallet `*_fiat`. C3 фокус — только cross-wallet pairs.
+
+**Алгоритм identical to C2** (greedy nearest-time, ±5%/10% tolerance,
+±6h window, OUT precedes IN, source tracker excludes matched out-op).
+Принимает уже-вычисленные C2 + D3 как preExistingOverrides → multi-source
+chain inheritance работает.
+
+**Priority в LoadedWalletsProvider** (lowest → highest):
+```
+C3 cross-wallet  <  C2 fiat-hop  <  D3 CEX (server)  <  A4 manual
+```
+
+| File | Change | Tests |
+|---|---|:-:|
+| `lots/cross_wallet_cost_basis.ts` | New module: `computeCrossWalletCostBasisOverrides` | — |
+| `lots/cross_wallet_cost_basis.test.ts` | 7 scenarios: bridge in/out cross-wallet, transfer_out→transfer_in EOA-to-EOA, same-wallet skip, mixed type pairs, amount tolerance, time window, dedup | 7/7 ✅ |
+| `LoadedWalletsProvider.tsx` | Compute C3 overrides + merge in priority order | — |
+
+**Cumulative**: 212/212 portfolio · tsc clean.
+
+## ✅ POS-002 valuation post C2+C3 (validated на real DB data)
+
+via.irk@gmail.com `06bce475...c53` — 10.6242 ETH supplied to Fluid:
+
+| Supply | Pre-fix | Post LotTracker SoT | Post C2 |
+|---|---:|---:|---:|
+| Aug 12 (2.154 ETH) | $4554.90 (market) | $4554.90 | **$9668.30** (cowswap inherited) |
+| Nov 17 (1.618 ETH) | $3422.04 (market) | $3422.04 | $3422.04 (orphan) |
+| Jan 4 #1 (1.2 ETH) | $2537.60 (market) | $3765.35 (swap WAC) | $3763.97 |
+| Jan 4 #2 (2.229 ETH) | $4712.78 (market) | $6999.96 | $6999.95 |
+| Jan 31 (1.138 ETH) | $2406.71 | $3010.15 | $3010.82 |
+| Feb 1 (0.623 ETH) | $1318.24 | $1328.56 | $1329.23 |
+| Feb 4 (1.382 ETH) | $2922.65 | $2998.96 | $2998.89 |
+| Mar 27 (0.280 ETH) | $591.80 | $591.74 | $591.82 |
+| **Total** | **$22,466** | **$26,672** | **$31,785** |
+
+Δ от методологического pipeline: +$9,319 над "market m.usd" наивным
+подсчётом. Остаётся +$5,113 потенциал когда Nov 17 deposit_fiat
+аннотируется через A4 (CEX trail unknown).
 
 ## 🔧 UCB C2 — fiat-hop cost basis inheritance (2026-05-18)
 
