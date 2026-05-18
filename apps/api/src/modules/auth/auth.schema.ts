@@ -25,8 +25,21 @@ export const meResponseSchema = z.object({
 });
 
 export const loginResponseSchema = z.object({
+  /**
+   * Access JWT. DEPRECATED (TODO 2026-06-XX remove):
+   * after the cookie-based auth migration the access token lives in
+   * the `cap_access` HttpOnly cookie; the JSON copy is kept only to
+   * unblock callers (and tests) that still read it from the body.
+   */
   accessToken: z.string(),
   expiresAt: z.string().datetime(),
+  /**
+   * CSRF double-submit token. Mirrored in the `cap_csrf` cookie
+   * (httpOnly=false) so the frontend can read it from
+   * `document.cookie`. Frontends that prefer not to touch
+   * `document.cookie` can pick it up here.
+   */
+  csrfToken: z.string().optional(),
   user: meResponseSchema,
 });
 

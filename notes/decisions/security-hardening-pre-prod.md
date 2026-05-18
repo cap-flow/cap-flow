@@ -206,15 +206,124 @@ Beta-test комментарий снят, `max: 1000` → `max: 10` в
   обновить extractor.
 * **Глобального rate-limit нет.** Любой будущий POST без явного
   `config.rateLimit` снова открыт. Нужен code-review hook или линтер.
-* **httpOnly cookie миграция, CSP-header, X-Frame-Options** — из
-  аудита; в этот раунд не делали. Решение по cookie уже принято
-  (`auth.cookies.ts` использует `httpOnly: true` и `sameSite`).
-  Helmet включён глобально (`apps/api/src/app.ts:170`).
+* **CSP-header, X-Frame-Options** — из аудита; в этот раунд не
+  делали. Helmet включён глобально (`apps/api/src/app.ts:170`).
 * **Per-route allowlist для upstream-proxy paths.** Сейчас policy на
   уровне `UpstreamProxyService.forward`. Расширение паттернов
   адресных слотов требует синхронного апдейта address-guard и доки
   выше.
 * **Чёрные списки IP / WAF.** Out-of-scope для текущего раунда.
+
+## httpOnly cookie migration (раунд 2 — 2026-05-18)
+
+### Цель
+
+Закрыть XSS-канал кражи access-токена: до миграции фронт держал JWT в
+in-memory `tokenStore`, но любой бекенд-обновлённый аксесс возвращался
+JSON-полем `accessToken`, передавался в `Authorization: Bearer` и
+исходил из памяти страницы. Любой XSS-скрипт мог прочитать его из
+`tokenStore`. Цель — перевести все запросы на httpOnly access cookie +
+CSRF double-submit, а Bearer оставить как фолбэк на graceful migration.
+
+### Backend (`apps/api`)
+
+* `auth.cookies.ts`:
+  * `cap_access` cookie теперь scoped `path: /` (раньше — `/api/v1/upstream`).
+    Cookie httpOnly + Secure(prod) + SameSite=Lax + maxAge=min(JWT_TTL,24h).
+  * `cap_refresh` без изменений: httpOnly + Secure(prod) + SameSite=Strict +
+    `path: /api/v1/auth`.
+  * Новый `cap_csrf` cookie (НЕ httpOnly — фронт читает) с тем же
+    Secure / Lax / `path: /` / maxAge = refresh-TTL.
+  * `generateCsrfToken()` — 32-байт random hex.
+* `plugins/csrf.ts` (новый): preHandler-хук, который для POST/PUT/PATCH/
+  DELETE сравнивает в constant-time значения `cap_csrf` cookie и
+  `X-CSRF-Token` header. Skip для safe-методов и для allowlist'а
+  (login / refresh / password reset / email verification / invites).
+  Route-level opt-out через `config.skipCsrf = true` (для webhook'ов
+  в будущем). Bull-Board UI (`/admin/queue/ui`) исключён, у него своя
+  CSRF-схема внутри.
+* `auth.routes.ts` (login / refresh / logout / end-impersonation / DELETE /me):
+  * Кладут/чистят `cap_csrf` вместе с access/refresh cookies.
+  * Возвращают `csrfToken` в JSON-body (для фронтов, которые не хотят
+    лезть в `document.cookie`).
+  * Новый `GET /auth/csrf` (requireAuth): выдаёт свежий CSRF-токен
+    без ротации сессии — нужен после hard-reload, когда access-cookie
+    жив, а cap_csrf истёк.
+* `invites.routes.public.ts` (POST `/invites/:token/register`):
+  выставляет access + csrf cookie вместе с refresh, чтобы сразу
+  после регистрации мутирующие запросы работали без отдельного
+  /auth/csrf вызова.
+* `admin-users.routes.ts` (POST `/admin/users/:id/impersonate`):
+  ротация CSRF при смене identity — иначе админ мог бы переиграть
+  заранее подготовленный мутирующий запрос как impersonated user.
+
+### Frontend (`apps/web`)
+
+* `lib/auth/csrf.ts` (новый): `readCsrfToken()` парсит
+  `document.cookie`, `purgeLegacyAuthStorage()` чистит ~6 возможных
+  legacy-ключей в localStorage (defensive — текущий билд никуда токены
+  не пишет).
+* `lib/api/client.ts`:
+  * `executeRaw()` и `apiFetch()` теперь для мутирующих методов
+    инжектят `X-CSRF-Token` из cookie.
+  * `credentials: "include"` уже было.
+  * `Authorization: Bearer` ОСТАВЛЕН временно — backend
+    параллельно принимает оба источника. TODO 2026-06-XX: убрать
+    после стабилизации.
+* `main.tsx`: однократно вызывает `purgeLegacyAuthStorage()` на старте.
+
+### CSRF — почему double-submit, а не `@fastify/csrf-protection`
+
+* Frontend на том же origin (Vite proxy в dev, single-domain в prod),
+  а значит value-equality между cookie и header уже даёт безопасность
+  на уровне stateful-токена: cross-origin страница не может ни
+  прочитать `cap_csrf`, ни заставить браузер выставить «свой»
+  `cap_csrf` нам (тот же origin).
+* Stateless: не нужно держать CSRF-токены в Redis параллельно сессиям.
+* Без новой зависимости и без pin'ов на конкретную версию плагина.
+
+### Cookie-flags — Lax vs Strict
+
+* Refresh — `Strict`. Cross-site rotation атака не нужна никому, и
+  /auth/refresh всегда инициируется нашим кодом — SameSite=Strict
+  всё равно attach'ится для same-origin POST.
+* Access — `Lax`. Нужно, чтобы top-level навигация на API-роуты
+  работала (например прямой GET-линк на скачивание CSV-отчёта), и
+  viem (который не умеет читать/писать cookie) мог носить токен на
+  любых XHR. Lax уже блокирует cross-site POST/PUT/DELETE без CSRF.
+* CSRF — `Lax`, не httpOnly. Должен читаться JS'ом.
+
+### Deprecation plan: Bearer header / JSON accessToken
+
+* TODO `2026-06-XX`: убрать
+  1. `extractAccessToken` ветку с `Authorization: Bearer`
+     (`apps/api/src/modules/auth/auth.cookies.ts`).
+  2. `accessToken` поле из `loginResponseSchema`
+     (`apps/api/src/modules/auth/auth.schema.ts`).
+  3. `tokenStore.set(res.accessToken)` и всё чтение `tokenStore.get()`
+     в `apps/web/src/lib/api/client.ts` + `apps/web/src/features/
+     auth/AuthProvider.tsx` + страницах админки.
+  4. Сам `tokenStore` файл — мёртвый код после п.3.
+* Условие: после 1-2 недель в prod, в `audit_log` 0 событий «cookie
+  отсутствует, использован Bearer» (нужно добавить телеметрию в
+  `requireAuth` перед удалением).
+
+### Тесты
+
+* `apps/api/src/plugins/csrf.test.ts` (10 кейсов): safe-methods skip,
+  missing cookie/header → 403, mismatched → 403, matching → 200,
+  login/refresh/invites bypass, length-mismatch.
+* `apps/api/src/modules/auth/auth.cookie-flags.test.ts` (7 кейсов):
+  HttpOnly/Secure/SameSite/Path флаги для access/refresh/csrf под
+  prod и dev (`COOKIE_SECURE=false`), clear-on-logout.
+* `apps/web/src/lib/auth/csrf.test.ts` (9 кейсов): `readCsrfToken()`
+  для типичных форм cookie-строки, `purgeLegacyAuthStorage()`
+  graceful когда localStorage недоступен / удаление только ключей
+  auth-формата.
+* Прогон: `pnpm --filter @cap-flow/api test` → 813/813 passed (+17),
+  `pnpm --filter @cap-flow/web test` → 264/264 passed (+9). 4
+  pre-existing suite-load failures (`@cap-flow/db` resolution) не
+  затронуты.
 
 ## Smoke-проверки (после merge в main)
 
@@ -224,3 +333,10 @@ Beta-test комментарий снят, `max: 1000` → `max: 10` в
    403 forbidden, audit row в `api_usage` с `error="forbidden"`.
 4. `curl /v1/upstream/debank/v1/user/total_balance?id=0xdeadbeef` →
    400 malformed.
+5. `curl -i -X POST /v1/auth/login -d '{...}' -H Content-Type:application/json`
+   → response должен содержать **три** Set-Cookie: `cap_access` (HttpOnly,
+   Path=/), `cap_refresh` (HttpOnly, Path=/api/v1/auth), `cap_csrf`
+   (НЕ HttpOnly, Path=/). В JSON-теле — `csrfToken`.
+6. После #5 — `curl -X POST /v1/accounts -b "cap_access=...; cap_csrf=..."`
+   без `X-CSRF-Token` → 403 «CSRF token missing».
+7. Тот же #6 с `-H "X-CSRF-Token: <значение из cookie>"` → 200.

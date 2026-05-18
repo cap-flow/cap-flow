@@ -113,6 +113,7 @@ import { publicInviteRoutes } from "./modules/invites/invites.routes.public.js";
 import { InvitesRepository } from "./modules/invites/invites.repository.js";
 import { InvitesService } from "./modules/invites/invites.service.js";
 import { authPlugin } from "./plugins/auth.js";
+import { csrfPlugin } from "./plugins/csrf.js";
 import { dbPlugin } from "./plugins/db.js";
 import { schema } from "@cap-flow/db";
 import { errorHandlerPlugin } from "./plugins/error-handler.js";
@@ -180,6 +181,10 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   });
   await app.register(cookie, { secret: env.COOKIE_SECRET });
   await app.register(errorHandlerPlugin);
+  // CSRF double-submit guard. Must register AFTER cookie parser (deps)
+  // and BEFORE any route — the preHandler hook is added at register
+  // time and Fastify applies hooks in registration order.
+  await app.register(csrfPlugin);
   await app.register(dbPlugin, {
     connectionString: env.DATABASE_URL,
     poolMax: env.DB_POOL_MAX,

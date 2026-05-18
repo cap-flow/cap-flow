@@ -4,7 +4,14 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
 import { App } from "./App";
+import { purgeLegacyAuthStorage } from "./lib/auth/csrf";
 import { LoadedWalletsProvider } from "./components/data/LoadedWalletsProvider";
+
+// One-shot migration: scrub any legacy access/refresh tokens we ever
+// might have stored in localStorage. Current build never writes them
+// (in-memory `tokenStore` + httpOnly refresh cookie), but a returning
+// user from a pre-cookie build could have stale entries lingering.
+purgeLegacyAuthStorage();
 import { SidebarProvider } from "./components/layout/SidebarProvider";
 import { ThemeProvider } from "./components/theme/ThemeProvider";
 import { AuthProvider } from "./features/auth/AuthProvider";
