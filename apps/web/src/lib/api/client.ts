@@ -1,6 +1,9 @@
 import { z } from "zod";
 
 import { tokenStore } from "../auth/token-store";
+import { CSRF_HEADER_NAME, readCsrfToken } from "../auth/csrf";
+
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 /**
  * Base URL the dev server proxies via vite.config (see `/api` proxy entry).
@@ -83,11 +86,23 @@ async function executeRaw<TBody>(
   // the header on a body-less POST (e.g. /auth/logout) would 4xx.
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   if (!opts.skipAuth) {
+    // Legacy Bearer header — kept for the migration period while
+    // backend still accepts both (cookie OR header). Deprecation TODO
+    // 2026-06-XX: remove together with the Bearer fallback in
+    // `requireAuth` once cookie auth is verified stable in prod.
     const t = tokenStore.get();
     if (t) headers["Authorization"] = `Bearer ${t}`;
   }
+  const method = (opts.method ?? "GET").toUpperCase();
+  // Double-submit CSRF token on mutating requests. The backend skips
+  // CSRF on login/refresh/invite endpoints; everything else under
+  // /api/v1/** requires it (see apps/api/src/plugins/csrf.ts).
+  if (MUTATING_METHODS.has(method)) {
+    const csrf = readCsrfToken();
+    if (csrf) headers[CSRF_HEADER_NAME] = csrf;
+  }
   const init: RequestInit = {
-    method: opts.method ?? "GET",
+    method,
     headers,
     credentials: "include",
   };
@@ -188,10 +203,16 @@ export async function apiFetch(
     if (opts.body !== undefined && headers["Content-Type"] === undefined) {
       headers["Content-Type"] = "application/json";
     }
+    // Legacy Bearer header (deprecation TODO 2026-06-XX).
     const t = tokenStore.get();
     if (t) headers["Authorization"] = `Bearer ${t}`;
+    const method = (opts.method ?? "GET").toUpperCase();
+    if (MUTATING_METHODS.has(method)) {
+      const csrf = readCsrfToken();
+      if (csrf) headers[CSRF_HEADER_NAME] = csrf;
+    }
     const init: RequestInit = {
-      method: opts.method ?? "GET",
+      method,
       headers,
       credentials: "include",
     };

@@ -10,8 +10,11 @@ import type { AdminUsersService } from "../admin-users/admin-users.service.js";
 import {
   REFRESH_COOKIE_NAME,
   clearAccessCookie,
+  clearCsrfCookie,
   clearRefreshCookie,
+  generateCsrfToken,
   setAccessCookie,
+  setCsrfCookie,
   setRefreshCookie,
 } from "./auth.cookies.js";
 import {
@@ -52,6 +55,15 @@ export async function authRoutes(
     maxAgeSeconds: Math.min(env.JWT_ACCESS_TTL_MIN * 60, 24 * 3600),
   };
 
+  // CSRF cookie outlives the access cookie (refresh rotation rotates
+  // it). We tie it to refresh-token lifetime so a long-lived browser
+  // tab without traffic doesn't lose the ability to mutate.
+  const csrfCookieCfg = {
+    secure: env.COOKIE_SECURE,
+    domain: env.COOKIE_DOMAIN,
+    maxAgeSeconds: env.JWT_REFRESH_TTL_DAYS * 24 * 60 * 60,
+  };
+
   route.post(
     "/login",
     {
@@ -76,10 +88,13 @@ export async function authRoutes(
 
       setRefreshCookie(reply, tokens.refreshToken, cookieCfg);
       setAccessCookie(reply, tokens.accessToken, accessCookieCfg);
+      const csrf = generateCsrfToken();
+      setCsrfCookie(reply, csrf, csrfCookieCfg);
 
       return {
         accessToken: tokens.accessToken,
         expiresAt: tokens.accessTokenExpiresAt.toISOString(),
+        csrfToken: csrf,
         user: toMe(tokens.user, null),
       };
     }
@@ -113,6 +128,8 @@ export async function authRoutes(
 
       setRefreshCookie(reply, tokens.refreshToken, cookieCfg);
       setAccessCookie(reply, tokens.accessToken, accessCookieCfg);
+      const csrf = generateCsrfToken();
+      setCsrfCookie(reply, csrf, csrfCookieCfg);
 
       // Preserve impersonation context across refresh rotation. The
       // service layer keeps impersonatedById on the new session when
@@ -121,6 +138,7 @@ export async function authRoutes(
       return {
         accessToken: tokens.accessToken,
         expiresAt: tokens.accessTokenExpiresAt.toISOString(),
+        csrfToken: csrf,
         user: toMe(tokens.user, tokens.impersonation ?? null),
       };
     }
@@ -150,7 +168,36 @@ export async function authRoutes(
       await app.auth.logout(cookie);
       clearRefreshCookie(reply, cookieCfg);
       clearAccessCookie(reply, accessCookieCfg);
+      clearCsrfCookie(reply, csrfCookieCfg);
       return reply.status(204).send();
+    }
+  );
+
+  /**
+   * Issue a fresh CSRF token without rotating the session.
+   *
+   * Frontend bootstrap path: after a hard reload the access cookie may
+   * already be valid (server side) but the CSRF cookie was lost (cleared
+   * by browser, expired, or never seen because the page was opened
+   * directly with credentials from a different tab). Calling /auth/csrf
+   * returns a token the frontend can use for the next mutating call
+   * without a full re-login.
+   *
+   * Auth-required: only authenticated callers may mint a token, otherwise
+   * an attacker could harvest one before forging a request.
+   */
+  route.get(
+    "/csrf",
+    {
+      preHandler: app.requireAuth,
+      schema: {
+        response: { 200: z.object({ csrfToken: z.string() }) },
+      },
+    },
+    async (_req, reply) => {
+      const csrf = generateCsrfToken();
+      setCsrfCookie(reply, csrf, csrfCookieCfg);
+      return { csrfToken: csrf };
     }
   );
 
@@ -187,6 +234,7 @@ export async function authRoutes(
           200: z.object({
             accessToken: z.string(),
             expiresAt: z.string(),
+            csrfToken: z.string().optional(),
             user: meResponseSchema,
           }),
         },
@@ -208,9 +256,12 @@ export async function authRoutes(
       }
       setRefreshCookie(reply, result.adminTokens.refreshToken, cookieCfg);
       setAccessCookie(reply, result.adminTokens.accessToken, accessCookieCfg);
+      const csrf = generateCsrfToken();
+      setCsrfCookie(reply, csrf, csrfCookieCfg);
       return {
         accessToken: result.adminTokens.accessToken,
         expiresAt: result.adminTokens.accessTokenExpiresAt.toISOString(),
+        csrfToken: csrf,
         user: toMe(result.adminTokens.admin, null),
       };
     }
@@ -253,6 +304,7 @@ export async function authRoutes(
       await opts.adminUsers.deleteUser(u.id, u.id, "self");
       clearRefreshCookie(reply, cookieCfg);
       clearAccessCookie(reply, accessCookieCfg);
+      clearCsrfCookie(reply, csrfCookieCfg);
       return reply.status(204).send();
     }
   );

@@ -4,6 +4,9 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { Env } from "../../config/env.js";
 import {
   REFRESH_COOKIE_NAME,
+  generateCsrfToken,
+  setAccessCookie,
+  setCsrfCookie,
   setRefreshCookie,
 } from "../auth/auth.cookies.js";
 import { loginResponseSchema } from "../auth/auth.schema.js";
@@ -29,6 +32,16 @@ export async function publicInviteRoutes(
   const { invites, env } = opts;
 
   const cookieCfg = {
+    secure: env.COOKIE_SECURE,
+    domain: env.COOKIE_DOMAIN,
+    maxAgeSeconds: env.JWT_REFRESH_TTL_DAYS * 24 * 60 * 60,
+  };
+  const accessCookieCfg = {
+    secure: env.COOKIE_SECURE,
+    domain: env.COOKIE_DOMAIN,
+    maxAgeSeconds: Math.min(env.JWT_ACCESS_TTL_MIN * 60, 24 * 3600),
+  };
+  const csrfCookieCfg = {
     secure: env.COOKIE_SECURE,
     domain: env.COOKIE_DOMAIN,
     maxAgeSeconds: env.JWT_REFRESH_TTL_DAYS * 24 * 60 * 60,
@@ -79,10 +92,14 @@ export async function publicInviteRoutes(
       });
 
       setRefreshCookie(reply, tokens.refreshToken, cookieCfg);
+      setAccessCookie(reply, tokens.accessToken, accessCookieCfg);
+      const csrf = generateCsrfToken();
+      setCsrfCookie(reply, csrf, csrfCookieCfg);
 
       return reply.status(201).send({
         accessToken: tokens.accessToken,
         expiresAt: tokens.accessTokenExpiresAt.toISOString(),
+        csrfToken: csrf,
         user: toMe(tokens.user),
       });
     }

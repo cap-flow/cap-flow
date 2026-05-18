@@ -6,7 +6,9 @@ import type { Env } from "../../config/env.js";
 import { UnauthorizedError } from "../../core/errors.js";
 import {
   REFRESH_COOKIE_NAME,
+  generateCsrfToken,
   setAccessCookie,
+  setCsrfCookie,
   setRefreshCookie,
 } from "../auth/auth.cookies.js";
 import type { UserRow } from "../auth/auth.repository.js";
@@ -88,6 +90,11 @@ export async function adminUsersRoutes(
     secure: env.COOKIE_SECURE,
     domain: env.COOKIE_DOMAIN,
     maxAgeSeconds: Math.min(env.JWT_ACCESS_TTL_MIN * 60, 24 * 3600),
+  };
+  const csrfCookieCfg = {
+    secure: env.COOKIE_SECURE,
+    domain: env.COOKIE_DOMAIN,
+    maxAgeSeconds: env.JWT_REFRESH_TTL_DAYS * 24 * 60 * 60,
   };
 
   route.get(
@@ -218,6 +225,10 @@ export async function adminUsersRoutes(
       // identity. Setting the new access cookie aligns both auth
       // paths and the JS-readable bearer token to the same identity.
       setAccessCookie(reply, result.accessToken, accessCookieCfg);
+      // Rotate CSRF too — the new identity must not share the admin's
+      // pre-impersonation CSRF token, otherwise a request that the
+      // admin had prepared could be replayed as the impersonated user.
+      setCsrfCookie(reply, generateCsrfToken(), csrfCookieCfg);
       return {
         accessToken: result.accessToken,
         expiresAt: result.accessTokenExpiresAt.toISOString(),
