@@ -315,10 +315,11 @@ export class AdminUsersService {
     // Last-admin guard (applies to BOTH modes — even self-delete must
     // not leave the system without any admin).
     if (target.role === "admin") {
-      const [{ n }] = await this.db
+      const rows = await this.db
         .select({ n: sql<number>`COUNT(*)::int` })
         .from(schema.users)
         .where(eq(schema.users.role, "admin"));
+      const n = rows[0]?.n ?? 0;
       if (Number(n) <= 1) {
         throw new NotFoundError(
           "Cannot delete the only admin account — promote another user to admin first."

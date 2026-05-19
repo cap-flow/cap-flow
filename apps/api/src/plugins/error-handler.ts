@@ -78,9 +78,10 @@ export const errorHandlerPlugin = fp(async (app: FastifyInstance) => {
         ? ((error as { statusCode: number }).statusCode)
         : 0;
     if (code >= 400 && code < 600) {
+      const e = error as { code?: string; name?: string; message?: string };
       return reply.status(code).send({
-        error: (error as { code?: string }).code ?? error.name ?? "Error",
-        message: error.message ?? "Request failed.",
+        error: e.code ?? e.name ?? "Error",
+        message: e.message ?? "Request failed.",
       });
     }
 

@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import sensible from "@fastify/sensible";
+import { sql } from "drizzle-orm";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
   serializerCompiler,
@@ -382,7 +383,6 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   // Reuse the queue+connection created above for accountsService, so we
   // don't open two TCP connections to Redis for the same logical queue.
   const refreshQueue = accountsRefreshQueue;
-  const bullConn = accountsBullConn;
   const portfolioRepo = new PortfolioRepository(app.db);
 
   // The API doesn't *process* jobs — it just enqueues them on

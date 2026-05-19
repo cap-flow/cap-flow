@@ -187,7 +187,7 @@ export async function portfolioRoutes(
       const points =
         raw.length <= TARGET ? raw : downsample(raw, TARGET);
 
-      const granularity = days > 7 ? "day" : "hour";
+      const granularity: "day" | "hour" = days > 7 ? "day" : "hour";
       return {
         accountId: account.id,
         granularity,
