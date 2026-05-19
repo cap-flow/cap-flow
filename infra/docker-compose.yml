@@ -89,6 +89,10 @@ services:
       <<: *api-env
       API_HOST: 0.0.0.0
       API_PORT: 3000
+    # Host-loopback publish: caddy runs in host net-namespace and
+    # proxies to 127.0.0.1:3100. Not reachable from public interfaces.
+    ports:
+      - "127.0.0.1:3100:3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -142,6 +146,9 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-/api}
     restart: unless-stopped
+    # Host-loopback publish: caddy proxies to 127.0.0.1:8080.
+    ports:
+      - "127.0.0.1:8080:80"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
       interval: 10s
@@ -150,12 +157,16 @@ services:
       start_period: 5s
     networks: [internal]
 
+  # Caddy uses host networking so it can reach:
+  #   - 127.0.0.1:3100 (our api, published from docker to host loopback)
+  #   - 127.0.0.1:8080 (our web, same)
+  #   - 127.0.0.1:3000 (legacy host service, proxied at old.cap-flow.ru)
+  # `network_mode: host` is exclusive — `networks:` and explicit `ports:`
+  # don't apply. Caddy binds 80/443 directly on the host.
   caddy:
     image: caddy:2.8-alpine
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+    network_mode: host
     environment:
       CADDY_DOMAIN: ${CADDY_DOMAIN:-:80}
       CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-}
@@ -168,11 +179,9 @@ services:
         condition: service_healthy
       web:
         condition: service_healthy
-    networks: [internal, public]
 
 networks:
   internal:
-  public:
 
 volumes:
   postgres-data:

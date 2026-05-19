@@ -60,13 +60,37 @@ www.{$CADDY_DOMAIN} {
 	# WebSocket-less plain HTTP; Caddy does this by default but we make
 	# it explicit by NOT setting `header_up` overrides that would strip
 	# Authorization or Cookie.
+	#
+	# Upstreams point at host-loopback because the caddy container runs
+	# with `network_mode: host` (so it can also reach the legacy service
+	# on 127.0.0.1:3000 directly). api/web publish their ports on
+	# 127.0.0.1:3100 and 127.0.0.1:8080 from docker.
 	handle /api/* {
-		reverse_proxy api:3000
+		reverse_proxy 127.0.0.1:3100
 	}
 
 	handle {
-		reverse_proxy web:80
+		reverse_proxy 127.0.0.1:8080
 	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# Legacy service already running on the host at 127.0.0.1:3000. Caddy
+# terminates TLS for old.cap-flow.ru and proxies plain HTTP to it.
+# Reachable because caddy runs with `network_mode: host`.
+old.{$CADDY_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:3000
 
 	log {
 		output stdout
