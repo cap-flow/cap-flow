@@ -2,7 +2,7 @@
 # Multi-stage Dockerfile for @cap-flow/api.
 # Build context MUST be the monorepo root.
 
-ARG NODE_VERSION=20.18.1
+ARG NODE_VERSION=22.11.0
 ARG PNPM_VERSION=9.12.3
 
 # ───────────────────────────── 1. base ─────────────────────────────
