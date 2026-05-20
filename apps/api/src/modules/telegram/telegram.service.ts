@@ -145,6 +145,16 @@ export class TelegramService {
   async send(userId: string, text: string): Promise<boolean> {
     const link = await this.repo.findActiveByUser(userId);
     if (!link || link.chatId === null) return false;
+    return this.sendToChat(link.chatId, text);
+  }
+
+  /**
+   * Direct chat send — used by webhook handler before/at-link time when
+   * there's no `linked` row yet, or for system replies. Does NOT check
+   * any user-link record. Throws on HTTP failure. Returns `false` only
+   * when the bot API token isn't configured (graceful no-op).
+   */
+  async sendToChat(chatId: number, text: string): Promise<boolean> {
     const botApiToken = this.cfg.getBotApiToken()?.trim();
     if (!botApiToken) return false;
 
@@ -156,7 +166,7 @@ export class TelegramService {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: link.chatId,
+        chat_id: chatId,
         text,
         parse_mode: "Markdown",
       }),

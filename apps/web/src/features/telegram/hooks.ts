@@ -9,6 +9,14 @@ export function useTelegramStatus() {
     queryKey: KEY,
     queryFn: () => telegramApi.status(),
     staleTime: 30_000,
+    // Когда юзер только что нажал «Авторизоваться» и ждёт пока бот
+    // подтвердит /start <code> — поллим status каждые 3с, чтобы UI
+    // самостоятельно переключился с pending → linked без F5. Отключается
+    // когда state стал linked или none.
+    refetchInterval: (q) => {
+      const s = q.state.data?.state;
+      return s === "pending" ? 3000 : false;
+    },
   });
 }
 

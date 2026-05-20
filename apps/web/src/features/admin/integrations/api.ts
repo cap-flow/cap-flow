@@ -65,4 +65,20 @@ export const adminIntegrationsApi = {
       { value },
       proxyTestReportSchema,
     ),
+  /**
+   * Register webhook URL with Telegram Bot API (POST /setWebhook). One-
+   * time per bot/proxy/host change. Returns Telegram's verbatim response
+   * so admin sees `ok: true` and any `description` from Telegram.
+   */
+  setupTelegramWebhook: () =>
+    api.post(
+      "/v1/admin/telegram/setup-webhook",
+      undefined as unknown,
+      z.object({
+        ok: z.boolean(),
+        url: z.string(),
+        secretConfigured: z.boolean(),
+        telegramResponse: z.unknown(),
+      }),
+    ),
 };

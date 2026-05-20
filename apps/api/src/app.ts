@@ -105,6 +105,10 @@ import { TelegramRepository } from "./modules/telegram/telegram.repository.js";
 import { telegramRoutes } from "./modules/telegram/telegram.routes.js";
 import { TelegramService } from "./modules/telegram/telegram.service.js";
 import { TelegramProxyState } from "./modules/telegram/telegram.proxy.js";
+import {
+  telegramWebhookRoutes,
+  telegramWebhookAdminRoutes,
+} from "./modules/telegram/telegram.webhook.routes.js";
 import { passwordResetRoutes } from "./modules/auth/password-reset.routes.js";
 import { emailVerificationRoutes } from "./modules/auth/email-verification.routes.js";
 import { EmailVerificationRepository } from "./modules/auth/email-verification.repository.js";
@@ -728,6 +732,24 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(telegramRoutes, {
         service: telegramService,
         prefix: "/me/telegram",
+      });
+      // Webhook receiver for Telegram bot. No auth, validated via
+      // X-Telegram-Bot-Api-Secret-Token header (deterministic from
+      // bot token).
+      await api.register(telegramWebhookRoutes, {
+        telegram: telegramService,
+        getBotApiToken: () =>
+          process.env["TELEGRAM_BOT_API_TOKEN"]?.trim() ||
+          env.TELEGRAM_BOT_API_TOKEN,
+        prefix: "/webhooks/telegram",
+      });
+      // Admin-triggered registration of the webhook URL with Telegram.
+      await api.register(telegramWebhookAdminRoutes, {
+        getBotApiToken: () =>
+          process.env["TELEGRAM_BOT_API_TOKEN"]?.trim() ||
+          env.TELEGRAM_BOT_API_TOKEN,
+        proxyState: telegramProxyState,
+        prefix: "/admin/telegram",
       });
       await api.register(notificationsRoutes, {
         repo: notificationSubsRepo,

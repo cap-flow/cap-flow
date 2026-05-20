@@ -42,3 +42,10 @@ export function useTestCexProxy() {
     mutationFn: (value: string) => adminIntegrationsApi.testCexProxy(value),
   });
 }
+
+/** Register Telegram webhook with api.telegram.org (one-time). */
+export function useSetupTelegramWebhook() {
+  return useMutation({
+    mutationFn: () => adminIntegrationsApi.setupTelegramWebhook(),
+  });
+}

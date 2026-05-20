@@ -18,6 +18,7 @@ import { Label } from "@/components/ui/label";
 import {
   useAdminIntegrations,
   useClearIntegration,
+  useSetupTelegramWebhook,
   useTestCexProxy,
   useUpdateIntegration,
 } from "@/features/admin/integrations/hooks";
@@ -112,9 +113,41 @@ export function AdminIntegrationsPage(): JSX.Element {
                 </td>
               </tr>
             )}
-            {q.data?.map((row) => (
-              <Row key={row.key} row={row} onEdit={() => setEditing(row)} />
-            ))}
+            {(() => {
+              // Group: показываем сначала все не-telegram rows, потом
+              // отдельный "Telegram" блок с под-карточками username/
+              // token/proxy и кнопкой регистрации webhook.
+              const all = q.data ?? [];
+              const tgKeys = ["telegram", "telegram_token", "telegram_proxy"];
+              const nonTg = all.filter((r) => !tgKeys.includes(r.key));
+              const tg = tgKeys
+                .map((k) => all.find((r) => r.key === k))
+                .filter((r): r is IntegrationStatus => !!r);
+              return (
+                <>
+                  {nonTg.map((row) => (
+                    <Row
+                      key={row.key}
+                      row={row}
+                      onEdit={() => setEditing(row)}
+                    />
+                  ))}
+                  {tg.length > 0 && (
+                    <>
+                      <TelegramGroupHeader />
+                      {tg.map((row) => (
+                        <Row
+                          key={row.key}
+                          row={row}
+                          onEdit={() => setEditing(row)}
+                          nested
+                        />
+                      ))}
+                    </>
+                  )}
+                </>
+              );
+            })()}
           </tbody>
         </table>
       </div>
@@ -129,17 +162,83 @@ export function AdminIntegrationsPage(): JSX.Element {
   );
 }
 
+function TelegramGroupHeader(): JSX.Element {
+  const setup = useSetupTelegramWebhook();
+  const [result, setResult] = useState<{
+    ok: boolean;
+    description: string;
+  } | null>(null);
+
+  async function onSetup() {
+    setResult(null);
+    try {
+      const r = await setup.mutateAsync();
+      const tgResp = r.telegramResponse as
+        | { ok?: boolean; description?: string; result?: unknown }
+        | null;
+      setResult({
+        ok: !!tgResp?.ok && r.ok,
+        description:
+          (tgResp?.description as string | undefined) ??
+          (r.ok ? `Webhook зарегистрирован: ${r.url}` : "Telegram вернул ошибку"),
+      });
+    } catch (e) {
+      setResult({ ok: false, description: (e as Error).message });
+    }
+  }
+
+  return (
+    <tr className="bg-muted/40">
+      <td colSpan={7} className="px-4 py-3">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Telegram
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Username бота, API token и опциональный прокси. После того как
+              все три заданы — нажмите «Зарегистрировать webhook», чтобы бот
+              начал получать ответы пользователей.
+            </div>
+            {result && (
+              <div
+                className={`mt-1.5 text-xs ${
+                  result.ok ? "text-green-600" : "text-destructive"
+                }`}
+              >
+                {result.ok ? "✓ " : "✗ "}
+                {result.description}
+              </div>
+            )}
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void onSetup()}
+            disabled={setup.isPending}
+          >
+            {setup.isPending ? "Регистрируем…" : "Зарегистрировать webhook"}
+          </Button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 function Row({
   row,
   onEdit,
+  nested = false,
 }: {
   readonly row: IntegrationStatus;
   readonly onEdit: () => void;
+  readonly nested?: boolean;
 }) {
   const isPublic = row.envVar.startsWith("(");
   return (
     <tr className="hover:bg-card/60">
-      <td className="px-4 py-3">
+      <td className={`px-4 py-3 ${nested ? "pl-10" : ""}`}>
         <div className="font-medium text-foreground">{row.name}</div>
         <code className="font-mono text-[10px] text-muted-foreground">
           {row.envVar}

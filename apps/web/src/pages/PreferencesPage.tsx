@@ -90,14 +90,37 @@ function TelegramSection(): JSX.Element {
           </b>
         </p>
         {state === "linked" && status.data && (
-          <div className="text-sm text-muted-foreground">
-            chat_id: <code>{status.data.chatId}</code>
-            {status.data.telegramUsername && (
-              <>
-                {" · "}
-                @{status.data.telegramUsername}
-              </>
-            )}
+          <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2 text-sm">
+            <div className="font-medium text-green-700 dark:text-green-300">
+              ✓ Telegram авторизация подтверждена
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              chat_id: <code>{status.data.chatId}</code>
+              {status.data.telegramUsername && (
+                <>
+                  {" · "}
+                  @{status.data.telegramUsername}
+                </>
+              )}
+            </div>
+            <div className="mt-2 text-xs text-foreground/80">
+              Уведомления будут приходить в этот чат. Чтобы они корректно
+              отображались в карточке клиента — свяжите этот Telegram-профиль
+              со своей карточкой ниже (в разделе «Подписки» выберите типы
+              событий, которые хотите получать).
+            </div>
+          </div>
+        )}
+        {state === "pending" && (
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
+            <div className="font-medium text-amber-700 dark:text-amber-300">
+              Ожидаем подтверждение от бота…
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Откройте бот в Telegram (вкладка должна была открыться
+              автоматически) и нажмите кнопку <b>Start</b>. Этот блок
+              обновится сам, как только бот примет код.
+            </div>
           </div>
         )}
 
