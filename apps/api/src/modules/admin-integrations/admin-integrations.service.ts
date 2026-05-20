@@ -213,6 +213,21 @@ export class AdminIntegrationsService {
         usageProvider: null,
       },
       {
+        // Same pattern as cex_proxy: URL of an HTTP(S)/SOCKS proxy
+        // through which the Telegram Bot API is reached. Needed when
+        // the API server runs in a region where api.telegram.org is
+        // blocked. Format identical to CEX_HTTPS_PROXY.
+        key: "telegram_proxy",
+        name: "Telegram Bot Proxy",
+        purpose:
+          "HTTP(S) или SOCKS прокси для исходящих запросов к Telegram Bot API (api.telegram.org). Нужен когда сервер в регионе с блокировкой Telegram.",
+        envVar: "TELEGRAM_BOT_HTTPS_PROXY",
+        envValue: e.TELEGRAM_BOT_HTTPS_PROXY,
+        isPublic: false,
+        perUserQuotaPerDay: null,
+        usageProvider: null,
+      },
+      {
         // Special: this isn't an API key — it's the URL of an HTTPS
         // proxy through which Capflow routes outgoing CEX-exchange
         // traffic. Set when the API server runs in a region the

@@ -66,6 +66,20 @@ const envSchema = z.object({
   TELEGRAM_BOT_USERNAME: z.string().optional(),
   TELEGRAM_LINK_TTL_MIN: z.coerce.number().int().positive().default(15),
 
+  /**
+   * Optional HTTP(S)/SOCKS proxy for outgoing Telegram Bot API requests.
+   * Set when the API server runs in a region where api.telegram.org is
+   * geo-blocked (RU/CIS) or when corporate egress requires routing.
+   *
+   * Same format/schemes as `CEX_HTTPS_PROXY`:
+   *   http://user:pass@host:port
+   *   http://host:port
+   *   socks5://host:port
+   *
+   * Admin can override at runtime via /admin/integrations → telegram_proxy.
+   */
+  TELEGRAM_BOT_HTTPS_PROXY: z.string().optional(),
+
   // Billing (Phase 8). On beta we run the pre-generated address pool —
   // comma-separated env vars below. HD wallet rotation comes later.
   BILLING_PRICE_3M_USD: z.coerce.number().positive().default(100),

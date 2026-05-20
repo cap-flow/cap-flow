@@ -104,6 +104,7 @@ import { NotificationsService } from "./modules/notifications/notifications.serv
 import { TelegramRepository } from "./modules/telegram/telegram.repository.js";
 import { telegramRoutes } from "./modules/telegram/telegram.routes.js";
 import { TelegramService } from "./modules/telegram/telegram.service.js";
+import { TelegramProxyState } from "./modules/telegram/telegram.proxy.js";
 import { passwordResetRoutes } from "./modules/auth/password-reset.routes.js";
 import { emailVerificationRoutes } from "./modules/auth/email-verification.routes.js";
 import { EmailVerificationRepository } from "./modules/auth/email-verification.repository.js";
@@ -442,6 +443,17 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   );
   await cexProxyState.refresh();
 
+  // Optional HTTP(S)/SOCKS proxy for outgoing Telegram Bot API requests
+  // (api.telegram.org geoblocked in RU/CIS). Same DB-override → env
+  // fallback pattern as cex_proxy.
+  const telegramProxyState = new TelegramProxyState(
+    env.TELEGRAM_BOT_HTTPS_PROXY,
+    () => adminIntegrationsService.getSecret("telegram_proxy"),
+    app.log,
+  );
+  await telegramProxyState.refresh();
+  telegramService.attachProxyState(telegramProxyState);
+
   const cexRepo = new CexRepository(app.db);
   const cexService = new CexService(
     cexRepo,
@@ -671,6 +683,9 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         onKeyChanged: {
           cex_proxy: async () => {
             await cexProxyState.refresh();
+          },
+          telegram_proxy: async () => {
+            await telegramProxyState.refresh();
           },
         },
         prefix: "/admin/integrations",

@@ -2,6 +2,7 @@ import { generateInviteToken, hashToken } from "../auth/tokens.js";
 import type { AuditService } from "../audit/audit.service.js";
 
 import type { TelegramRepository, TelegramLinkRow } from "./telegram.repository.js";
+import type { TelegramProxyState } from "./telegram.proxy.js";
 
 export interface TelegramServiceConfig {
   readonly botUsername: string | undefined;
@@ -26,11 +27,24 @@ export interface StartLinkResult {
  * outgoing HTTP — without touching this service's call sites.
  */
 export class TelegramService {
+  /**
+   * Optional. Attached via `attachProxyState()` after construction so
+   * the service can be wired up before `AdminIntegrationsService` is
+   * available. When set, `send()` routes through the cached undici
+   * dispatcher so api.telegram.org is reachable from geo-blocked
+   * regions. Hot-reloaded by admin PATCH on `telegram_proxy`.
+   */
+  private proxyState: TelegramProxyState | null = null;
+
   constructor(
     private readonly repo: TelegramRepository,
     private readonly audit: AuditService,
     private readonly cfg: TelegramServiceConfig
   ) {}
+
+  attachProxyState(state: TelegramProxyState): void {
+    this.proxyState = state;
+  }
 
   /**
    * Issue (or reuse) a one-time `/start` code. Returns the raw code +
@@ -122,17 +136,23 @@ export class TelegramService {
     if (!link || link.chatId === null) return false;
     if (!this.cfg.botApiToken) return false;
 
+    const proxy = this.proxyState?.currentSync() ?? null;
+    // undici-specific `dispatcher` field is missing from the standard
+    // RequestInit type — cast via unknown so TS accepts it. Native fetch
+    // in Node ignores unknown fields, so omitting is also safe.
+    const init = {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: link.chatId,
+        text,
+        parse_mode: "Markdown",
+      }),
+      ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
+    } as unknown as RequestInit;
     const res = await fetch(
       `https://api.telegram.org/bot${this.cfg.botApiToken}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: link.chatId,
-          text,
-          parse_mode: "Markdown",
-        }),
-      }
+      init,
     );
     if (!res.ok) {
       const body = await res.text().catch(() => "<no body>");
