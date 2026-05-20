@@ -140,13 +140,20 @@ jobs:
             # 1. Pull new images (does not affect running containers).
             $COMPOSE pull api web
 
-            # 2. Backup DB before any migration. Keep last 30 pre-deploy snapshots.
-            mkdir -p backups/pre-deploy
-            $COMPOSE exec -T postgres \
-              pg_dump -U "$(grep POSTGRES_USER .env | cut -d= -f2)" \
-                      "$(grep POSTGRES_DB .env | cut -d= -f2)" \
-              | gzip > "backups/pre-deploy/$(date +%Y%m%d-%H%M%S)-${API_IMAGE##*:}.sql.gz"
-            ls -1t backups/pre-deploy/*.sql.gz | tail -n +31 | xargs -r rm
+            # 2. Backup DB before any migration. Keep last 30 pre-deploy
+            #    snapshots. Skipped on the very first deploy when
+            #    postgres hasn't been brought up yet — `exec` against
+            #    a not-running service fails the whole step otherwise.
+            if $COMPOSE ps --status running --services 2>/dev/null | grep -qx postgres; then
+              mkdir -p backups/pre-deploy
+              $COMPOSE exec -T postgres \
+                pg_dump -U "$(grep POSTGRES_USER .env | cut -d= -f2)" \
+                        "$(grep POSTGRES_DB .env | cut -d= -f2)" \
+                | gzip > "backups/pre-deploy/$(date +%Y%m%d-%H%M%S)-${API_IMAGE##*:}.sql.gz"
+              ls -1t backups/pre-deploy/*.sql.gz | tail -n +31 | xargs -r rm
+            else
+              echo "postgres not running yet — skipping pre-deploy backup"
+            fi
 
             # 3. Run migration. set -e aborts deploy if it fails — old containers stay up.
             $COMPOSE run --rm migrate
@@ -172,8 +179,25 @@ jobs:
               sleep 2
             done
 
-            # 6. Public end-to-end check via Caddy.
-            curl -fsS --retry 5 --retry-delay 2 https://cap-flow.ru/api/v1/users >/dev/null
+            # 6. Public end-to-end check via Caddy. Hit `/` (React app,
+            #    no auth) — the previous `/api/v1/users` returns 401
+            #    and `curl -f` treats that as failure. On a cold first
+            #    deploy Caddy also needs ~30–60s to obtain Let's Encrypt
+            #    certs, and `curl --retry` does NOT retry TLS-handshake
+            #    errors, so we roll our own retry loop with up to 150s
+            #    of budget and dump caddy logs on failure.
+            for i in $(seq 1 30); do
+              if curl -fsS --max-time 5 https://cap-flow.ru/ >/dev/null 2>&1; then
+                echo "✓ public smoke after ${i}x5s"
+                break
+              fi
+              if [ "$i" = "30" ]; then
+                echo "✗ public smoke failed after 150s — last 30 lines of caddy logs:"
+                $COMPOSE logs --tail=30 caddy || true
+                exit 1
+              fi
+              sleep 5
+            done
 
             rm -f .env.images.previous
             docker image prune -f
