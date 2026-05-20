@@ -89,6 +89,10 @@ services:
       <<: *api-env
       API_HOST: 0.0.0.0
       API_PORT: 3000
+    # Host-loopback publish so the host-networked caddy can reach it
+    # at 127.0.0.1:3100 without sharing the internal docker bridge.
+    ports:
+      - "127.0.0.1:3100:3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -142,6 +146,10 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-/api}
     restart: unless-stopped
+    # Host-loopback publish so the host-networked caddy can reach it
+    # at 127.0.0.1:8080 without sharing the internal docker bridge.
+    ports:
+      - "127.0.0.1:8080:80"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
       interval: 10s
@@ -153,9 +161,10 @@ services:
   caddy:
     image: caddy:2.8-alpine
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+    # Host networking so the same Caddy can also reverse-proxy the
+    # legacy node service that listens on 127.0.0.1:3000 (loopback
+    # only, outside docker). host mode forbids `ports:` and `networks:`.
+    network_mode: host
     environment:
       CADDY_DOMAIN: ${CADDY_DOMAIN:-:80}
       CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-}
@@ -168,11 +177,9 @@ services:
         condition: service_healthy
       web:
         condition: service_healthy
-    networks: [internal, public]
 
 networks:
   internal:
-  public:
 
 volumes:
   postgres-data:

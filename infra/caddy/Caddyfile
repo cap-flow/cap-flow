@@ -61,12 +61,34 @@ www.{$CADDY_DOMAIN} {
 	# it explicit by NOT setting `header_up` overrides that would strip
 	# Authorization or Cookie.
 	handle /api/* {
-		reverse_proxy api:3000
+		reverse_proxy 127.0.0.1:3100
 	}
 
 	handle {
-		reverse_proxy web:80
+		reverse_proxy 127.0.0.1:8080
 	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# Legacy node service that pre-dates cap-flow on the same VPS. It only
+# binds to 127.0.0.1:3000 (loopback), so the public path goes through
+# this Caddy instance — possible because caddy runs with
+# `network_mode: host` in docker-compose.yml.
+old.{$CADDY_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:3000
 
 	log {
 		output stdout
