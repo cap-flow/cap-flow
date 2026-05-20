@@ -40,8 +40,26 @@ function TelegramSection(): JSX.Element {
   const [issued, setIssued] = useState<TelegramStart | null>(null);
 
   async function onStart(): Promise<void> {
-    const r = await start.mutateAsync();
-    setIssued(r);
+    // Открываем placeholder синхронно ВНУТРИ user-gesture, иначе
+    // popup-blocker зарубит окно после await. Подменяем location
+    // как только бэк вернёт готовый deep-link.
+    const popup = window.open("about:blank", "_blank", "noopener");
+    try {
+      const r = await start.mutateAsync();
+      setIssued(r);
+      if (r.deepLink && popup && !popup.closed) {
+        popup.location.href = r.deepLink;
+      } else if (popup && !popup.closed) {
+        // Бот не настроен или попап заблокирован — закрываем плейсхолдер.
+        // Юзер увидит карточку с кодом ниже и сможет открыть ссылку
+        // вручную (если deepLink есть, но popup ровно нулевой —
+        // edge case старого Safari, fallback ниже сработает).
+        popup.close();
+      }
+    } catch (e) {
+      if (popup && !popup.closed) popup.close();
+      throw e;
+    }
   }
   async function onUnlink(): Promise<void> {
     await unlink.mutateAsync();
@@ -55,9 +73,9 @@ function TelegramSection(): JSX.Element {
       <CardHeader>
         <CardTitle>Telegram</CardTitle>
         <CardDescription>
-          Привяжите Telegram, чтобы получать алерты в чат. Бот сейчас в
-          разработке — код вы получите, но сообщения начнут приходить, когда
-          мы запустим бот.
+          Привяжите Telegram, чтобы получать алерты в чат. По кнопке ниже
+          откроется новая вкладка с готовой ссылкой авторизации —
+          подтвердите в боте, и канал заработает.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -85,24 +103,34 @@ function TelegramSection(): JSX.Element {
 
         {issued && (
           <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
-            <div className="font-medium">Код активации (одноразовый):</div>
-            <code className="break-all">{issued.code}</code>
             {issued.deepLink ? (
-              <div className="mt-2">
-                <a
-                  href={issued.deepLink}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary hover:underline"
-                >
-                  Открыть в Telegram
-                </a>
-              </div>
+              <>
+                <div className="font-medium">
+                  Вкладка с авторизацией открыта в Telegram.
+                </div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  Если вкладка не открылась автоматически —{" "}
+                  <a
+                    href={issued.deepLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    откройте ссылку вручную
+                  </a>
+                  . Код одноразовый, действует ограниченное время:{" "}
+                  <code className="break-all">{issued.code}</code>
+                </div>
+              </>
             ) : (
-              <div className="mt-2 text-xs text-muted-foreground">
-                Бот пока не настроен — сохраните код, мы свяжемся для
-                ручной активации.
-              </div>
+              <>
+                <div className="font-medium">Код активации (одноразовый):</div>
+                <code className="break-all">{issued.code}</code>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  Бот пока не настроен — сохраните код, мы свяжемся для
+                  ручной активации.
+                </div>
+              </>
             )}
           </div>
         )}
@@ -116,7 +144,9 @@ function TelegramSection(): JSX.Element {
               onClick={() => void onStart()}
               disabled={start.isPending}
             >
-              {start.isPending ? "Генерируем код…" : "Получить код активации"}
+              {start.isPending
+                ? "Готовим ссылку…"
+                : "Авторизоваться в Telegram"}
             </Button>
           )}
           {state !== "none" && (
