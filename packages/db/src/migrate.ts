@@ -59,6 +59,14 @@ async function main(): Promise<void> {
       const conn = await pool.connect();
       try {
         await conn.query("BEGIN");
+        // 0000_baseline.sql sets `search_path = ''` at session scope,
+        // which leaks across the pooled connection. Migrations 0001–0016
+        // worked around it by writing `public.tablename` everywhere;
+        // 0017+ stopped doing so and would otherwise crash on cold start
+        // with "no schema has been selected to create in". `SET LOCAL`
+        // is transaction-scoped, so it doesn't undo the baseline intent
+        // and doesn't require touching the SQL files themselves.
+        await conn.query("SET LOCAL search_path = public, pg_catalog");
         await conn.query(sql);
         await conn.query(
           "INSERT INTO public.__migrations (filename) VALUES ($1)",
