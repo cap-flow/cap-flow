@@ -40,26 +40,14 @@ function TelegramSection(): JSX.Element {
   const [issued, setIssued] = useState<TelegramStart | null>(null);
 
   async function onStart(): Promise<void> {
-    // Открываем placeholder синхронно ВНУТРИ user-gesture, иначе
-    // popup-blocker зарубит окно после await. Подменяем location
-    // как только бэк вернёт готовый deep-link.
-    const popup = window.open("about:blank", "_blank", "noopener");
-    try {
-      const r = await start.mutateAsync();
-      setIssued(r);
-      if (r.deepLink && popup && !popup.closed) {
-        popup.location.href = r.deepLink;
-      } else if (popup && !popup.closed) {
-        // Бот не настроен или попап заблокирован — закрываем плейсхолдер.
-        // Юзер увидит карточку с кодом ниже и сможет открыть ссылку
-        // вручную (если deepLink есть, но popup ровно нулевой —
-        // edge case старого Safari, fallback ниже сработает).
-        popup.close();
-      }
-    } catch (e) {
-      if (popup && !popup.closed) popup.close();
-      throw e;
-    }
+    // Просто запрашиваем deep-link у сервера. НЕ открываем попап
+    // программно: window.open блокируется popup-blocker'ами, sandboxed
+    // preview-окружениями (Claude Preview разрешает только localhost),
+    // и в любом случае требует второй клик пользователя на «доверить».
+    // Вместо этого после получения deepLink рендерим прямую <a>-кнопку
+    // CTA — нативный <a target="_blank"> работает в любом окружении.
+    const r = await start.mutateAsync();
+    setIssued(r);
   }
   async function onUnlink(): Promise<void> {
     await unlink.mutateAsync();
@@ -111,50 +99,58 @@ function TelegramSection(): JSX.Element {
             </div>
           </div>
         )}
-        {state === "pending" && (
+        {state === "pending" && !issued && (
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
+            <div className="font-medium text-amber-700 dark:text-amber-300">
+              Не завершённая привязка
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Вы начинали привязку Telegram, но не подтвердили /start в
+              боте. Нажмите «Авторизоваться в Telegram» ниже — будет
+              сгенерирована новая одноразовая ссылка.
+            </div>
+          </div>
+        )}
+        {state === "pending" && issued && (
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
             <div className="font-medium text-amber-700 dark:text-amber-300">
               Ожидаем подтверждение от бота…
             </div>
             <div className="mt-1 text-xs text-muted-foreground">
-              Откройте бот в Telegram (вкладка должна была открыться
-              автоматически) и нажмите кнопку <b>Start</b>. Этот блок
-              обновится сам, как только бот примет код.
+              Нажмите <b>Start</b> в боте Telegram. Этот блок обновится сам
+              в течение нескольких секунд после подтверждения.
             </div>
           </div>
         )}
 
-        {issued && (
+        {issued && issued.deepLink && state !== "linked" && (
+          <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-3 text-sm">
+            <div className="font-medium">Ссылка готова — откройте бот:</div>
+            <a
+              href={issued.deepLink}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-2 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
+            >
+              Открыть бот в Telegram →
+            </a>
+            <div className="mt-2 text-xs text-muted-foreground">
+              Откроется новая вкладка / Telegram-приложение. Внутри нажмите
+              кнопку <b>Start</b> — этот блок обновится автоматически.
+              <br />
+              Код одноразовый:{" "}
+              <code className="break-all">{issued.code}</code>
+            </div>
+          </div>
+        )}
+        {issued && !issued.deepLink && (
           <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
-            {issued.deepLink ? (
-              <>
-                <div className="font-medium">
-                  Вкладка с авторизацией открыта в Telegram.
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  Если вкладка не открылась автоматически —{" "}
-                  <a
-                    href={issued.deepLink}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary hover:underline"
-                  >
-                    откройте ссылку вручную
-                  </a>
-                  . Код одноразовый, действует ограниченное время:{" "}
-                  <code className="break-all">{issued.code}</code>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="font-medium">Код активации (одноразовый):</div>
-                <code className="break-all">{issued.code}</code>
-                <div className="mt-2 text-xs text-muted-foreground">
-                  Бот пока не настроен — сохраните код, мы свяжемся для
-                  ручной активации.
-                </div>
-              </>
-            )}
+            <div className="font-medium">Код активации (одноразовый):</div>
+            <code className="break-all">{issued.code}</code>
+            <div className="mt-2 text-xs text-muted-foreground">
+              Бот пока не настроен — попросите админа подключить
+              TELEGRAM_BOT_USERNAME в /admin/integrations.
+            </div>
           </div>
         )}
 

@@ -2,6 +2,8 @@ import { useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Eye,
   EyeOff,
   Pencil,
@@ -33,6 +35,9 @@ import { PageHeader } from "./_PageHeader";
 export function AdminIntegrationsPage(): JSX.Element {
   const q = useAdminIntegrations();
   const [editing, setEditing] = useState<IntegrationStatus | null>(null);
+  // Telegram-секция раскрывающаяся: дефолтно collapsed чтобы 3 sub-row'а
+  // не загромождали таблицу для админов которые её не настраивают.
+  const [tgExpanded, setTgExpanded] = useState(false);
 
   const configured = q.data?.filter((i) => i.configured).length ?? 0;
   const total = q.data?.length ?? 0;
@@ -134,15 +139,20 @@ export function AdminIntegrationsPage(): JSX.Element {
                   ))}
                   {tg.length > 0 && (
                     <>
-                      <TelegramGroupHeader />
-                      {tg.map((row) => (
-                        <Row
-                          key={row.key}
-                          row={row}
-                          onEdit={() => setEditing(row)}
-                          nested
-                        />
-                      ))}
+                      <TelegramGroupHeader
+                        expanded={tgExpanded}
+                        onToggle={() => setTgExpanded((v) => !v)}
+                        rowCount={tg.length}
+                      />
+                      {tgExpanded &&
+                        tg.map((row) => (
+                          <Row
+                            key={row.key}
+                            row={row}
+                            onEdit={() => setEditing(row)}
+                            nested
+                          />
+                        ))}
                     </>
                   )}
                 </>
@@ -162,25 +172,43 @@ export function AdminIntegrationsPage(): JSX.Element {
   );
 }
 
-function TelegramGroupHeader(): JSX.Element {
+function TelegramGroupHeader({
+  expanded,
+  onToggle,
+  rowCount,
+}: {
+  readonly expanded: boolean;
+  readonly onToggle: () => void;
+  readonly rowCount: number;
+}): JSX.Element {
   const setup = useSetupTelegramWebhook();
   const [result, setResult] = useState<{
     ok: boolean;
     description: string;
   } | null>(null);
 
-  async function onSetup() {
+  async function onSetup(e: React.MouseEvent) {
+    e.stopPropagation(); // не схлопывать секцию при клике на кнопку
     setResult(null);
     try {
       const r = await setup.mutateAsync();
       const tgResp = r.telegramResponse as
-        | { ok?: boolean; description?: string; result?: unknown }
+        | {
+            ok?: boolean;
+            description?: string;
+            result?: unknown;
+            error?: string;
+          }
         | null;
+      // Сначала наш собственный error (token не задан / localhost / proxy fail)
+      // — он самый информативный. Затем Telegram description. Затем generic.
+      const message =
+        tgResp?.error ??
+        tgResp?.description ??
+        (r.ok ? `Webhook зарегистрирован: ${r.url}` : "Telegram вернул ошибку");
       setResult({
         ok: !!tgResp?.ok && r.ok,
-        description:
-          (tgResp?.description as string | undefined) ??
-          (r.ok ? `Webhook зарегистрирован: ${r.url}` : "Telegram вернул ошибку"),
+        description: message,
       });
     } catch (e) {
       setResult({ ok: false, description: (e as Error).message });
@@ -188,34 +216,50 @@ function TelegramGroupHeader(): JSX.Element {
   }
 
   return (
-    <tr className="bg-muted/40">
+    <tr
+      className="cursor-pointer bg-muted/40 hover:bg-muted/60"
+      onClick={onToggle}
+      aria-expanded={expanded}
+    >
       <td colSpan={7} className="px-4 py-3">
         <div className="flex items-center justify-between gap-4">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Telegram
+          <div className="flex items-start gap-2">
+            <div className="mt-0.5 text-muted-foreground">
+              {expanded ? (
+                <ChevronDown className="h-4 w-4" />
+              ) : (
+                <ChevronRight className="h-4 w-4" />
+              )}
             </div>
-            <div className="text-xs text-muted-foreground">
-              Username бота, API token и опциональный прокси. После того как
-              все три заданы — нажмите «Зарегистрировать webhook», чтобы бот
-              начал получать ответы пользователей.
-            </div>
-            {result && (
-              <div
-                className={`mt-1.5 text-xs ${
-                  result.ok ? "text-green-600" : "text-destructive"
-                }`}
-              >
-                {result.ok ? "✓ " : "✗ "}
-                {result.description}
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Telegram{" "}
+                <span className="ml-1 font-normal normal-case text-foreground/60">
+                  · {rowCount} {rowCount === 1 ? "поле" : "поля"}
+                </span>
               </div>
-            )}
+              <div className="text-xs text-muted-foreground">
+                Username бота, API token и опциональный прокси. После того как
+                все три заданы — нажмите «Зарегистрировать webhook», чтобы бот
+                начал отвечать на /start.
+              </div>
+              {result && (
+                <div
+                  className={`mt-1.5 text-xs ${
+                    result.ok ? "text-green-600" : "text-destructive"
+                  }`}
+                >
+                  {result.ok ? "✓ " : "✗ "}
+                  {result.description}
+                </div>
+              )}
+            </div>
           </div>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => void onSetup()}
+            onClick={(e) => void onSetup(e)}
             disabled={setup.isPending}
           >
             {setup.isPending ? "Регистрируем…" : "Зарегистрировать webhook"}
