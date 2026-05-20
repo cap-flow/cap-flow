@@ -377,7 +377,13 @@ function applyMovementsToBalances(
         }
       }
     } else {
-      if (!options.skipCostBasis && cur.amount > 0) {
+      // Safety: cur.amount > 0 недостаточно — после длинной цепочки
+      // float-arithmetic операций он может стать 1e-50 при cost basis
+      // в $миллионах, давая avg = $1e60 → realized PnL = $1e99 (overflow
+      // viewable как «+1.9 × 10⁹⁹ $»). Минимальный порог 1e-9 покрывает
+      // legit микро-движения (gas, sat-level dust) и блокирует numerical
+      // blow-ups.
+      if (!options.skipCostBasis && cur.amount > 1e-9) {
         // Снимаем cost basis пропорционально (weighted average).
         const avg = cur.costBasisUsd / cur.amount;
         const portionCost = avg * m.amount;
@@ -391,13 +397,37 @@ function applyMovementsToBalances(
         if (typeof m.usd === "number") {
           const realized = m.usd - portionCost;
           // Маленькие шумы (rounding) на стейблах подавляем — ниже $0.01 не важно.
-          if (Math.abs(realized) > 0.01) {
+          // Sanity bound: realized > $1B на одной op — это почти точно
+          // numerical blow-up или scam-token с inflated price. Дроп с warn.
+          if (!Number.isFinite(realized)) {
+            if (typeof window !== "undefined") {
+              console.warn(
+                `[reducer] non-finite realized PnL for ${m.symbol} in ${op.hash}: ` +
+                  `avg=${avg}, amount=${m.amount}, m.usd=${m.usd}`,
+              );
+            }
+          } else if (Math.abs(realized) > 1_000_000_000) {
+            if (typeof window !== "undefined") {
+              console.warn(
+                `[reducer] suspicious realized PnL ${realized.toExponential(2)} ` +
+                  `for ${m.symbol} (${op.hash}) — likely scam token or numerical issue, skipping`,
+              );
+            }
+          } else if (Math.abs(realized) > 0.01) {
             realizedBySymbol[m.symbol] =
               (realizedBySymbol[m.symbol] ?? 0) + realized;
           }
         }
       }
       cur.amount -= m.amount;
+      // Дополнительная защита: после вычитания amount может стать
+      // sub-dust ε из-за float-arithmetic. Округляем к 0 чтобы будущий
+      // `cur.amount > 1e-9` check работал предсказуемо.
+      if (Math.abs(cur.amount) < 1e-9) {
+        cur.amount = 0;
+        // costBasis тоже сбрасываем чтобы не оставлять "висящий" cost для 0 amount
+        cur.costBasisUsd = 0;
+      }
     }
     balances.set(key, cur);
   }

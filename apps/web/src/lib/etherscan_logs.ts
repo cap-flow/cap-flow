@@ -156,6 +156,106 @@ function decodeUint256(hex: string): bigint {
   return BigInt(hex);
 }
 
+// ───────────────────────────────────────────────────────────────────────
+//  Token transfers via `account/tokentx` endpoint
+//
+//  Используется для audit'а lending позиций: получаем все Mint/Burn events
+//  aToken'а на адрес юзера. В отличие от `getLogs`, этот endpoint фильтрует
+//  по address ↔ contract автоматически (нет multi-topic ограничений) и
+//  возвращает уже распарсенные fields (from, to, value, hash, timeStamp).
+// ───────────────────────────────────────────────────────────────────────
+
+export interface EtherscanTokenTransfer {
+  /** Tx hash. */
+  hash: string;
+  /** Unix seconds. */
+  timeStamp: number;
+  /** Block number. */
+  blockNumber: number;
+  /** From address (0x0 = mint). */
+  from: string;
+  /** To address (0x0 = burn). */
+  to: string;
+  /** Raw value (uint256 в native units). Делить на 10^tokenDecimal. */
+  value: string;
+  /** Decimals от Etherscan API. */
+  tokenDecimal: number;
+}
+
+/**
+ * Запросить все Token Transfers для (contractAddress, walletAddress) пары
+ * через Etherscan v2 `account/tokentx` endpoint.
+ *
+ * Возвращает массив сверху-вниз (sort=asc, старые first). Ограничение
+ * Etherscan: 10 000 транзакций (pagination не реализована — для наших
+ * целей aToken'ов вряд ли нужна).
+ */
+export async function fetchEtherscanTokenTransfers(
+  chainCode: string,
+  contractAddress: string,
+  walletAddress: string,
+  apikey: string,
+): Promise<EtherscanTokenTransfer[]> {
+  const chainId = CHAIN_TO_ID[chainCode.toLowerCase()];
+  if (!chainId) throw new Error(`Etherscan: unknown chain ${chainCode}`);
+  // S3: apikey ignored — backend injects its own.
+  void apikey;
+
+  const params = new URLSearchParams({
+    chainid: chainId.toString(),
+    module: "account",
+    action: "tokentx",
+    contractaddress: contractAddress,
+    address: walletAddress,
+    sort: "asc",
+  });
+  const url = `${PROXY}/v2/api?${params.toString()}`;
+  const res = await apiFetch(url);
+  if (!res.ok) {
+    throw new Error(`Etherscan HTTP ${res.status}: ${await res.text()}`);
+  }
+  const json = await res.json() as {
+    status: string;
+    message: string;
+    result:
+      | string
+      | Array<{
+          hash: string;
+          timeStamp: string;
+          blockNumber: string;
+          from: string;
+          to: string;
+          value: string;
+          tokenDecimal: string;
+        }>;
+  };
+  if (json.status !== "1") {
+    if (typeof json.result === "string" && json.result.includes("No transactions")) {
+      return [];
+    }
+    if (Array.isArray(json.result) && json.result.length === 0) {
+      return [];
+    }
+    if (
+      typeof json.result === "string" &&
+      json.result.includes("Free API access is not supported")
+    ) {
+      throw new EtherscanChainNotSupportedError(chainCode);
+    }
+    throw new Error(`Etherscan tokentx: ${json.message} ${json.result}`);
+  }
+  if (!Array.isArray(json.result)) return [];
+  return json.result.map((r) => ({
+    hash: r.hash,
+    timeStamp: Number(r.timeStamp),
+    blockNumber: Number(r.blockNumber),
+    from: r.from.toLowerCase(),
+    to: r.to.toLowerCase(),
+    value: r.value,
+    tokenDecimal: Number(r.tokenDecimal),
+  }));
+}
+
 /** Pad uint256 → 64 hex chars + '0x' prefix (для topic encoding). */
 export function uint256ToTopic(value: bigint): string {
   return "0x" + value.toString(16).padStart(64, "0");

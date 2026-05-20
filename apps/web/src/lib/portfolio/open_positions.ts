@@ -55,7 +55,17 @@ import { isReceiptLessProtocol, isReceiptOfProtocol } from "./token_roles";
 import { supplyAmountsHash } from "./position_overrides";
 import { buildCostBasisTracker, CostBasisTracker } from "./cost_basis_tracker";
 import { buildLotTrackerFromOps } from "./lots/build";
+import { PerWalletLotTrackerView } from "./lots/compat";
 import type { LotTracker } from "./lots/lot_tracker";
+
+/**
+ * UCB C5: union type для tracker'ов — legacy `CostBasisTracker` (cumulative
+ * WAC без CEX/manual/bridge overrides) или `PerWalletLotTrackerView`
+ * (legacy 2-arg API над новым `LotTracker` с full UCB-обогащением).
+ * Оба имеют одинаковый shape для `avgAt`/`currentAvg`/`currentAmount`,
+ * downstream-функции работают с любым.
+ */
+type LotTrackerLike = CostBasisTracker | PerWalletLotTrackerView;
 import { readPipelineSettings } from "./pipeline_settings";
 import type { LiveSnapshot, LiveProtocolPosition } from "./live";
 import type { ClassifiedOp, ProtocolInfo, TokenMovement } from "./types";
@@ -105,6 +115,18 @@ export interface OpenPositionToken {
   symbol: string;
   /** Кол-во в позиции сейчас (live). */
   amount: number;
+  /**
+   * Начальное кол-во токена, реально внесённое в позицию (сумма по
+   * lend_supply / lp_add tx за текущий открытый цикл, минус частичные
+   * выводы). Источник данных тот же, что у `startUsd`:
+   *   - LotTracker `consumed.amount` (приоритет) — replays ops через
+   *     UCB-пайплайн, даёт точное «сколько токенов user внёс».
+   *   - `cycleDeposit.amount` — fallback, агрегат out-movements по
+   *     протоколу/chain в текущем цикле.
+   *   - `amount` (live) — last-resort если ни один tracker не нашёл
+   *     deposit ops (нишевой протокол / неполная история).
+   */
+  startAmount: number;
   /** Текущая стоимость в $ (live: amount × current_price). */
   currentUsd: number;
   /** Средневзвешенная покупочная цена ($ за единицу) или null. */
@@ -177,6 +199,26 @@ export interface OpenPosition {
   supplyTokens: OpenPositionToken[];
   /** Токены в borrow (для lending). */
   debtTokens: { symbol: string; amount: number; usd: number }[];
+
+  /**
+   * Реально внесённые в позицию активы — то, что user signed в
+   * deposit-tx'ах (как они называются в блокчейне). Отличается от
+   * `supplyTokens` тем, что `supplyTokens` приходит из `live.supply` =
+   * декомпозиция receipt-токена (для GMX V2 GM / Morpho-GLV / Fluid
+   * fVLT API раскладывает 1 GM на условные 0.5 ETH + 1500 USDC).
+   *
+   * Правила выбора per supply/lp_add op:
+   *   1. OUT-side movement с `isProtocolToken=true` (collateral-receipt
+   *      переложен в другой протокол, e.g. GLV → Morpho).
+   *   2. Иначе IN-side movement с `isProtocolToken=true` (минт receipt'а
+   *      из underlying, e.g. USDC → GM в GMX V2 deposit).
+   *   3. Иначе OUT-side обычное движение (Aave/Fluid/Compound: ETH/WBTC/USDC).
+   *
+   * Aggregation: amounts суммируются по symbol через multiple deposit
+   * tx'ы; partial withdraw'ы не вычитаются (это semantics «начально
+   * вложено», не «сейчас в позиции»).
+   */
+  openedInTokens: { symbol: string; amount: number; tokenId?: string }[];
 
   /** Σ usd по supplyTokens.startUsd — сумма входа (gross collateral cost). */
   startUsd: number;
@@ -411,6 +453,32 @@ interface BuildOptions {
    * как и в `newTrackers.lotsByWallet` (single source of truth).
    */
   costBasisOverrideByHash?: ReadonlyMap<string, number>;
+  /**
+   * Universal on-chain audit для всех lending positions (Aave V3, Spark,
+   * Compound V3, …). Когда задан, `computeFees` для supply_yield использует
+   * `netDeposited` из этой map'ы вместо `depositAmountSum(ops, ...)` —
+   * это устраняет ложный yield от пропущенных DeBank supply tx (см. POS-008:
+   * 0.069 WBTC ghost yield = $5 282).
+   *
+   * Ключ: `${chain}|${walletAddress.toLowerCase()}|${underlyingTokenId.toLowerCase()}`
+   * (как `lendingAuditKey` из `lib/lending/use_lending_audit.ts`).
+   * Value содержит netDeposited (= Σ mint − Σ burn receipt-token'а) напрямую
+   * с цепи через Etherscan tokentx.
+   *
+   * Поддержка протоколов определяется через `lib/lending/receipt_registry.ts`
+   * (резолв receipt-token address). Unsupported protocols → entry отсутствует,
+   * `computeFees` fallback на ops-derived sum.
+   */
+  lendingAuditByKey?: ReadonlyMap<
+    string,
+    {
+      netDeposited: number;
+      totalMinted: number;
+      totalBurned: number;
+      mintTxHashes: readonly string[];
+      earliestMintTime: number | null;
+    }
+  >;
 }
 
 /**
@@ -473,14 +541,28 @@ function findFirstOpen(
   relax: boolean = false,
 ): { time: number; hash: string } | null {
   // Сортируем хронологически.
+  // Delegation-mint bypass: op.notes['delegation-mint'] выставляется
+  // классификатором для smart-account / EIP-7702 mint-ов, где DeBank
+  // не отдал project_id и наш fallback rule 11 создал synthetic op.
+  // Для них:
+  //   - op.type может быть 'lp_add' (если notes уже применён к op_type)
+  //     ИЛИ 'unknown' (если server сихнул со старым classifier'ом и
+  //     notes-only остался на jsonb-уровне).
+  //   - opMatchesLpMarket strict-фейлится: movement.tokenId = NFT-instance-id,
+  //     а lpTokenId = адрес NFT-manager-контракта.
+  // Поэтому для таких ops пропускаем оба ограничения.
   const sorted = ops
     .filter(
-      (op) =>
-        op.status !== "failed" &&
-        op.protocol?.id === protocolId &&
-        op.chain === chain &&
-        (OPEN_TYPES.has(op.type) || CLOSE_TYPES.has(op.type)) &&
-        opMatchesLpMarket(op, lpTokenId),
+      (op) => {
+        if (op.status === "failed") return false;
+        if (op.protocol?.id !== protocolId) return false;
+        if (op.chain !== chain) return false;
+        const isDelegation = op.notes?.includes("delegation-mint");
+        if (isDelegation) return true;
+        if (!(OPEN_TYPES.has(op.type) || CLOSE_TYPES.has(op.type))) return false;
+        if (!opMatchesLpMarket(op, lpTokenId)) return false;
+        return true;
+      },
     )
     .sort((a, b) => a.time - b.time);
 
@@ -606,7 +688,7 @@ function currentCostBasisForPosition(
    * операции где цена сильно изменилась). Это **универсальная asset-centric
    * методика**: каждый депозит атрибутируется к WAC актива на момент депозита.
    */
-  lotTracker?: import("./cost_basis_tracker").CostBasisTracker,
+  lotTracker?: LotTrackerLike,
   /**
    * Исторические цены DefiLlama — для случаев когда у tracker нет WAC
    * по конкретному символу (transfer_in без предыдущей покупки). Использует
@@ -845,7 +927,7 @@ function currentCycleDepositForSymbol(
    * (WAC $3141), market price был $2114 — старая логика брала $4713
    * (market), теперь берёт $7000 (real cost). См. cost_basis_tracker.ts.
    */
-  tracker?: CostBasisTracker,
+  tracker?: LotTrackerLike,
 ): { amount: number; usd: number } {
   const target = normalizeSymbol(symbol);
   let amount = 0;
@@ -940,6 +1022,17 @@ function computePositionConsumedCostFromLots(
   lpTokenId: string | undefined,
   histPrices: Map<string, number>,
   costBasisOverrideByHash?: ReadonlyMap<string, number>,
+  /**
+   * UCB C5 Phase C: shared LotTracker от ucb_pipeline (single source of
+   * truth). Когда передан — `wacAt(walletId, symbol, op.time)` читается
+   * напрямую без локального ребилда. Это O(target_supplies) вместо
+   * O(target_supplies × all_ops) — perf win, plus полная консистентность
+   * с lot-by-lot popup display (тот тоже читает из shared tracker).
+   *
+   * Fallback на inline rebuild сохранён для backward-compat (тесты, ad-hoc
+   * вызовы без `lotsByWallet`).
+   */
+  sharedLotTracker?: LotTracker,
 ): { amount: number; usd: number } {
   // Step-by-step walker: для каждого supply op в эту позицию ловим WAC
   // в момент supply (BEFORE consume removes lots). Это даёт TRUE historical
@@ -990,16 +1083,22 @@ function computePositionConsumedCostFromLots(
       );
 
     if (isTargetSupply) {
-      // BEFORE applying this op, build tracker через incremental ops so far.
-      const trackerNow = buildLotTrackerFromOps(incrementalOps, {
-        walletId,
-        histPrices,
-        ...(costBasisOverrideByHash &&
-          costBasisOverrideByHash.size > 0 && {
-            costBasisOverrideByHash: new Map(costBasisOverrideByHash),
-          }),
-      });
-      const wac = trackerNow.wacAt(walletId, symbol, op.time);
+      // UCB C5 Phase C: предпочитаем shared LotTracker. Если не передан —
+      // fallback на inline rebuild с incrementalOps (legacy O(n²) путь).
+      let wac: number | null;
+      if (sharedLotTracker) {
+        wac = sharedLotTracker.wacAt(walletId, symbol, op.time);
+      } else {
+        const trackerNow = buildLotTrackerFromOps(incrementalOps, {
+          walletId,
+          histPrices,
+          ...(costBasisOverrideByHash &&
+            costBasisOverrideByHash.size > 0 && {
+              costBasisOverrideByHash: new Map(costBasisOverrideByHash),
+            }),
+        });
+        wac = trackerNow.wacAt(walletId, symbol, op.time);
+      }
 
       for (const m of op.movement) {
         if (m.direction !== "out" || m.amount <= 0) continue;
@@ -1155,6 +1254,15 @@ function computeFees(
   ops: ClassifiedOp[],
   currentPrices: Map<string, number>,
   ageDays: number | null,
+  /**
+   * Опциональный override для `depositAmountSum` per (symbol). Когда задан —
+   * на этот ключ используется on-chain truth (Σ mint − Σ burn aToken'а) вместо
+   * ops-derived sum. Источник: `useAaveLendingAudit` hook. Снимает класс багов
+   * от неполного DeBank history (POS-008 ghost yield).
+   *
+   * Map keyed by normalized symbol (UPPERCASE).
+   */
+  onChainDepositedBySymbol?: Map<string, number>,
 ): {
   feesUsd: number;
   source: "v3_rewards" | "supply_yield";
@@ -1201,9 +1309,24 @@ function computeFees(
     const byToken: OpenPosition["feesByToken"] = [];
     const accruedDiag: string[] = [];
     for (const s of lp.supply) {
-      const deposited = depositAmountSum(ops, lp.protocolId, s.symbol, lp.chain);
+      const opsDeposited = depositAmountSum(ops, lp.protocolId, s.symbol, lp.chain);
+      // On-chain audit override: если есть, используем authoritative netDeposited
+      // вместо ops-derived (которая может быть неполная из-за пропущенных
+      // DeBank tx). Применяется только когда on-chain net > ops-derived
+      // (т.е. ops пропустили какие-то supplies). Обратное (on-chain < ops) —
+      // подозрительно: может означать что ops содержат позиции которые
+      // на цепи фактически уже сняты, или другие artifacts; fallback на ops.
+      const symKey = normalizeSymbol(s.symbol);
+      const onChainNet = onChainDepositedBySymbol?.get(symKey);
+      const deposited =
+        onChainNet != null && onChainNet > opsDeposited
+          ? onChainNet
+          : opsDeposited;
       accruedDiag.push(
-        `${s.symbol}: current=${s.amount.toFixed(4)} net_deposited=${deposited.toFixed(4)}`,
+        `${s.symbol}: current=${s.amount.toFixed(4)} net_deposited=${deposited.toFixed(4)}` +
+          (onChainNet != null
+            ? ` (on-chain=${onChainNet.toFixed(4)}, ops=${opsDeposited.toFixed(4)})`
+            : ""),
       );
       if (deposited <= 0) continue;
       const accrued = s.amount - deposited;
@@ -1389,9 +1512,27 @@ export function buildOpenPositions(
   const histPrices = options?.histPrices ?? new Map<string, number>();
   const v3MintPoolPrices = options?.v3MintPoolPrices;
   const v3MintCgPrices = options?.v3MintCgPrices;
+
+  // UCB C5: cost-basis tracker source-of-truth.
+  // 1. Если caller передал `lotsByWallet` (новый LotTracker из ucb_pipeline) —
+  //    используем его напрямую (full UCB: CEX inheritance, manual annotations,
+  //    bridge propagation, D6 reward income).
+  // 2. Иначе — fallback на legacy `buildCostBasisTracker` (cumulative WAC без
+  //    overrides). Это backward-compat для callers'ов, ещё не подключённых
+  //    к provider'ского newTrackers (e.g. unit tests, ad-hoc analytics).
+  //
+  // depositUsdFromOp / currentCostBasisForPosition / fallbackUsdFromOpen внутри
+  // принимают `LotTrackerLike` (либо новый LotTracker, либо legacy
+  // CostBasisTracker через shim) — переход прозрачный, divergence устраняется.
+  const lotsByWallet = options?.lotsByWallet;
   const trackerByWallet = new Map<string, CostBasisTracker>();
-  for (const l of loaded) {
-    trackerByWallet.set(l.wallet.id, buildCostBasisTracker(l.ops, histPrices));
+  if (!lotsByWallet) {
+    for (const l of loaded) {
+      trackerByWallet.set(
+        l.wallet.id,
+        buildCostBasisTracker(l.ops, histPrices),
+      );
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -1466,6 +1607,7 @@ export function buildOpenPositions(
         lp,
         l,
         trackerByWallet,
+        lotsByWallet,
         currentPrices,
         histPrices,
         v3MintHash,
@@ -1473,6 +1615,7 @@ export function buildOpenPositions(
         v3MintCgPrices,
         consumedSet,
         options?.costBasisOverrideByHash,
+        options?.lendingAuditByKey,
       );
       if (built) all.push(built);
     }
@@ -1729,6 +1872,13 @@ function buildOne(
   lp: LiveProtocolPosition,
   loaded: BuildInput,
   trackerByWallet: Map<string, CostBasisTracker>,
+  /**
+   * UCB C5: per-wallet LotTracker (от ucb_pipeline). Если задан — используется
+   * вместо legacy `trackerByWallet[walletId]`. Адаптация через
+   * `PerWalletLotTrackerView` сохраняет 2-arg avgAt/currentAvg API для
+   * downstream без правки depositUsdFromOp / currentCostBasisForPosition.
+   */
+  lotsByWallet: Map<string, LotTracker> | undefined,
   currentPrices: Map<string, number>,
   histPrices: Map<string, number>,
   /**
@@ -1755,6 +1905,13 @@ function buildOne(
    * LotTracker (с теми же overrides как `newTrackers.lotsByWallet`).
    */
   costBasisOverrideByHash?: ReadonlyMap<string, number>,
+  /**
+   * On-chain audit для Aave V3 lending позиций (см. BuildOptions.lendingAuditByKey).
+   * Передаётся в `computeFees` чтобы переопределить `depositAmountSum` на
+   * authoritative on-chain Σ mint − Σ burn aToken'а. Это закрывает класс
+   * багов от неполного DeBank history (POS-008 0.069 WBTC ghost yield).
+   */
+  lendingAuditByKey?: BuildOptions["lendingAuditByKey"],
 ): OpenPosition | null {
   const { wallet, ops } = loaded;
   if (lp.supply.length === 0) return null;
@@ -1890,7 +2047,20 @@ function buildOne(
     );
   }
 
-  const tracker = trackerByWallet.get(wallet.id);
+  // UCB C5: cost-basis tracker для этого wallet'а.
+  // Если caller передал `lotsByWallet` (новый LotTracker от ucb_pipeline) —
+  // адаптируем его через PerWalletLotTrackerView (per-wallet view с
+  // legacy `avgAt`/`currentAvg` API). Иначе — используем legacy tracker.
+  // Результат downstream одинаковый: depositUsdFromOp читает WAC через
+  // `tracker.avgAt(symbol, time)`. Эта проводка устраняет divergence
+  // между newTrackers (UCB single-source-of-truth) и legacy CostBasisTracker
+  // которая давала ошибку $220 на POS-005 и $2k на POS-007 swap'ах.
+  const tracker = lotsByWallet?.get(wallet.id)
+    ? new PerWalletLotTrackerView(
+        lotsByWallet.get(wallet.id)!,
+        wallet.id,
+      )
+    : trackerByWallet.get(wallet.id);
 
   // V3-style concentrated liquidity → отдельная механика с IL.
   const v3 = isV3LpProtocol(lp.protocolName)
@@ -1976,6 +2146,11 @@ function buildOne(
     // **ПРИОРИТЕТ 3**: avgAtOpen × s.amount — last-resort если ни один
     // tracker не has data.
     const overrideByHash = costBasisOverrideByHash;
+    // UCB C5 Phase C: используем shared LotTracker если доступен (от
+    // ucb_pipeline через lotsByWallet). Это устраняет inline ребилд
+    // на каждый supply event и гарантирует, что lot-by-lot popup и
+    // position summary читают одинаковый WAC.
+    const sharedLot = lotsByWallet?.get(wallet.id);
     const lotConsumed = isStable
       ? { amount: 0, usd: 0 }
       : computePositionConsumedCostFromLots(
@@ -1988,6 +2163,7 @@ function buildOne(
           filterLpTokenId,
           histPrices,
           overrideByHash,
+          sharedLot,
         );
 
     if (
@@ -2029,6 +2205,17 @@ function buildOne(
           : s.usd;
       priceSource = "fallback";
     }
+    // Начальное кол-во токенов в позиции — берём из того же источника,
+    // что и startUsd, чтобы числа были консистентны. Приоритет = lot
+    // tracker (точные consumed amount'ы), иначе cycleDeposit, иначе
+    // live `s.amount` как last-resort (значит нет deposit-history).
+    const startAmount =
+      lotConsumed.amount > 0
+        ? lotConsumed.amount
+        : cycleDeposit.amount > 0
+          ? cycleDeposit.amount
+          : s.amount;
+
     // Нормализуем tokenId: убираем chain prefix ("arb:0x..." → "0x...")
     // и suffix ":lending"/":vault" — нужно для on-chain lookup'ов.
     const rawTid = s.tokenId;
@@ -2040,6 +2227,7 @@ function buildOne(
     return {
       symbol: s.symbol,
       amount: s.amount,
+      startAmount,
       currentUsd: s.usd,
       avgBuyPrice: isStable ? 1 : (avgAtOpen ?? null),
       startUsd,
@@ -2145,7 +2333,7 @@ function buildOne(
     (t) => !outSymbolsInCycle.has(normalizeSymbol(t.symbol)),
   );
   const isSingleAggregated = hasSyntheticSupply && positionLevelDeposit > 0;
-  const startUsd = v3
+  let startUsd = v3
     ? v3.depositUsd
     : isSingleAggregated
       ? positionLevelDeposit
@@ -2163,7 +2351,24 @@ function buildOne(
     : null;
 
   // Fees / supply-yield.
-  const fees = computeFees(lp, ops, currentPrices, ageDays);
+  // Построить on-chain deposited override per symbol (для supply_yield в Aave)
+  let onChainDepositedBySymbol: Map<string, number> | undefined;
+  if (lendingAuditByKey) {
+    const m = new Map<string, number>();
+    for (const s of lp.supply) {
+      if (!s.tokenId) continue;
+      const addr = s.tokenId.includes(":")
+        ? s.tokenId.split(":").pop()!
+        : s.tokenId;
+      const auditKey = `${lp.chain}|${wallet.address.toLowerCase()}|${addr.toLowerCase()}`;
+      const entry = lendingAuditByKey.get(auditKey);
+      if (entry != null && entry.netDeposited > 0) {
+        m.set(normalizeSymbol(s.symbol), entry.netDeposited);
+      }
+    }
+    if (m.size > 0) onChainDepositedBySymbol = m;
+  }
+  const fees = computeFees(lp, ops, currentPrices, ageDays, onChainDepositedBySymbol);
   const feesUsd = fees?.feesUsd ?? null;
   const feesSource = fees?.source ?? null;
   const feesByToken: OpenPosition["feesByToken"] = fees?.byToken ?? [];
@@ -2184,6 +2389,7 @@ function buildOne(
     lp.chain,
     histPrices,
     livePairKey,
+    opened?.time ?? null,
   );
   // Детализация по claim'ам — для popup с хронологией.
   const feesClaimedHistory = buildClaimedFeesHistory(
@@ -2200,6 +2406,223 @@ function buildOne(
     startUsd > 0 && ageDays && ageDays > 0
       ? (feesLifetimeUsd / startUsd) * (365 / ageDays) * 100
       : null;
+
+  // ──── «В чём открыли (токен)» — реально внесённые активы из supply tx ────
+  // Отличается от `supplyTokens` (live decomposition): берём OUT-side из
+  // chain_op'ов, чтобы корректно показать GLV для Morpho-c-GLV-collateral
+  // или GM для GMX V2 LP, а не их underlying декомпозицию (WETH+USDC).
+  //
+  // Правила (применяются per supply/lp_add op):
+  //   1. OUT-side `isProtocolToken=true` → collateral-receipt deposit
+  //      (e.g. GLV кладётся в Morpho-маркет).
+  //   2. Иначе IN-side `isProtocolToken=true` → минт receipt'а из
+  //      underlying (e.g. user supplies USDC → получает GM в GMX V2).
+  //   3. Иначе OUT-side обычный underlying (Aave/Fluid/Compound: ETH/WBTC/USDC).
+  //
+  // Дебт-receipts (variableDebt*/stableDebt*) и Aave supply receipts
+  // (aArbXxx) исключаем — это accounting-токены, не настоящий deposit.
+  const isAccountingToken = (sym: string): boolean =>
+    /^variableDebt|^stableDebt/i.test(sym) || /^a[A-Z][a-zA-Z]/.test(sym);
+  // Execution-fee micro-amounts (GMX V2 executionFee ≈ 0.00003-0.0002 ETH
+  // в каждой deposit-tx). Это оплата keeper'у, не часть deposit'а.
+  const isGasMicroAmount = (m: {
+    symbol: string;
+    amount: number;
+    usd: number | null;
+  }): boolean =>
+    (m.symbol === "ETH" || m.symbol === "WETH") &&
+    m.amount < 0.01 &&
+    (m.usd ?? 0) < 100;
+  // Receipt-less протоколы (Morpho Blue, Drift, Adrena) не имеют
+  // lpTokenId, совпадающего с asset movements, — там tokenId = market
+  // contract, а movements = underlying GLV/WBTC/USDC. Для них filter
+  // выдаст 0; пропускаем filter и матчим только по (protocol, chain).
+  // Для остальных (Fluid vaults, GMX markets, V3 NFT pairs) filter
+  // обязателен, иначе ops разных sub-positions cross-pollute друг друга.
+  const isReceiptLess = isReceiptLessProtocol(lp.protocolId, lp.protocolName);
+  // V3 NFT-positions делят ОДИН общий контракт NFT-manager'а (UNI-V3-POS)
+  // — `filterLpTokenId` сматчит ВСЕ NFT'ы пары вместо одного. Уникальным
+  // идентификатором конкретной NFT является `v3MintOpHash` (= hash mint-tx).
+  // Если задан — scope'им к этой одной mint-tx (это семантически correct
+  // для «Внесено при ОТКРЫТИИ»: subsequent increase-liquidity — доливки,
+  // а не открытие).
+  //
+  // Без этой проверки bob POS-002 (UniV3 arb ETH+ARB NFT) показывал
+  // 3.700 WETH вместо 2.373 — потому что в openedInTokens протекали
+  // OUT-движения из POS-001 (1.327 WETH) и POS-003 (0.778 WETH) того же
+  // UNI-V3-POS контракта.
+  const isV3 = isV3LpProtocol(lp.protocolName);
+  const matchingOps = ops.filter((op) => {
+    if (op.status === "failed") return false;
+    if (!op.protocol) return false;
+    const idMatch = op.protocol.id === lp.protocolId;
+    const nameMatch =
+      op.protocol.name &&
+      lp.protocolName &&
+      op.protocol.name.toLowerCase() === lp.protocolName.toLowerCase();
+    if (!idMatch && !nameMatch) return false;
+    if (op.chain !== lp.chain) return false;
+    if (op.time < cycleStart) return false;
+    const isDelegationMintOp = op.notes?.includes("delegation-mint");
+    if (
+      op.type !== "lp_add" &&
+      op.type !== "lend_supply" &&
+      !isDelegationMintOp
+    )
+      return false;
+    // V3 NFT: scope to mint-tx only (when discriminator известен).
+    if (isV3 && v3MintOpHash) {
+      return op.hash === v3MintOpHash;
+    }
+    // Delegation-mint bypass: smart-account / EIP-7702 wrapped tx'ы
+    // имеют tokenId = NFT-instance-id, не контракт-адрес NFT manager'а.
+    // Поэтому opMatchesLpMarket(op, filterLpTokenId) для них всегда false.
+    // Для них пропускаем strict filter — notes "delegation-mint" — это
+    // достаточный признак того, что op принадлежит этой позиции.
+    if (
+      !isReceiptLess &&
+      !isDelegationMintOp &&
+      filterLpTokenId &&
+      !opMatchesLpMarket(op, filterLpTokenId)
+    )
+      return false;
+    return true;
+  });
+
+  // Global 2-pass pick: даём ОДИН primary asset family для всей
+  // позиции, а не per-op (без этого GMX V2 LP давал {USDC + GM},
+  // хотя позиция семантически в GM; см. user feedback 2026-05-19).
+  //
+  // Приоритет: deposited-receipt (e.g. GLV→Morpho) → minted-receipt
+  // (e.g. USDC→GM в GMX) → plain underlyings (e.g. ETH→Aave).
+  const aggregate = (
+    movements: Array<{
+      symbol: string;
+      amount: number;
+      tokenId: string | null;
+    }>,
+  ): Map<string, { amount: number; tokenId?: string }> => {
+    const m = new Map<string, { amount: number; tokenId?: string }>();
+    for (const mv of movements) {
+      const cur = m.get(mv.symbol) ?? {
+        amount: 0,
+        ...(mv.tokenId ? { tokenId: mv.tokenId } : {}),
+      };
+      cur.amount += mv.amount;
+      m.set(mv.symbol, cur);
+    }
+    return m;
+  };
+  const collect = (
+    pred: (m: typeof matchingOps[number]["movement"][number]) => boolean,
+  ) =>
+    matchingOps.flatMap((op) =>
+      op.movement.filter(pred).map((m) => ({
+        symbol: m.symbol,
+        amount: m.amount,
+        tokenId: m.tokenId ?? null,
+      })),
+    );
+
+  // Helper: NFT-style receipt-markers (e.g. Fluid fVLT — `amount=1`,
+  // `usd=null`). Это маркер позиции, не fungible value-bearing токен.
+  // Реальные fungible receipts (GLV, GM) имеют USD-цену и большое
+  // количество. Без этого фильтра Fluid lending ETH/WBTC показывал бы
+  // «fVLT 1» вместо underlying.
+  const isNftPositionMarker = (m: {
+    amount: number;
+    usd: number | null;
+  }): boolean => (m.usd == null || m.usd < 1) && m.amount <= 10;
+
+  // Pass 1: OUT-side protocol-tokens (collateral-receipt deposits).
+  let openedInMap = aggregate(
+    collect(
+      (m) =>
+        m.direction === "out" &&
+        m.amount > 0 &&
+        m.isProtocolToken &&
+        !isAccountingToken(m.symbol) &&
+        !isGasMicroAmount(m) &&
+        !isNftPositionMarker(m),
+    ),
+  );
+  // Pass 2: IN-side protocol-tokens (minted receipts).
+  if (openedInMap.size === 0) {
+    openedInMap = aggregate(
+      collect(
+        (m) =>
+          m.direction === "in" &&
+          m.amount > 0 &&
+          m.isProtocolToken &&
+          !isAccountingToken(m.symbol) &&
+          !isGasMicroAmount(m) &&
+          !isNftPositionMarker(m),
+      ),
+    );
+  }
+  // Pass 3: OUT-side underlyings (no receipt at all).
+  if (openedInMap.size === 0) {
+    openedInMap = aggregate(
+      collect(
+        (m) =>
+          m.direction === "out" &&
+          m.amount > 0 &&
+          !isAccountingToken(m.symbol) &&
+          !isGasMicroAmount(m),
+      ),
+    );
+  }
+  const openedInTokens = Array.from(openedInMap.entries()).map(([symbol, v]) => {
+    // Нормализуем tokenId как для supplyTokens.tokenId.
+    const cleanTid = v.tokenId
+      ? v.tokenId
+          .replace(/^[a-z]{2,6}:/i, "")
+          .replace(/:[a-z][a-z0-9_-]+$/i, "")
+      : undefined;
+    return {
+      symbol,
+      amount: v.amount,
+      ...(cleanTid && { tokenId: cleanTid }),
+    };
+  });
+
+  // ─── openedInUsd: USD из chain_op.m.usd ровно тех же mint-движений ───
+  // Считаем по той же фильтрации, что openedInTokens — суммируем m.usd
+  // OUT-движений матчащих ops. Используем для consistency между
+  // «Внесено токенов» и «Стартовая $».
+  //
+  // Также флаг `hasDelegationMint`: если хоть один из matching ops был
+  // классифицирован через rule 11 (delegation-mint без project_id), то
+  // `buildV3Details` не сможет прочитать pool slot0 (Alchemy не знает
+  // про этот mint) → fallback на DefiLlama даёт drift $5-30 на $14k.
+  // В этом случае `openedInUsd` (= chain-op m.usd на момент tx) — это
+  // АВТОРИТЕТНАЯ цена из реестра операций.
+  let openedInUsd = 0;
+  let hasDelegationMint = false;
+  for (const op of matchingOps) {
+    if (op.notes?.includes("delegation-mint")) hasDelegationMint = true;
+    for (const m of op.movement) {
+      if (m.direction !== "out" || m.amount <= 0) continue;
+      if (isAccountingToken(m.symbol)) continue;
+      if (isGasMicroAmount(m)) continue;
+      // Skip protocol-token IN unless it's pass-1 collateral receipt
+      // (e.g. GLV→Morpho — counts). For V3 mints, UNI-V3-POS is IN, not
+      // OUT, so it's already excluded by direction filter.
+      if (m.usd != null && m.usd > 0) openedInUsd += m.usd;
+    }
+  }
+
+  // Override startUsd для delegation-mint позиций (POS-009 case).
+  // Причина: buildV3Details для delegation-mint не может прочитать slot0
+  // (Alchemy не индексирует smart-account / EIP-7702 mints), и fallback
+  // через DefiLlama hourly-bucket даёт drift $5-30 на $14k позиции
+  // ($190 на $3.8k у bob's POS-009). m.usd из chain_op — это точная
+  // цена на момент tx, совпадает с тем, что показывается в реестре
+  // операций. Использование openedInUsd обеспечивает consistency между
+  // «Внесено токенов» и «Стартовая $».
+  if (hasDelegationMint && openedInUsd > 0) {
+    startUsd = openedInUsd;
+  }
 
   // instanceId — стабильный per-position discriminator. Для V3 NFT и других
   // multi-position-в-одном-пуле случаев нужен, чтобы override'ы (credit
@@ -2232,6 +2655,7 @@ function buildOne(
       amount: b.amount,
       usd: b.usd,
     })),
+    openedInTokens,
     startUsd,
     // UCB D7: net cost basis с учётом borrow leg. Для no-borrow позиций
     // netStartUsd === startUsd.
@@ -2317,6 +2741,15 @@ function computeClaimedFeesUsd(
    * fee'и.
    */
   livePairKey?: string,
+  /**
+   * Время открытия позиции. Если задано — claim_rewards с op.time < openedTime
+   * пропускаются. Это критично для V3 LP: если у юзера была закрытая
+   * WETH/USDT позиция ранее, её fee'и не должны приписываться к новой
+   * WETH/USDT позиции того же протокола+chain (bob POS-007: до 8.02 18:14
+   * был fee collect от прошлой NFT на $704.57 — приписался к новой как
+   * "ghost fee").
+   */
+  openedTime?: number | null,
 ): number {
   let total = 0;
   for (const op of ops) {
@@ -2325,6 +2758,7 @@ function computeClaimedFeesUsd(
     if (op.type !== "claim_rewards") continue;
     if (!op.protocol || op.protocol.id !== protocolId) continue;
     if (op.chain !== chain) continue;
+    if (openedTime != null && op.time < openedTime) continue;
     if (livePairKey != null) {
       const meaningful = op.movement.filter(
         (m) => m.direction === "in" && m.amount > 0 && !m.isProtocolToken,
@@ -2393,6 +2827,7 @@ function buildClaimedFeesHistory(
     if (op.type !== "claim_rewards") continue;
     if (!op.protocol || op.protocol.id !== protocolId) continue;
     if (op.chain !== chain) continue;
+    if (openedTime != null && op.time < openedTime) continue;
     if (livePairKey != null) {
       const meaningful = op.movement.filter(
         (m) => m.direction === "in" && m.amount > 0 && !m.isProtocolToken,
@@ -2634,6 +3069,10 @@ function buildInferredPositions(
         supplyTokens.push({
           symbol: tok.symbol,
           amount: tok.amount,
+          // Для inferred candidates у нас нет отдельной истории supply
+          // events — fallback на текущее `amount` (это и есть «остаток»,
+          // ничего точнее не доступно).
+          startAmount: tok.amount,
           currentUsd: tok.usd,
           avgBuyPrice: tok.amount > 0 ? tok.usd / tok.amount : null,
           startUsd: tok.usd,
@@ -2677,6 +3116,14 @@ function buildInferredPositions(
         instanceId: cand.openHash,
         supplyTokens,
         debtTokens: [],
+        // Для inferred-history позиций (без сопоставленной live entry)
+        // нет отдельной supply-tx истории — fallback на supplyTokens
+        // (что фактически осталось в позиции).
+        openedInTokens: supplyTokens.map((t) => ({
+          symbol: t.symbol,
+          amount: t.startAmount,
+          ...(t.tokenId && { tokenId: t.tokenId }),
+        })),
         startUsd,
         // UCB D7: inferred-history positions без debt — net == gross.
         netStartUsd: startUsd,

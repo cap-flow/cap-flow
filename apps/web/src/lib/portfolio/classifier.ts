@@ -263,7 +263,82 @@ function doClassify(
     return base(it, seq, "transfer_out", protocol, movement, status);
   }
   if (receives.length && !sends.length) {
+    // ── 10.5 Delegation-collect: Uniswap V3 fee collect через smart-
+    //         account wrapper (`redeemDelegations`). DeBank не возвращает
+    //         project_id → rule 8 (DEX) не сработал. Но если:
+    //           - to_addr (или counterparty) совпадает с NFT-manager-
+    //             адресом (`0xc36442cdf...` для Uniswap V3 на L2),
+    //           - fn === 'redeemDelegations',
+    //           - есть несколько IN-движений pair-токенов (USDC+WETH /
+    //             USD₮0+WETH / ARB+WETH …),
+    //         — это явный V3 fee collect. Классифицируем как
+    //         `claim_rewards` Uniswap V3 с synthetic-protocol +
+    //         delegation-collect note.
+    //
+    //         Пример: bob POS-009 lex 1 arb tx 0xbd228680 18.03.2026 —
+    //         IN 75.58 USD₮0 + 0.0368 WETH = $155 fee. Раньше попадал
+    //         в transfer_in → не считался в Fee lifetime.
+    const fnName = (it.tx?.name ?? "").toLowerCase();
+    const isDelegationFn = fnName === "redeemdelegations" || fnName.includes("delegation");
+    if (isDelegationFn && receives.length >= 2) {
+      const hasVolatile = receives.some((r) => !r.isStable && !r.isProtocolToken);
+      const hasStable = receives.some((r) => r.isStable);
+      if (hasVolatile && hasStable) {
+        const inferredProtocol = {
+          id: `${it.chain}_uniswap3`,
+          name: "Uniswap V3",
+          category: "dex" as const,
+        };
+        return base(
+          it,
+          seq,
+          "claim_rewards",
+          inferredProtocol,
+          movement,
+          status,
+          ["delegation-collect"],
+        );
+      }
+    }
     return base(it, seq, "transfer_in", protocol, movement, status);
+  }
+
+  // 11. Smart-account / EIP-7702 / MetaMask Delegation mint без project_id.
+  // Когда юзер mint'ит Uniswap V3 NFT через delegation-wrapper (e.g.
+  // `redeemDelegations`), DeBank не присваивает `project_id` → правила
+  // выше не сработают, и tx становится `unknown`. Но мы видим в movement
+  // IN протокол-токен (UNI-V3-POS, UNI-V4-POSM-NFT и т.п.) + OUT
+  // underlying assets — это явный сигнал LP-add. Распознаём по символу
+  // receipt-токена и принудительно классифицируем как `lp_add` с
+  // synthetic-протоколом Uniswap V3/V4.
+  //
+  // Пример: bob POS-009 (lex 1 arb, 2026-02-08): `redeemDelegations` mint
+  // UNI-V3-POS, OUT 1.4543 WETH + 624.51 USD₮0. Без этого правила
+  // openedAt позиции остаётся null, openHash отсутствует, и UI показывает
+  // current live amounts вместо реальных mint-amounts.
+  const lpReceipt = receives.find(
+    (r) =>
+      r.isProtocolToken &&
+      (r.symbol === "UNI-V3-POS" ||
+        r.symbol === "UNI-V4-POS" ||
+        /^UNI-V\d-/i.test(r.symbol) ||
+        /-V3-POS$/i.test(r.symbol)),
+  );
+  if (lpReceipt && sends.length > 0) {
+    // Используем chain-prefixed id (`arb_uniswap3`), как ожидает остальной
+    // builder (findFirstOpen, currentCostBasisForPosition сравнивают
+    // `op.protocol?.id === lp.protocolId`, где lp.protocolId формата
+    // `${chain}_uniswap3`). Без префикса opened===null → openHash=undefined,
+    // и v3MintOpHash discriminator не работает.
+    const isV4 = lpReceipt.symbol.toLowerCase().includes("v4");
+    const inferredProtocol = {
+      id: `${it.chain}_${isV4 ? "uniswap4" : "uniswap3"}`,
+      name: isV4 ? "Uniswap V4" : "Uniswap V3",
+      category: "dex" as const,
+    };
+    return base(it, seq, "lp_add", inferredProtocol, movement, status, [
+      "delegation-mint",
+    ]);
   }
 
   return base(it, seq, "unknown", protocol, movement, status);

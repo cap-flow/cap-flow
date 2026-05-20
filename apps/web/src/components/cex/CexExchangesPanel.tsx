@@ -67,6 +67,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { CexApiKeyInstructionsCard } from "@/components/cex/CexApiKeyInstructionsCard";
 
 /**
  * Surface server-side ValidationError details. The api-client throws an
@@ -1702,6 +1703,24 @@ function ConnectExchangeForm({
           placeholder="Main / Trading / etc."
           autoComplete="off"
         />
+      </div>
+
+      <div className="sm:col-span-2">
+        <details className="group rounded border border-border bg-background/40">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium hover:bg-accent/30">
+            📖 Как создать read-only API-ключ для {EXCHANGE_LABELS[exchange]}?
+            <span className="ml-2 text-muted-foreground group-open:hidden">
+              (раскрыть инструкцию)
+            </span>
+          </summary>
+          <div className="border-t border-border p-3">
+            <CexApiKeyInstructionsCard
+              exchangeId={exchange}
+              asCard={false}
+              compact={false}
+            />
+          </div>
+        </details>
       </div>
 
       <div className="space-y-1.5 sm:col-span-2">

@@ -84,10 +84,18 @@ import {
   totalAssetsOf,
   type OpenPosition,
 } from "@/lib/portfolio/open_positions";
+import { warnOnProvenanceIssues } from "@/lib/portfolio/position_provenance";
+import {
+  hasAnyLotsForToken,
+  isSpamWalletToken,
+} from "@/lib/portfolio/spam_token_filter";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
 import { useV3HistoricalPoolPrices } from "@/lib/v3/use_historical_prices";
 import { useV3Positions } from "@/lib/v3/hook";
 import { useV3LiquidityEvents } from "@/lib/v3/use_liquidity_events";
+import { useLendingAudit } from "@/lib/lending/use_lending_audit";
+import { isLendingAuditEnabled } from "@/lib/portfolio/feature_flags";
+import { useResolvedFeatureFlag } from "@/features/feature-flags/hooks";
 import { applyV3CostBasisOverride } from "@/lib/portfolio/v3_cost_basis_override";
 import { applyLendingCostBasisOverride } from "@/lib/portfolio/lending_cost_basis_override";
 import { useLotMethodology } from "@/lib/lot_methodology";
@@ -171,7 +179,7 @@ function portfolioGroupOf(symbol: string): { key: string; label: string } {
 
 export function HomePage(): JSX.Element {
   const { locale } = useI18n();
-  const { loadedById, internalHashes } = useLoadedWallets();
+  const { loadedById, internalHashes, newTrackers } = useLoadedWallets();
   // F2: auto-redirect новых users на onboarding wizard. Один раз per device
   // (флаг в localStorage). Если user уже завершил или пропустил — не редирект.
   const homeNavigate = useNavigate();
@@ -284,6 +292,21 @@ export function HomePage(): JSX.Element {
   // приближение даёт 2-5% drift у активов с разными LT.
   const aaveReserveConfigs = useAaveReserveConfigs(loadedList, alchemyKey);
 
+  // Универсальный on-chain audit для всех lending positions (Aave V3,
+  // Spark, Compound V3, …) — закрывает класс багов от неполного DeBank
+  // history (POS-008 ghost yield $5 282).
+  const lendingAuditHook = useLendingAudit(
+    loadedList,
+    alchemyKey,
+    etherscanKey,
+  );
+  // Server-side feature flag (с client localStorage fallback). Админ
+  // управляет через /admin/feature-flags: user-scope → account → global.
+  const lendingAuditFlag = useResolvedFeatureFlag(
+    "capflow.feature.lendingAudit",
+  );
+  const lendingAuditOn = lendingAuditFlag.enabled || isLendingAuditEnabled();
+
   // Строим OpenPosition[] и применяем ручные оверрайды (currentValueUsd / feesUsd)
   // — ровно так же, как делает «Лист открытых позиций». Иначе метрики (особенно
   // дивиденды) разойдутся с тем, что пользователь видит там.
@@ -294,8 +317,25 @@ export function HomePage(): JSX.Element {
         ops: l.ops,
         ...(l.live !== undefined && { live: l.live }),
       })),
-      { histPrices, v3MintPoolPrices: v3MintPoolPrices.data },
+      {
+        histPrices,
+        v3MintPoolPrices: v3MintPoolPrices.data,
+        // UCB C5: используем shared LotTracker от ucb_pipeline.
+        lotsByWallet: newTrackers.lotsByWallet,
+        // On-chain audit для Aave V3 supply yield. Gated через server-flag
+        // (с client-fallback) — admin рискатывает выборочно.
+        ...(lendingAuditOn && {
+          lendingAuditByKey: lendingAuditHook.data,
+        }),
+      },
     );
+    // Provenance integrity check (dev console)
+    {
+      const opsByWalletId = new Map(
+        loadedList.map((l) => [l.wallet.id, l.ops as readonly typeof l.ops[number][]]),
+      );
+      warnOnProvenanceIssues(raw, opsByWalletId);
+    }
     const withOverrides = raw.map((p) => {
       const symbols = p.supplyTokens.map((t) => t.symbol);
       const instanceId = p.instanceId;
@@ -371,6 +411,9 @@ export function HomePage(): JSX.Element {
     v3CostBasisHook.data,
     v3PositionsHook.data,
     lotMethodology,
+    lendingAuditHook.data,
+    newTrackers.lotsByWallet,
+    lendingAuditOn,
   ]);
 
   const m = useMemo(
@@ -535,6 +578,13 @@ export function HomePage(): JSX.Element {
         // учтены в `protocolsAssetUsd` через DeFi-позиции — иначе donut
         // double-count'ит. Их видно в Кошельке отдельной секцией «Расписки».
         if (isProtocolToken(t.symbol)) continue;
+        // Scam airdrop filter: токен с inflated DeBank price которого нет
+        // в LotTracker (никогда не приобретался) — высокая вероятность
+        // scam-airdrop'а (ETHG/AICC/DOG/FT). Без фильтра 2M ETHG × $0.25
+        // даёт фейковую долю 717% в портфеле.
+        const tracker = newTrackers.lotsByWallet.get(l.wallet.id);
+        const hasLots = hasAnyLotsForToken(tracker, l.wallet.id, t.symbol);
+        if (isSpamWalletToken(t.symbol, t.usd, hasLots)) continue;
         addRaw(t.symbol, t.usd);
       }
     }
@@ -583,7 +633,7 @@ export function HomePage(): JSX.Element {
           .sort((a, b) => b.usd - a.usd),
       }))
       .sort((a, b) => b.usd - a.usd);
-  }, [loadedList, m.protocols, m.totalAssetsUsd, assetCompositions, snapshotMetrics]);
+  }, [loadedList, m.protocols, m.totalAssetsUsd, assetCompositions, snapshotMetrics, newTrackers.lotsByWallet]);
 
   // Известные символы — для autocomplete в диалоге состава.
   const knownSymbols = useMemo(() => {
@@ -638,6 +688,7 @@ export function HomePage(): JSX.Element {
                 : m.walletUsd) + cexUsd
             }
             cexUsd={cexUsd}
+            defiAssetUsd={m.protocolsAssetUsd}
             cexAccounts={cexValuationQ.data?.perAccount ?? []}
             usdRub={usdRub}
             locale={locale}
@@ -2481,6 +2532,7 @@ function WalletBalancesBlock({
   loadedList,
   totalUsd,
   cexUsd = 0,
+  defiAssetUsd = 0,
   cexAccounts = [],
   usdRub,
   locale,
@@ -2493,6 +2545,13 @@ function WalletBalancesBlock({
    *  Already included in `totalUsd` — passed separately so we can show
    *  a small breakdown "+ CEX $X" under the headline number. */
   cexUsd?: number;
+  /** USD стоимость всех DeFi позиций (Aave/Compound/Uniswap V3/Fluid/...).
+   *  Источник: `m.protocolsAssetUsd` из metrics — он суммирует currentUsd
+   *  всех positions из DeBank `complex_protocol_list`. Сюда входят: lending
+   *  aTokens, Uniswap V3 NFT, Fluid vaults, GMX V2 GM/GLV, всё.
+   *  Раньше виджет считал DeFi total из `byChain.receipts` — это покрывало
+   *  только aTokens (Aave/Compound), пропуская Uniswap V3 + Fluid + GMX. */
+  defiAssetUsd?: number;
   /** Per-CEX-account valuation. Each entry rendered as its own
    *  accordion section after the on-chain chain groups. */
   cexAccounts?: ReadonlyArray<{
@@ -2788,13 +2847,19 @@ function WalletBalancesBlock({
     //     mem-tokens, can't be valued, and user wants them gone by
     //     default. They reappear when «Показать пыль» is toggled.
     if (cexShowDust) return byWallet;
-    return byWallet.map((a) => {
-      const isDust = (x: { priceUsd: number | null; valueUsd: number }) =>
-        x.priceUsd == null || x.valueUsd < CEX_DUST_USD;
-      const dustCount = a.assets.filter(isDust).length;
-      const visible = a.assets.filter((x) => !isDust(x));
-      return { ...a, assets: visible, dustCount };
-    });
+    return byWallet
+      .map((a) => {
+        const isDust = (x: { priceUsd: number | null; valueUsd: number }) =>
+          x.priceUsd == null || x.valueUsd < CEX_DUST_USD;
+        const dustCount = a.assets.filter(isDust).length;
+        const visible = a.assets.filter((x) => !isDust(x));
+        return { ...a, assets: visible, dustCount };
+      })
+      // M-design: скрываем CEX-аккаунты у которых ни одного асcета выше
+      // dust threshold (обычно пустые / только-что подключённые биржи).
+      // Раньше UI показывал «BingX 5 без цены $0,07» — захламляло виджет.
+      // Пустые биржи юзер может управлять в /registry.
+      .filter((a) => a.totalUsd >= CEX_DUST_USD || a.assets.length > 0);
   }, [cexAccounts, walletFilter, sourceFilter, cexShowDust]);
 
   const activeFilterCount =
@@ -2816,6 +2881,16 @@ function WalletBalancesBlock({
   const { loadAll, busyId } = useLoadedWallets();
   const navigate = useNavigate();
   const isEmpty = walletsCount === 0;
+
+  // DeFi total приходит из props (`defiAssetUsd` = m.protocolsAssetUsd).
+  // Это authoritative — суммирует все DeFi позиции (Aave, Compound, Fluid,
+  // Uniswap V3 NFT, GMX V2, etc.) из DeBank `complex_protocol_list`.
+  //
+  // Раньше виджет считал DeFi total как Σ receipts/lp_vault chain-groups —
+  // это покрывало только wallet-tokens-representing-positions (aTokens),
+  // пропуская Uniswap V3 LP / Fluid / GMX (≈ $50k для bob'а).
+  const freeCapitalUsd = totalUsd;
+  const totalCapitalUsd = freeCapitalUsd + defiAssetUsd;
 
   return (
     <div className="relative flex flex-col self-start overflow-hidden rounded-2xl border border-border bg-card shadow-lg ring-1 ring-white/5 animate-in fade-in slide-in-from-bottom-2 duration-500 dark:bg-slate-950/60 dark:ring-cyan-400/5">
@@ -2867,10 +2942,10 @@ function WalletBalancesBlock({
           </button>
         </div>
 
-        {/* Большой баланс */}
+        {/* Большой баланс — общий капитал (свободные + DeFi) */}
         <div className={compact ? "mt-2.5" : "mt-4"}>
           <div className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-            Общий баланс
+            Общий капитал
           </div>
           <div
             className={cn(
@@ -2878,39 +2953,73 @@ function WalletBalancesBlock({
               compact ? "text-xl" : "text-3xl",
             )}
           >
-            <AnimatedNumber value={totalUsd} format={(v) => formatUsd(v, locale)} />
+            <AnimatedNumber
+              value={totalCapitalUsd}
+              format={(v) => formatUsd(v, locale)}
+            />
           </div>
           <div className="text-[10px] tabular-nums text-muted-foreground">
-            ≈ {formatRub(totalUsd * usdRub, locale)}
+            ≈ {formatRub(totalCapitalUsd * usdRub, locale)}
           </div>
-          {cexUsd > 0 && (
-            <div
-              className="mt-0.5 text-[10px] tabular-nums text-brand-cyan/90"
-              title="Включает балансы подключённых CEX-бирж (Bybit/OKX/Bitget/MEXC/BingX). Управляется в Реестре."
-            >
-              · вкл. {formatUsd(cexUsd, locale)} на CEX
-            </div>
-          )}
-          {/* Раньше здесь был warning «⚠ N активов без цены: …» —
-              скрыт по запросу пользователя (2026-05-14): сами токены
-              уже фильтруются ниже порогом `t.usd < 1`, отдельный
-              warning только мозолил глаза. Если когда-нибудь
-              понадобится для диагностики синтетики — вернуть из
-              истории git. */}
         </div>
 
-        {/* Рабочие кнопки действий */}
-        <div className={cn("grid grid-cols-3 gap-1.5", compact ? "mt-2.5" : "mt-4")}>
+        {/* Free vs DeFi split — две колонки с фоном чтобы юзер сразу видел
+            структуру (раньше DeFi был отдельной оранжевой секцией ниже,
+            которую легко было пропустить). */}
+        {defiAssetUsd > 0.5 && (
+          <div className={cn("grid grid-cols-2 gap-1.5", compact ? "mt-2.5" : "mt-3")}>
+            <div className="rounded-md border border-border bg-secondary/40 px-2 py-1.5">
+              <div className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+                Свободные
+              </div>
+              <div className="mt-0.5 text-[12px] font-semibold tabular-nums">
+                {formatUsd(freeCapitalUsd, locale)}
+              </div>
+              {cexUsd > 0 && (
+                <div
+                  className="text-[9px] tabular-nums text-brand-cyan/80"
+                  title="Включает балансы подключённых CEX-бирж."
+                >
+                  вкл. {formatUsd(cexUsd, locale)} CEX
+                </div>
+              )}
+            </div>
+            <div className="rounded-md border border-brand-cyan/30 bg-brand-cyan/5 px-2 py-1.5">
+              <div className="text-[9px] font-medium uppercase tracking-wider text-brand-cyan/80">
+                В DeFi
+              </div>
+              <div className="mt-0.5 text-[12px] font-semibold tabular-nums text-brand-cyan">
+                {formatUsd(defiAssetUsd, locale)}
+              </div>
+              <div className="text-[9px] tabular-nums text-muted-foreground">
+                lending + LP + vaults
+              </div>
+            </div>
+          </div>
+        )}
+        {defiAssetUsd <= 0.5 && cexUsd > 0 && (
+          <div
+            className="mt-1 text-[10px] tabular-nums text-brand-cyan/90"
+            title="Включает балансы подключённых CEX-бирж."
+          >
+            · вкл. {formatUsd(cexUsd, locale)} на CEX
+          </div>
+        )}
+
+        {/* Action row: primary CTA + icon-only secondaries.
+            Раньше — 3 равноценные кнопки grid-cols-3 с текстом. Сейчас
+            фокус на главном действии. */}
+        <div className={cn("flex gap-1.5", compact ? "mt-2.5" : "mt-3")}>
           <button
             type="button"
             onClick={() => navigate("/registry")}
             className={cn(
-              "flex flex-col items-center gap-0.5 rounded-md border border-border bg-secondary/40 font-medium text-foreground/80 transition-all hover:-translate-y-0.5 hover:border-brand-cyan/50 hover:bg-secondary/70 hover:text-foreground",
-              compact ? "px-1 py-1.5 text-[10px]" : "px-2 py-2 text-[11px]",
+              "flex flex-1 items-center justify-center gap-1.5 rounded-md bg-brand-cyan text-slate-900 font-medium transition-all hover:bg-brand-cyan/90",
+              compact ? "px-2 py-1.5 text-[11px]" : "px-3 py-2 text-[12px]",
             )}
-            title={isEmpty ? "Подключить кошелёк" : "Добавить ещё кошелёк"}
+            title={isEmpty ? "Подключить кошелёк" : "Добавить ещё кошелёк / биржу"}
           >
-            <Plus className={cn("text-brand-cyan", compact ? "h-3.5 w-3.5" : "h-4 w-4")} />
+            <Plus className={cn(compact ? "h-3.5 w-3.5" : "h-4 w-4")} />
             {isEmpty ? "Подключить" : "Добавить"}
           </button>
           <button
@@ -2918,8 +3027,8 @@ function WalletBalancesBlock({
             onClick={() => void loadAll()}
             disabled={Boolean(busyId)}
             className={cn(
-              "flex flex-col items-center gap-0.5 rounded-md border border-border bg-secondary/40 font-medium text-foreground/80 transition-all hover:-translate-y-0.5 hover:border-brand-cyan/50 hover:bg-secondary/70 hover:text-foreground disabled:cursor-wait disabled:opacity-60",
-              compact ? "px-1 py-1.5 text-[10px]" : "px-2 py-2 text-[11px]",
+              "flex shrink-0 items-center justify-center rounded-md border border-border bg-secondary/40 text-foreground/80 transition-all hover:border-brand-cyan/50 hover:bg-secondary/70 hover:text-foreground disabled:cursor-wait disabled:opacity-60",
+              compact ? "h-7 w-7" : "h-9 w-9",
             )}
             title="Обновить балансы"
           >
@@ -2930,19 +3039,17 @@ function WalletBalancesBlock({
                 busyId && "animate-spin",
               )}
             />
-            Обновить
           </button>
           <button
             type="button"
             onClick={() => navigate("/registry")}
             className={cn(
-              "flex flex-col items-center gap-0.5 rounded-md border border-border bg-secondary/40 font-medium text-foreground/80 transition-all hover:-translate-y-0.5 hover:border-brand-cyan/50 hover:bg-secondary/70 hover:text-foreground",
-              compact ? "px-1 py-1.5 text-[10px]" : "px-2 py-2 text-[11px]",
+              "flex shrink-0 items-center justify-center rounded-md border border-border bg-secondary/40 text-foreground/80 transition-all hover:border-brand-cyan/50 hover:bg-secondary/70 hover:text-foreground",
+              compact ? "h-7 w-7" : "h-9 w-9",
             )}
             title="Открыть Реестр операций"
           >
             <ListIcon className={cn("text-brand-cyan", compact ? "h-3.5 w-3.5" : "h-4 w-4")} />
-            Реестр
           </button>
         </div>
       </div>
@@ -2960,74 +3067,88 @@ function WalletBalancesBlock({
           <div className="max-h-[520px] overflow-y-auto overscroll-contain border-t border-border">
             <SourcesIndicator loadedList={loadedList} />
 
-            {/* Filter chips — Сети / Кошельки / Источник */}
+            {/* Filter chips — collapsible details/summary.
+                Раньше 11 chips стопками раздували виджет на 100+px. Сейчас
+                компактный summary показывает «Фильтры · all» или «· 2
+                активных», expand по клику. */}
             {(availableChains.length > 1 ||
               availableOnchainWallets.length > 1 ||
               cexAccounts.length > 0) && (
-              <div className="space-y-1.5 border-b border-border bg-secondary/30 px-3 py-2">
-                {/* Source: on-chain vs CEX — shown only if user has both */}
-                {cexAccounts.length > 0 && (
-                  <FilterChipRow
-                    label="Источник"
-                    items={[
-                      { value: "onchain", label: "On-chain" },
-                      { value: "cex", label: "CEX" },
-                    ]}
-                    selected={sourceFilter as Set<string>}
-                    onToggle={(v) =>
-                      toggleInSet(
-                        setSourceFilter as React.Dispatch<
-                          React.SetStateAction<Set<string>>
-                        >,
-                        v,
-                      )
-                    }
-                  />
-                )}
-                {/* Chains — only when more than one on-chain net is loaded */}
-                {availableChains.length > 1 && (
-                  <FilterChipRow
-                    label="Сети"
-                    items={availableChains.map((c) => ({
-                      value: c,
-                      label: c.toUpperCase(),
-                    }))}
-                    selected={chainFilter}
-                    onToggle={(v) => toggleInSet(setChainFilter, v)}
-                  />
-                )}
-                {/* Wallets: on-chain names + CEX exchange names */}
-                {(availableOnchainWallets.length + cexAccounts.length > 1) && (
-                  <FilterChipRow
-                    label="Кошельки"
-                    items={[
-                      ...availableOnchainWallets.map((n) => ({
-                        value: n,
-                        label: n,
-                      })),
-                      ...cexAccounts.map((a) => ({
-                        value: a.exchange,
-                        label: `${a.exchange}${a.label ? ` · ${a.label}` : ""}`,
-                      })),
-                    ]}
-                    selected={walletFilter}
-                    onToggle={(v) => toggleInSet(setWalletFilter, v)}
-                  />
-                )}
-                {activeFilterCount > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setChainFilter(new Set());
-                      setWalletFilter(new Set());
-                      setSourceFilter(new Set());
-                    }}
-                    className="text-[10px] text-muted-foreground hover:text-foreground"
-                  >
-                    × сбросить все ({activeFilterCount})
-                  </button>
-                )}
-              </div>
+              <details className="group border-b border-border bg-secondary/30">
+                <summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground">
+                  <span className="flex items-center gap-1.5">
+                    <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+                    Фильтры
+                    <span className="font-normal normal-case tracking-normal text-muted-foreground/70">
+                      {activeFilterCount > 0
+                        ? `· ${activeFilterCount} активн.`
+                        : "· все источники"}
+                    </span>
+                  </span>
+                  {activeFilterCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setChainFilter(new Set());
+                        setWalletFilter(new Set());
+                        setSourceFilter(new Set());
+                      }}
+                      className="text-[10px] font-normal normal-case tracking-normal text-muted-foreground hover:text-foreground"
+                    >
+                      × сбросить
+                    </button>
+                  )}
+                </summary>
+                <div className="space-y-1.5 border-t border-border px-3 py-2">
+                  {cexAccounts.length > 0 && (
+                    <FilterChipRow
+                      label="Источник"
+                      items={[
+                        { value: "onchain", label: "On-chain" },
+                        { value: "cex", label: "CEX" },
+                      ]}
+                      selected={sourceFilter as Set<string>}
+                      onToggle={(v) =>
+                        toggleInSet(
+                          setSourceFilter as React.Dispatch<
+                            React.SetStateAction<Set<string>>
+                          >,
+                          v,
+                        )
+                      }
+                    />
+                  )}
+                  {availableChains.length > 1 && (
+                    <FilterChipRow
+                      label="Сети"
+                      items={availableChains.map((c) => ({
+                        value: c,
+                        label: c.toUpperCase(),
+                      }))}
+                      selected={chainFilter}
+                      onToggle={(v) => toggleInSet(setChainFilter, v)}
+                    />
+                  )}
+                  {(availableOnchainWallets.length + cexAccounts.length > 1) && (
+                    <FilterChipRow
+                      label="Кошельки"
+                      items={[
+                        ...availableOnchainWallets.map((n) => ({
+                          value: n,
+                          label: n,
+                        })),
+                        ...cexAccounts.map((a) => ({
+                          value: a.exchange,
+                          label: `${a.exchange}${a.label ? ` · ${a.label}` : ""}`,
+                        })),
+                      ]}
+                      selected={walletFilter}
+                      onToggle={(v) => toggleInSet(setWalletFilter, v)}
+                    />
+                  )}
+                </div>
+              </details>
             )}
 
             {filteredByChain.length === 0 && filteredCexAccounts.length === 0 ? (
@@ -3039,34 +3160,37 @@ function WalletBalancesBlock({
             ) : (
               filteredByChain.map((group, idx) => (
                 <Fragment key={`${group.chain}-${group.variant}`}>
-                  {/* Заголовок «Расписки» (a/cTokens, debt) — компактный
-                      с tooltip-иконкой вместо длинного описательного блока. */}
+                  {/* Заголовок «В DeFi протоколах» (aTokens / cTokens / debt).
+                      Это не warning'и — это collateral пользователя в Aave /
+                      Compound / Fluid. Cyan accent вместо orange. Сумма
+                      этой группы уже учтена в Общем капитале (см. dual-pane
+                      header), здесь — детализация. */}
                   {group.variant === "receipts" &&
                     filteredByChain[idx - 1]?.variant !== "receipts" && (
-                      <div className="flex items-center justify-between gap-2 border-y border-warning/30 bg-warning/5 px-4 py-1.5">
-                        <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-warning">
-                          <span className="inline-block h-3 w-0.5 rounded bg-warning" />
-                          Расписки
+                      <div className="flex items-center justify-between gap-2 border-y border-brand-cyan/30 bg-brand-cyan/5 px-4 py-1.5">
+                        <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-brand-cyan">
+                          <span className="inline-block h-3 w-0.5 rounded bg-brand-cyan" />
+                          В DeFi протоколах
                           <Tooltip
-                            maxWidth={300}
+                            maxWidth={320}
                             content={
                               <div className="text-[11px] text-foreground/90">
                                 <span className="font-semibold">aTokens / cTokens / variableDebt</span> —
-                                «бумажки» 1:1 от lending протоколов (Aave,
-                                Compound), подтверждающие supply или долг.
-                                Уже учтены в «Активы в проектах», поэтому
-                                <span className="font-semibold">{" "}не суммируются{" "}</span>
-                                в общий капитал, чтобы не было двойного счёта.
+                                receipt-токены lending протоколов (Aave,
+                                Compound, Fluid), представляющие ваш
+                                collateral или долг. Их стоимость{" "}
+                                <span className="font-semibold">учтена в «В DeFi»</span>{" "}
+                                раздела баланса выше — здесь показана детализация.
                               </div>
                             }
                           >
-                            <span className="cursor-help text-warning/70 hover:text-warning">
+                            <span className="cursor-help text-brand-cyan/70 hover:text-brand-cyan">
                               <Info className="h-3 w-3" />
                             </span>
                           </Tooltip>
                         </div>
-                        <span className="text-[10px] font-medium normal-case text-warning/80">
-                          не входят в капитал
+                        <span className="text-[10px] font-medium normal-case text-brand-cyan/80">
+                          collateral
                         </span>
                       </div>
                     )}

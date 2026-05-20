@@ -1,0 +1,114 @@
+/**
+ * Capflow feature flags — двухуровневая система:
+ *
+ * 1. **Server-side flags** (`feature_flags` table в БД, resolve через
+ *    `/me/feature-flags` API) — приоритетные. Admin управляет через
+ *    `/admin/feature-flags`: user-scope → account-scope → global. Раскатка
+ *    идёт: «себе» (user-scope) → «нескольким бета-юзерам» (user-scope) →
+ *    «всем» (global=true).
+ *
+ * 2. **Client-side flags** (localStorage, dev-only) — fallback когда
+ *    server flag не задан. Полезно для DevTools-only experiments которые
+ *    не нужно делать видимыми всем пользователям сервиса.
+ *
+ * Резолв order для конкретного юзера:
+ *    user-scope server  → account-scope server → global server →
+ *      → client localStorage → default(false)
+ *
+ * Use cases:
+ *  - Production rollout (видно всем юзерам, sync через server) → server-flag
+ *  - Local dev experiment (только в этом браузере) → client-flag
+ *
+ * Реактивность: server-flag через `useResolvedFeatureFlag(key)` hook
+ * автоматически re-renders при invalidation; client-flag — после `reload()`.
+ */
+
+export interface ClientFeatureFlag {
+  /** localStorage ключ. */
+  key: string;
+  /** Короткий human-readable label для UI checkbox. */
+  label: string;
+  /** Подробное описание что флаг делает + предупреждения. */
+  description: string;
+  /** Default value когда ключ не задан в localStorage. */
+  defaultValue: boolean;
+  /**
+   * Категория для группировки в UI (analytics / experimental / debug).
+   */
+  category: "analytics" | "experimental" | "debug";
+}
+
+/**
+ * Registry всех известных client-side флагов. Должны быть здесь чтобы
+ * admin UI знал что показать. Произвольные ключи можно тоже set'ать через
+ * DevTools — но они не появятся в UI.
+ */
+export const CLIENT_FEATURE_FLAGS: readonly ClientFeatureFlag[] = [
+  {
+    key: "capflow.feature.lendingAudit",
+    label: "Lending on-chain audit (auto-fix)",
+    description:
+      "Для Aave V3 / Spark / Compound V3 lending позиций — читать on-chain Mint/Burn events aToken'а через Etherscan и переопределять `depositAmountSum` в `computeFees`, чтобы supply yield считался от authoritative on-chain сумм, а не от (возможно неполной) DeBank history. Лечит POS-008 WBTC ghost yield $5 282 → $69. ⚠ Может изменить цифры на $K-$M; рекомендуется только после manual verification.",
+    defaultValue: false,
+    category: "analytics",
+  },
+];
+
+function readFlagLocalStorage(key: string, defaultValue: boolean): boolean {
+  if (typeof window === "undefined") return defaultValue;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return defaultValue;
+    return raw === "true" || raw === "1";
+  } catch {
+    return defaultValue;
+  }
+}
+
+/**
+ * Получить значение client-side флага. Pure function — caller'ы могут
+ * вызывать на любом уровне (не нужен hook).
+ */
+export function getClientFlag(key: string, defaultValue: boolean): boolean {
+  return readFlagLocalStorage(key, defaultValue);
+}
+
+/**
+ * Установить значение client-side флага. После set требуется
+ * `location.reload()` чтобы изменения подхватились в memoized React
+ * computations (большинство флагов читаются один раз при render'е).
+ */
+export function setClientFlag(key: string, value: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(key, value ? "true" : "false");
+  } catch {
+    /* quota */
+  }
+}
+
+/** Сбросить флаг к default'у (удалить ключ из localStorage). */
+export function resetClientFlag(key: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+// ──────────────── Convenience accessors для известных флагов ────────────────
+
+/**
+ * UCB on-chain audit для lending позиций (Aave V3 / Spark / Compound V3).
+ *
+ * Когда включён — `useLendingAudit` hook применяет on-chain
+ * authoritative `netDeposited` для override'а `depositAmountSum` в
+ * `computeFees`. Это исправляет ghost yield от пропущенных DeBank
+ * supply tx (POS-008 WBTC $5 282 → $69).
+ *
+ * **Default: OFF** — фикс меняет цифры на $K-$M, нужна manual verification.
+ */
+export function isLendingAuditEnabled(): boolean {
+  return getClientFlag("capflow.feature.lendingAudit", false);
+}

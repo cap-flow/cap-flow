@@ -234,7 +234,59 @@ function doClassify(
     return base(it, seq, "transfer_out", protocol, movement, status);
   }
   if (receives.length && !sends.length) {
+    // 10.5 Delegation-collect: V3 fee collect через smart-account.
+    // Зеркалит web-classifier — для same-wallet ops Uniswap V3 collect
+    // через redeemDelegations имеет 2+ IN movements (stable + volatile)
+    // и без OUT. Без правила попадает в transfer_in и пропускается
+    // в Fee lifetime для V3 LP позиций (bob POS-009 18.03.2026).
+    const fnName = (it.tx?.name ?? "").toLowerCase();
+    const isDelegationFn = fnName === "redeemdelegations" || fnName.includes("delegation");
+    if (isDelegationFn && receives.length >= 2) {
+      const hasVolatile = receives.some((r) => !r.isStable && !r.isProtocolToken);
+      const hasStable = receives.some((r) => r.isStable);
+      if (hasVolatile && hasStable) {
+        const inferredProtocol = {
+          id: `${it.chain}_uniswap3`,
+          name: "Uniswap V3",
+          category: "dex" as const,
+        };
+        return base(
+          it,
+          seq,
+          "claim_rewards",
+          inferredProtocol,
+          movement,
+          status,
+          ["delegation-collect"],
+        );
+      }
+    }
     return base(it, seq, "transfer_in", protocol, movement, status);
+  }
+
+  // 11. Smart-account / EIP-7702 / MetaMask Delegation mint без project_id.
+  // Зеркалит web-classifier (apps/web/src/lib/portfolio/classifier.ts).
+  // Когда юзер mint'ит Uniswap V3 NFT через delegation-wrapper, DeBank
+  // не отдаёт project_id → правила выше падают. Но IN protocol-token
+  // UNI-V3-POS + OUT underlying — явный сигнал lp_add.
+  const lpReceipt = receives.find(
+    (r) =>
+      r.isProtocolToken &&
+      (r.symbol === "UNI-V3-POS" ||
+        r.symbol === "UNI-V4-POS" ||
+        /^UNI-V\d-/i.test(r.symbol) ||
+        /-V3-POS$/i.test(r.symbol))
+  );
+  if (lpReceipt && sends.length > 0) {
+    const isV4 = lpReceipt.symbol.toLowerCase().includes("v4");
+    const inferredProtocol = {
+      id: `${it.chain}_${isV4 ? "uniswap4" : "uniswap3"}`,
+      name: isV4 ? "Uniswap V4" : "Uniswap V3",
+      category: "dex" as const,
+    };
+    return base(it, seq, "lp_add", inferredProtocol, movement, status, [
+      "delegation-mint",
+    ]);
   }
 
   return base(it, seq, "unknown", protocol, movement, status);

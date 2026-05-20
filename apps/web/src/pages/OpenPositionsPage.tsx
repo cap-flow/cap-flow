@@ -33,6 +33,7 @@ import {
   type OpenPosition,
   type PositionKind,
 } from "@/lib/portfolio/open_positions";
+import { warnOnProvenanceIssues } from "@/lib/portfolio/position_provenance";
 import { PurchaseHistoryPopup } from "@/components/PurchaseHistoryPopup";
 import { useCexWithdrawalCostBasis } from "@/features/cex/hooks";
 import type { CexCostBasisMatch } from "@/lib/portfolio/position_coverage";
@@ -62,6 +63,9 @@ import {
 } from "@/lib/portfolio/position_overrides";
 import { useV3Positions, v3PositionKey, type V3PositionMap } from "@/lib/v3/hook";
 import { useV3LiquidityEvents } from "@/lib/v3/use_liquidity_events";
+import { useLendingAudit } from "@/lib/lending/use_lending_audit";
+import { isLendingAuditEnabled } from "@/lib/portfolio/feature_flags";
+import { useResolvedFeatureFlag } from "@/features/feature-flags/hooks";
 import { applyV3CostBasisOverride } from "@/lib/portfolio/v3_cost_basis_override";
 import { useV3HistoricalPoolPrices } from "@/lib/v3/use_historical_prices";
 import { useV3CoinGeckoPrices } from "@/lib/coingecko_v3_prices";
@@ -112,25 +116,27 @@ const KIND_BADGE: Record<PositionKind, string> = {
  * Реальные render-функции живут в PositionRow и шапке (по `id`).
  */
 const COLUMN_DEFS = [
-  { id: "id", label: "ID", required: true },
-  { id: "openedAt", label: "Дата открытия" },
-  { id: "ageDays", label: "Срок" },
-  { id: "wallet", label: "Кошелёк" },
-  { id: "chain", label: "Сеть" },
-  { id: "protocol", label: "Протокол" },
-  { id: "kind", label: "Тип" },
-  { id: "capital", label: "Капитал" },
-  { id: "tokenId", label: "TokenId / NFT" },
-  { id: "supplyTokens", label: "Состав позиции" },
-  { id: "startUsd", label: "Стартовая $", align: "right" as const },
-  { id: "currentUsd", label: "Текущая $", align: "right" as const },
-  { id: "pnl", label: "PnL позиций", align: "right" as const },
-  { id: "fee", label: "Fee", align: "right" as const },
-  { id: "feeApr", label: "Fee APR", align: "right" as const },
-  { id: "totalAssets", label: "Итого активы", align: "right" as const },
-  { id: "totalPnl", label: "Total PnL", align: "right" as const },
-  { id: "totalApr", label: "Total APR", align: "right" as const },
-  { id: "weight", label: "Вес %", align: "right" as const },
+  { id: "id", label: "ID", required: true, align: "center" as const },
+  { id: "openedAt", label: "Дата открытия", align: "center" as const },
+  { id: "ageDays", label: "Срок", align: "center" as const },
+  { id: "wallet", label: "Кошелёк", align: "center" as const },
+  { id: "chain", label: "Сеть", align: "center" as const },
+  { id: "protocol", label: "Протокол", align: "center" as const },
+  { id: "kind", label: "Тип", align: "center" as const },
+  { id: "capital", label: "Капитал", align: "center" as const },
+  { id: "tokenId", label: "TokenId / NFT", align: "center" as const },
+  { id: "openedInToken", label: "Открыто в", align: "center" as const },
+  { id: "openedInAmount", label: "Внесено токенов", align: "center" as const },
+  { id: "supplyTokens", label: "Состав позиции", align: "center" as const },
+  { id: "startUsd", label: "Стартовая $", align: "center" as const },
+  { id: "currentUsd", label: "Текущая $", align: "center" as const },
+  { id: "pnl", label: "PnL позиций", align: "center" as const },
+  { id: "fee", label: "Fee", align: "center" as const },
+  { id: "feeApr", label: "Fee APR", align: "center" as const },
+  { id: "totalAssets", label: "Итого активы", align: "center" as const },
+  { id: "totalPnl", label: "Total PnL", align: "center" as const },
+  { id: "totalApr", label: "Total APR", align: "center" as const },
+  { id: "weight", label: "Вес %", align: "center" as const },
 ] as const;
 
 type ColumnId = (typeof COLUMN_DEFS)[number]["id"];
@@ -150,7 +156,7 @@ export function OpenPositionsPage(): JSX.Element {
 function OpenPositionsPageInner(): JSX.Element {
   const _t = useT();
   const { locale } = useI18n();
-  const { loadedById, busyId, loadAll, costBasisOverrideByHash } =
+  const { loadedById, busyId, loadAll, costBasisOverrideByHash, newTrackers } =
     useLoadedWallets();
   const [integrations] = useIntegrations();
   const alchemyKey = (integrations.alchemyApiKey ?? "").trim();
@@ -194,6 +200,23 @@ function OpenPositionsPageInner(): JSX.Element {
     alchemyKey,
     etherscanKey,
   );
+  // Универсальный on-chain audit для **всех** lending positions
+  // (Aave V3, Spark, Compound V3, …). Закрывает класс багов от неполного
+  // DeBank history (см. POS-008: пропущенная supply tx 0.069 WBTC давала
+  // $5 282 фейкового yield). Использует Etherscan tokentx для получения
+  // всех Mint/Burn events receipt-token'а → authoritative netDeposited.
+  const lendingAuditHook = useLendingAudit(
+    loadedList,
+    alchemyKey,
+    etherscanKey,
+  );
+  // Feature flag resolve: server-first (через /me/feature-flags) с fallback
+  // на client-side localStorage flag. Server allows админу раскатывать
+  // фичу выборочно: один user → бета-группа → global. Client-flag — dev-only.
+  const lendingAuditFlag = useResolvedFeatureFlag(
+    "capflow.feature.lendingAudit",
+  );
+  const lendingAuditOn = lendingAuditFlag.enabled || isLendingAuditEnabled();
   const [creditOverrides, setCreditOverrides] = useCreditOverrides();
   const [positionOverrides, setPositionOverrides] = usePositionOverrides();
   const [assetCompositions] = useAssetCompositions();
@@ -287,8 +310,8 @@ function OpenPositionsPageInner(): JSX.Element {
   const v3MintCgPrices = useV3CoinGeckoPrices(loadedList);
 
   const positionsRaw = useMemo(
-    () =>
-      buildOpenPositions(
+    () => {
+      const result = buildOpenPositions(
         loadedList.map((l) => ({
           wallet: l.wallet,
           ops: l.ops,
@@ -301,14 +324,39 @@ function OpenPositionsPageInner(): JSX.Element {
           // UCB single-source-of-truth: D3 CEX inheritance + A4 manual
           // annotations → consistent cost basis с lot-by-lot display.
           costBasisOverrideByHash,
+          // UCB C5: per-wallet LotTracker от ucb_pipeline (single source of
+          // truth). buildOpenPositions использует его вместо legacy
+          // CostBasisTracker — устраняет divergence на $200-2k для
+          // позиций с CEX inheritance / manual annotations / bridge.
+          lotsByWallet: newTrackers.lotsByWallet,
+          // On-chain audit для Aave V3 lending positions — переопределяет
+          // depositAmountSum в computeFees, чтобы supply yield считался от
+          // authoritative on-chain Σ mint − Σ burn aToken'а, а не от
+          // (возможно неполной) DeBank history.
+          // Gated через server-side feature flag (с client-fallback).
+          ...(lendingAuditOn && {
+            lendingAuditByKey: lendingAuditHook.data,
+          }),
         },
-      ),
+      );
+      // Provenance integrity check (dev console). Любое нарушение
+      // инварианта между UI-агрегатами и raw ops → console.warn.
+      // Поймал бы ghost-fee POS-007 (claim_rewards до openedAt).
+      const opsByWalletId = new Map(
+        loadedList.map((l) => [l.wallet.id, l.ops as readonly typeof l.ops[number][]]),
+      );
+      warnOnProvenanceIssues(result, opsByWalletId);
+      return result;
+    },
     [
       loadedList,
       histPrices,
       v3MintPoolPrices.data,
       v3MintCgPrices.data,
       costBasisOverrideByHash,
+      newTrackers.lotsByWallet,
+      lendingAuditHook.data,
+      lendingAuditOn,
     ],
   );
 
@@ -918,6 +966,7 @@ function OpenPositionsPageInner(): JSX.Element {
                           className={cn(
                             "inline-flex items-center gap-1",
                             c.align === "right" && "justify-end",
+                            c.align === "center" && "justify-center",
                           )}
                         >
                           {c.label}
@@ -1147,8 +1196,8 @@ function PositionRow({
   // Словарь рендереров — ключ ↔ id колонки.
   const renderers: Record<string, () => JSX.Element> = {
     id: () => (
-      <td key="id" className={cn(cellPad, "font-mono")}>
-        <div className="flex items-center gap-1">
+      <td key="id" className={cn(cellPad, "font-mono text-center")}>
+        <div className="flex items-center justify-center gap-1">
           <Link
             to={`/positions/${p.id}`}
             className="text-brand-cyan hover:underline"
@@ -1181,7 +1230,7 @@ function PositionRow({
     openedAt: () => (
       <td
         key="openedAt"
-        className={cn(cellPad, "text-muted-foreground tabular-nums whitespace-nowrap")}
+        className={cn(cellPad, "text-center text-muted-foreground tabular-nums whitespace-nowrap")}
       >
         {p.openedAt ? formatDateShort(p.openedAt) : "—"}
       </td>
@@ -1189,13 +1238,13 @@ function PositionRow({
     ageDays: () => (
       <td
         key="ageDays"
-        className={cn(cellPad, "text-muted-foreground tabular-nums whitespace-nowrap")}
+        className={cn(cellPad, "text-center text-muted-foreground tabular-nums whitespace-nowrap")}
       >
         {ageLabel}
       </td>
     ),
     wallet: () => (
-      <td key="wallet" className={cellPad}>
+      <td key="wallet" className={cn(cellPad, "text-center")}>
         <span
           className={cn(
             "inline-flex items-center gap-1 rounded border border-border bg-secondary px-1.5 py-0.5",
@@ -1208,14 +1257,14 @@ function PositionRow({
       </td>
     ),
     chain: () => (
-      <td key="chain" className={cellPad}>
+      <td key="chain" className={cn(cellPad, "text-center")}>
         <Badge variant="outline" className="uppercase text-[10px]">
           {p.chain}
         </Badge>
       </td>
     ),
     protocol: () => (
-      <td key="protocol" className={cellPad}>
+      <td key="protocol" className={cn(cellPad, "text-center")}>
         <div className="font-medium leading-tight inline-flex items-center gap-1">
           {p.protocol.name}
           {p.inferred && (
@@ -1232,7 +1281,7 @@ function PositionRow({
       </td>
     ),
     kind: () => (
-      <td key="kind" className={cellPad}>
+      <td key="kind" className={cn(cellPad, "text-center")}>
         <div className="inline-flex items-center gap-1.5">
           <span
             className={cn(
@@ -1247,7 +1296,7 @@ function PositionRow({
       </td>
     ),
     capital: () => (
-      <td key="capital" className={cellPad}>
+      <td key="capital" className={cn(cellPad, "text-center")}>
         <CapitalToggle
           isCredit={creditOverrideOn}
           currentUsd={p.currentUsd}
@@ -1297,13 +1346,71 @@ function PositionRow({
           ? `LP receipt / pool: ${p.lpTokenId}`
           : "Нет lpTokenId";
       return (
-        <td key="tokenId" className={cellPad}>
+        <td key="tokenId" className={cn(cellPad, "text-center")}>
           <span
             className="font-mono text-[10px] text-muted-foreground tabular-nums"
             title={title}
           >
             {display}
           </span>
+        </td>
+      );
+    },
+    // «В чём открыли (токен)» / «Начальная сумма инвестиций в токене» —
+    // источник = `p.openedInTokens`, который заполняется в builder'е из
+    // chain_op'ов (OUT-side движения deposit-tx с правилами выбора
+    // receipt-vs-underlying). Это даёт корректное имя/amount для
+    // aggregated-receipt позиций (GMX GM, Morpho-c-GLV-collateral),
+    // где `supplyTokens` показывает синтетическую декомпозицию underlying
+    // (WETH+USDC) вместо реального deposit-token (GLV/GM).
+    //
+    // Fallback на supplyTokens, если по какой-то причине openedInTokens
+    // пустой (старые позиции в кэше до обновления, нишевые протоколы).
+    openedInToken: () => {
+      const tokens =
+        p.openedInTokens && p.openedInTokens.length > 0
+          ? p.openedInTokens
+          : p.supplyTokens.map((t) => ({
+              symbol: t.symbol,
+              amount: t.startAmount,
+              ...(t.tokenId && { tokenId: t.tokenId }),
+            }));
+      return (
+        <td key="openedInToken" className={cn(cellPad, "text-center whitespace-nowrap")}>
+          <div className="flex flex-col items-center gap-0">
+            {tokens.map((t) => (
+              <span
+                key={t.symbol}
+                className="text-muted-foreground leading-tight"
+                title={t.tokenId ? `tokenId: ${t.tokenId}` : t.symbol}
+              >
+                {t.symbol}
+              </span>
+            ))}
+          </div>
+        </td>
+      );
+    },
+    openedInAmount: () => {
+      const tokens =
+        p.openedInTokens && p.openedInTokens.length > 0
+          ? p.openedInTokens
+          : p.supplyTokens.map((t) => ({
+              symbol: t.symbol,
+              amount: t.startAmount,
+            }));
+      return (
+        <td
+          key="openedInAmount"
+          className={cn(cellPad, "text-center tabular-nums whitespace-nowrap")}
+        >
+          <div className="flex flex-col gap-0 items-center">
+            {tokens.map((t) => (
+              <span key={t.symbol} className="font-mono leading-tight">
+                {formatNumber(t.amount, locale, 6)}
+              </span>
+            ))}
+          </div>
         </td>
       );
     },
@@ -1316,13 +1423,13 @@ function PositionRow({
         ...(p.instanceId && { instanceId: p.instanceId }),
       });
       return (
-      <td key="supplyTokens" className={cellPad}>
-        <div className="flex flex-col gap-0">
+      <td key="supplyTokens" className={cn(cellPad, "text-center")}>
+        <div className="flex flex-col items-center gap-0">
           {p.supplyTokens.map((t) => {
             const has =
               compositions[`${positionScope}::${normalizeCompositionKey(t.symbol)}`] != null;
             return (
-              <div key={t.symbol} className="flex items-center gap-1 leading-tight">
+              <div key={t.symbol} className="flex items-center justify-center gap-1 leading-tight">
                 <span className="font-mono tabular-nums">
                   {formatNumber(t.amount, locale, 6)}
                 </span>
@@ -1362,8 +1469,8 @@ function PositionRow({
           ? p.startUsd / p.netStartUsd
           : null;
       return (
-        <td key="startUsd" className={cn(cellPad, "text-right tabular-nums")}>
-          <div className="flex flex-col items-end gap-0.5">
+        <td key="startUsd" className={cn(cellPad, "text-center tabular-nums")}>
+          <div className="flex flex-col items-center gap-0.5">
             <span className="inline-flex items-center gap-1">
               {formatUsd(p.startUsd, locale)}
               {p.kind === "lending" && p.supplyTokens.length > 0 && (
@@ -1398,7 +1505,7 @@ function PositionRow({
       );
     },
     currentUsd: () => (
-      <td key="currentUsd" className={cn(cellPad, "text-right tabular-nums")}>
+      <td key="currentUsd" className={cn(cellPad, "text-center tabular-nums")}>
         <EditableUsdCell
           value={p.currentUsd}
           isOverridden={valueOverridden}
@@ -1409,12 +1516,12 @@ function PositionRow({
       </td>
     ),
     pnl: () => (
-      <td key="pnl" className={cn(cellPad, "text-right tabular-nums")}>
+      <td key="pnl" className={cn(cellPad, "text-center tabular-nums")}>
         <PnlCell usd={priceOnlyPnl} pct={priceOnlyPnlPct} />
       </td>
     ),
     fee: () => (
-      <td key="fee" className={cn(cellPad, "text-right tabular-nums")}>
+      <td key="fee" className={cn(cellPad, "text-center tabular-nums")}>
         <EditableFeesCell
           p={p}
           feesLifetime={feesLifetime}
@@ -1425,7 +1532,7 @@ function PositionRow({
       </td>
     ),
     feeApr: () => (
-      <td key="feeApr" className={cn(cellPad, "text-right tabular-nums")}>
+      <td key="feeApr" className={cn(cellPad, "text-center tabular-nums")}>
         {p.feeAprLifetime != null && p.feeAprLifetime > 0 ? (
           <FeeAprCell p={p} />
         ) : (
@@ -1434,17 +1541,17 @@ function PositionRow({
       </td>
     ),
     totalAssets: () => (
-      <td key="totalAssets" className={cn(cellPad, "text-right tabular-nums")}>
+      <td key="totalAssets" className={cn(cellPad, "text-center tabular-nums")}>
         {formatUsd(totalAssets, locale)}
       </td>
     ),
     totalPnl: () => (
-      <td key="totalPnl" className={cn(cellPad, "text-right tabular-nums")}>
+      <td key="totalPnl" className={cn(cellPad, "text-center tabular-nums")}>
         <PnlCell usd={totalPnlUsd} pct={totalPnlPct} />
       </td>
     ),
     totalApr: () => (
-      <td key="totalApr" className={cn(cellPad, "text-right tabular-nums")}>
+      <td key="totalApr" className={cn(cellPad, "text-center tabular-nums")}>
         {totalApr != null ? (
           <span
             className={cn(
@@ -1461,7 +1568,7 @@ function PositionRow({
       </td>
     ),
     weight: () => (
-      <td key="weight" className={cn(cellPad, "text-right tabular-nums")}>
+      <td key="weight" className={cn(cellPad, "text-center tabular-nums")}>
         <span className="text-muted-foreground">
           {weightPct != null ? `${weightPct.toFixed(1)}%` : "—"}
         </span>
@@ -3441,13 +3548,17 @@ function Th({
   align,
 }: {
   children: React.ReactNode;
-  align?: "right";
+  align?: "right" | "center" | "left";
 }) {
   return (
     <th
       className={cn(
         "px-2.5 py-2 font-medium whitespace-nowrap",
-        align === "right" ? "text-right" : "text-left",
+        align === "right"
+          ? "text-right"
+          : align === "center"
+            ? "text-center"
+            : "text-left",
       )}
     >
       {children}

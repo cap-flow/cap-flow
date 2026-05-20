@@ -16,6 +16,7 @@ import { AdminQueuePage } from "./pages/admin/QueuePage";
 import { AdminHealthPage } from "./pages/admin/HealthPage";
 import { AdminTechAuditPage } from "./pages/admin/TechAuditPage";
 import { AdminUsersPage } from "./pages/admin/UsersPage";
+import { AdminUserDetailPage } from "./pages/admin/UserDetailPage";
 import { BillingPage } from "./pages/BillingPage";
 import { ClosedPositionsPage } from "./pages/ClosedPositionsPage";
 import { HomePage } from "./pages/HomePage";
@@ -58,6 +59,7 @@ function AdminRoutes() {
           <Route path="metrics" element={<AdminMetricsPage />} />
           <Route path="portfolios" element={<AdminPortfoliosPage />} />
           <Route path="users" element={<AdminUsersPage />} />
+          <Route path="users/:id" element={<AdminUserDetailPage />} />
           <Route path="invites" element={<AdminInvitesPage />} />
           <Route path="audit" element={<AdminAuditPage />} />
           <Route path="tech-audit" element={<AdminTechAuditPage />} />
