@@ -243,3 +243,6 @@ export async function fetchAaveReserveConfigs(
 export function aaveReserveConfigKey(chain: string, asset: string): string {
   return `${chain}|${asset.toLowerCase()}`;
 }
+
+// Note: aToken receipt addresses вынесены в `lib/lending/receipt_registry.ts`
+// для multi-protocol audit'а (Aave V3, Spark, Compound V3, etc).

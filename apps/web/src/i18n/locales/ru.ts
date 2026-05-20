@@ -52,6 +52,7 @@ export const ru: Record<TranslationKey, string> = {
   "topbar.sidebar.toggle": "Свернуть/развернуть меню",
   "topbar.sidebar.expand": "Развернуть меню",
   "topbar.sidebar.collapse": "Свернуть меню",
+  "topbar.logout": "Выйти",
 
   "sidebar.pro.title": "Pro-план",
   "sidebar.pro.subtitle":

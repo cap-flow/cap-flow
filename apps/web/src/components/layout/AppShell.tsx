@@ -1,8 +1,9 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import {
   CreditCard,
   LayoutDashboard,
   LineChart,
+  LogOut,
   Menu,
   PieChart,
   Settings,
@@ -213,7 +214,20 @@ function Sidebar() {
 function Topbar() {
   const { setMobileOpen } = useSidebar();
   const [profile] = useProfile();
+  const { logout } = useAuth();
+  const navigate = useNavigate();
   const t = useT();
+
+  // User-facing logout. Before this, only AdminShell had a logout button —
+  // regular (non-admin) users had no way to sign out (Settings has a
+  // "delete account" flow that logs out, but no plain sign-out). Mirror
+  // AdminShell behavior: call AuthProvider.logout (clears tokens +
+  // user state), then navigate to /login so the route guard doesn't
+  // briefly try to render a stale authed page.
+  async function handleLogout() {
+    await logout();
+    navigate("/login", { replace: true });
+  }
 
   return (
     <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-border bg-background/70 px-4 backdrop-blur-md sm:px-6 lg:px-10">
@@ -270,6 +284,16 @@ function Topbar() {
             {profile.displayName || profile.username}
           </span>
         </NavLink>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleLogout}
+          aria-label={t("topbar.logout")}
+          title={t("topbar.logout")}
+        >
+          <LogOut className="h-4 w-4" />
+        </Button>
       </div>
     </header>
   );

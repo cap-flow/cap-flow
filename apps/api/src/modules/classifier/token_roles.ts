@@ -103,14 +103,27 @@ export function isReceiptOfProtocol(
   if (pid.includes("morpho")) return false;
 
   if (pid.includes("aave")) {
-    if (/^A[A-Z]/.test(sym)) return true;
+    // Aave V3 receipt naming: `a<ChainPrefix><Symbol>` (aArbUSDC,
+    // aEthWETH, aArbARB, …). The convention is STRICT lowercase 'a'
+    // followed by an uppercase chain-letter. We must check the original
+    // `symbol` (not the upper-cased `sym`), otherwise plain assets like
+    // ARB / AAVE / AERO / AUSD false-positive against /^A[A-Z]/ —
+    // those start with uppercase A followed by uppercase R/A/E/U.
+    //
+    // Before the fix: bob's aArbARB → ARB withdraw was classified as
+    // lend_supply because BOTH `aArbARB` AND `ARB` matched the
+    // upper-cased regex → sentSupply && recvSupply → fallback branch.
+    if (/^a[A-Z][a-zA-Z]/.test(symbol)) return true;
     if (sym.startsWith("VARIABLEDEBT") || sym.startsWith("STABLEDEBT"))
       return true;
     return false;
   }
 
   if (pid.includes("compound")) {
-    if (/^C[A-Z]/.test(sym)) return true;
+    // Same convention as Aave: cToken names are `c<Symbol>` strictly
+    // lowercase 'c' (cUSDC, cDAI, cETH). Use original `symbol` to avoid
+    // false-positives on plain assets starting with uppercase 'C'.
+    if (/^c[A-Z][a-zA-Z]/.test(symbol)) return true;
     return false;
   }
 

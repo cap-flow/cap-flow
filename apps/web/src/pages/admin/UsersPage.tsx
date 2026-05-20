@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Trash2 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -291,10 +291,17 @@ function UserRow({ user }: { readonly user: AdminUserRow }) {
   return (
     <tr className="hover:bg-card/60">
       <td className="px-4 py-3">
-        <div className="font-medium text-foreground">{user.name ?? "—"}</div>
-        <div className="text-xs text-muted-foreground">
-          {user.email ?? "—"}
-        </div>
+        <Link
+          to={`/admin/users/${user.id}`}
+          className="block hover:text-brand-cyan transition"
+        >
+          <div className="font-medium text-foreground hover:underline">
+            {user.name ?? "—"}
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {user.email ?? "—"}
+          </div>
+        </Link>
       </td>
       <td className="px-4 py-3">
         <Select

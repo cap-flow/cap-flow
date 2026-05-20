@@ -165,17 +165,22 @@ export function isReceiptOfProtocol(
   // (sends) или borrow proceeds (receives).
   if (pid.includes("morpho")) return false;
 
-  // Aave: aTokens (aUSDC, aWETH, …) + variableDebt / stableDebt.
-  // DeBank symbol может быть "aArbUSDC" / "aEthUSDC" / "aUSDC" — все начинаются с 'a' + capital.
+  // Aave: aTokens (aArbUSDC, aEthWETH, aArbARB, …) + variableDebt / stableDebt.
+  // Aave V3 strictly uses lowercase 'a' + uppercase chain-letter — must
+  // check the ORIGINAL `symbol`, not `sym = symbol.toUpperCase()`,
+  // otherwise plain assets starting with uppercase A (ARB, AAVE, AERO,
+  // AUSD, …) false-positive and confuse the classifier into combined-
+  // supply-borrow → lend_supply when it's actually a withdraw.
   if (pid.includes("aave")) {
-    if (/^A[A-Z]/.test(sym)) return true;
+    if (/^a[A-Z][a-zA-Z]/.test(symbol)) return true;
     if (sym.startsWith("VARIABLEDEBT") || sym.startsWith("STABLEDEBT")) return true;
     return false;
   }
 
-  // Compound v2 / v3: cTokens (cUSDC, cETH).
+  // Compound v2 / v3: cTokens (cUSDC, cETH). Same convention — strict
+  // lowercase 'c'. Use original `symbol` to avoid false-positives.
   if (pid.includes("compound")) {
-    if (/^C[A-Z]/.test(sym)) return true;
+    if (/^c[A-Z][a-zA-Z]/.test(symbol)) return true;
     return false;
   }
 

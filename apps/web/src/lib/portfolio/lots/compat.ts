@@ -72,3 +72,40 @@ export class CostBasisTrackerCompat {
     return this.inner;
   }
 }
+
+/**
+ * UCB C5: per-wallet view над shared `LotTracker`.
+ *
+ * Где это используется: `open_positions.ts` legacy code expects
+ * `CostBasisTracker` (per-wallet) с API `avgAt(symbol, time)` /
+ * `currentAvg(symbol)`. Новый pipeline (`runUcbPipelineForWallet`) даёт
+ * один `LotTracker` per-wallet, но API — `wacAt(walletId, symbol, time)`.
+ *
+ * Этот адаптер биндит walletId, exposing legacy 2-arg API. Используется в
+ * `buildOpenPositions` чтобы передать в downstream функции тот же
+ * tracker-objet что был от старого `buildCostBasisTracker` — без правки
+ * этих функций.
+ *
+ * После полной миграции (open_positions перейдёт на native wacAt-API)
+ * этот wrapper можно удалить.
+ */
+export class PerWalletLotTrackerView {
+  constructor(
+    private readonly lots: LotTracker,
+    private readonly walletId: string,
+  ) {}
+
+  avgAt(symbol: string, time: number): number | null {
+    return this.lots.wacAt(this.walletId, symbol, time);
+  }
+
+  currentAvg(symbol: string): number | null {
+    return this.lots.currentWac(this.walletId, symbol);
+  }
+
+  currentAmount(_symbol: string): number {
+    // CostBasisTracker.currentAmount used for diagnostics only — not exposed
+    // by LotTracker. Return 0 (callers check >0, so it's defensive no-op).
+    return 0;
+  }
+}

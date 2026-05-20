@@ -248,6 +248,57 @@ const COLUMN_HELPS: Record<string, ColumnHelp> = {
       </div>
     ),
   },
+  openedInToken: {
+    id: "openedInToken",
+    title: "Открыто в",
+    short: "Токен, которым вы реально открыли позицию",
+    detailed: (
+      <div className="space-y-2 text-sm text-muted-foreground">
+        <p>
+          Это <strong className="text-foreground">тот токен</strong>, который
+          ушёл из вашего кошелька в момент открытия позиции — то, как
+          контракт протокола назвал актив.
+        </p>
+        <p>
+          Например: для Aave / Fluid лендинга — это базовый актив
+          (<strong>ETH</strong>, <strong>WBTC</strong>, <strong>USDC</strong>).
+          Для GMX V2 — это receipt-токен <strong>GM [ETH/USD]</strong>{" "}
+          (GM Market Token, представляющий вашу долю в пуле). Для Morpho с
+          GLV-collateral'ом — <strong>GLV [WETH-USDC]</strong>.
+        </p>
+        <p>
+          Отличается от «Состава позиции»: тот столбец показывает live
+          декомпозицию позиции на underlying assets (например GM
+          раскладывается на ETH+USDC). А «Открыто в» — это исходный токен,
+          который вы фактически положили на контракт.
+        </p>
+      </div>
+    ),
+  },
+  openedInAmount: {
+    id: "openedInAmount",
+    title: "Внесено токенов",
+    short: "Сколько токенов было внесено на старте позиции",
+    detailed: (
+      <div className="space-y-2 text-sm text-muted-foreground">
+        <p>
+          Начальное количество токена(ов), которое было внесено в позицию
+          через все deposit-tx за текущий цикл (supply / lp_add).
+        </p>
+        <p>
+          Например: <strong>14.101 ETH</strong> в Fluid lending — это сумма
+          всех supply OUT минус все частичные withdraw IN. Если позиция
+          ни разу не пополнялась — это сумма с первого депозита. Если
+          пополнялась несколько раз — сумма всех вкладов.
+        </p>
+        <p>
+          В отличие от «Состава позиции», где количество может меняться
+          из-за накопленного yield (APR) или ценовой ребалансировки в V3 LP,
+          здесь зафиксировано <strong>именно то, что вы вложили</strong>.
+        </p>
+      </div>
+    ),
+  },
   supplyTokens: {
     id: "supplyTokens",
     title: "Состав позиции",

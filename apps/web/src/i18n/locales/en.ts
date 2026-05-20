@@ -50,6 +50,7 @@ export const en = {
   "topbar.sidebar.toggle": "Toggle sidebar",
   "topbar.sidebar.expand": "Expand sidebar",
   "topbar.sidebar.collapse": "Collapse sidebar",
+  "topbar.logout": "Sign out",
 
   "sidebar.pro.title": "Pro plan",
   "sidebar.pro.subtitle": "Unlock multi-wallet & advanced risk metrics.",

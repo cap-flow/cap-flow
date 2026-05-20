@@ -18,6 +18,12 @@ const TOKENS: Record<string, DeBankToken> = {
   "arb:eth": tok("arb:eth", "ETH", 3000),
   "arb:aArbUSDC": tok("arb:aArbUSDC", "aArbUSDC", 1),
   "arb:aArbWETH": tok("arb:aArbWETH", "aArbWETH", 3000),
+  // Real bob@example.com case — aArbARB receipt for Aave ARB supply on
+  // Arbitrum. Token symbol starts with `aArb` (camel-case) — toUpperCase
+  // → "AARBARB" still matches /^A[A-Z]/ but regression test guards
+  // against future tweaks. arb price ≈ $0.12.
+  "arb:aArbARB": tok("arb:aArbARB", "aArbARB", 0.12),
+  "arb:arb": tok("arb:arb", "ARB", 0.12),
   "arb:vDebtArbUSDC": tok("arb:vDebtArbUSDC", "variableDebtArbUSDC", 1),
   "arb:gm": tok("arb:gm", "GM [ETH/USD]", 1.2),
   "arb:glv": tok("arb:glv", "GLV [WETH-USDC]", 1.05),
@@ -275,6 +281,20 @@ describe("classifyHistory — Aave (receipt-based)", () => {
       projectId: "arb_aave3",
       sends: [{ token: "arb:aArbUSDC", amount: 1000 }],
       receives: [{ token: "arb:usdc", amount: 1000 }],
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("lend_withdraw");
+  });
+
+  // Real bob@example.com case: tx 0x382e...8037b on 2026-04-11. Aave V3
+  // withdraw of ARB on Arbitrum. Symbol is camel-case "aArbARB" (not
+  // "aArbUSDC"). DB shows op_type='lend_supply' for this tx — this test
+  // pins the classifier behavior. If it passes here, the DB rows are
+  // stale (synced before classifier improvements) and need reclass.
+  it("Aave ARB withdraw: send aArbARB, receive ARB → lend_withdraw", () => {
+    const it = item({
+      projectId: "arb_aave3",
+      sends: [{ token: "arb:aArbARB", amount: 140276 }],
+      receives: [{ token: "arb:arb", amount: 140276 }],
     });
     expect(classifyHistory([it], ctx())[0]!.type).toBe("lend_withdraw");
   });
