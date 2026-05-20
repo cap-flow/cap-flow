@@ -627,4 +627,202 @@ describe("CexCostBasisService.computeForUser — fiat → P2P → trade → with
     const svc = new CexCostBasisService(repo);
     expect(await svc.computeForUser("u1")).toEqual([]);
   });
+
+  // ─── UCB D4: wrapped-token pool aliasing ─────────────────────────────
+  it("D4: BTC/USDT trade → WBTC withdrawal shares the same pool", async () => {
+    // Bingx-style real flow: spot trades в `BTC/USDT`, биржа сама
+    // wrap'ит в WBTC при выводе на Ethereum. До D4 withdrawal уходил
+    // из пустого WBTC-пула → source=unknown. Теперь pool routed через
+    // canonical "BTC" — withdrawal видит full cost basis.
+    const repo = makeRepo({
+      accounts: [ACC],
+      p2p: {
+        "acc-1": [
+          p2p({
+            id: "P2P-1",
+            side: "buy",
+            asset: "USDT",
+            amount: "20000",
+            fiatCurrency: "USD",
+            fiatAmount: "20000",
+            ts: 1000,
+          }),
+        ],
+      },
+      trades: {
+        "acc-1": [
+          trade({
+            id: "T-1",
+            symbol: "BTC/USDT",
+            side: "buy",
+            amount: "0.2",
+            cost: "20000",
+            ts: 2000,
+          }),
+        ],
+      },
+      transfers: {
+        "acc-1": [
+          transfer({
+            id: "WD-1",
+            direction: "withdrawal",
+            asset: "WBTC",
+            amount: "0.2",
+            txHash: "0xwbtc",
+            ts: 3000,
+          }),
+        ],
+      },
+    });
+    const svc = new CexCostBasisService(repo);
+    const out = await svc.computeForUser("u1");
+    expect(out).toHaveLength(1);
+    expect(out[0]!.asset).toBe("WBTC"); // surface symbol preserved
+    expect(out[0]!.costBasisUsd).toBeCloseTo(20000, 2);
+    expect(out[0]!.source).toBe("fiat-direct");
+  });
+
+  it("D4: ETH/USDT trade → WETH withdrawal shares pool", async () => {
+    const repo = makeRepo({
+      accounts: [ACC],
+      p2p: {
+        "acc-1": [
+          p2p({
+            id: "P2P-1",
+            side: "buy",
+            asset: "USDT",
+            amount: "3000",
+            fiatCurrency: "USD",
+            fiatAmount: "3000",
+            ts: 1000,
+          }),
+        ],
+      },
+      trades: {
+        "acc-1": [
+          trade({
+            id: "T-1",
+            symbol: "ETH/USDT",
+            side: "buy",
+            amount: "1",
+            cost: "3000",
+            ts: 2000,
+          }),
+        ],
+      },
+      transfers: {
+        "acc-1": [
+          transfer({
+            id: "WD-1",
+            direction: "withdrawal",
+            asset: "WETH",
+            amount: "1",
+            txHash: "0xweth",
+            ts: 3000,
+          }),
+        ],
+      },
+    });
+    const svc = new CexCostBasisService(repo);
+    const out = await svc.computeForUser("u1");
+    expect(out[0]!.asset).toBe("WETH");
+    expect(out[0]!.costBasisUsd).toBeCloseTo(3000, 2);
+    expect(out[0]!.source).toBe("fiat-direct");
+  });
+
+  it("D4: WBTC/USDT trade → BTC withdrawal (reverse direction)", async () => {
+    // Симметрия: если биржа экспонирует пару именно как WBTC/USDT,
+    // а вывод происходит в BTC-сеть (native BTC), всё должно работать
+    // в обратную сторону.
+    const repo = makeRepo({
+      accounts: [ACC],
+      p2p: {
+        "acc-1": [
+          p2p({
+            id: "P2P-1",
+            side: "buy",
+            asset: "USDT",
+            amount: "10000",
+            fiatCurrency: "USD",
+            fiatAmount: "10000",
+            ts: 1000,
+          }),
+        ],
+      },
+      trades: {
+        "acc-1": [
+          trade({
+            id: "T-1",
+            symbol: "WBTC/USDT",
+            side: "buy",
+            amount: "0.1",
+            cost: "10000",
+            ts: 2000,
+          }),
+        ],
+      },
+      transfers: {
+        "acc-1": [
+          transfer({
+            id: "WD-1",
+            direction: "withdrawal",
+            asset: "BTC",
+            amount: "0.1",
+            txHash: "0xbtc",
+            ts: 3000,
+          }),
+        ],
+      },
+    });
+    const svc = new CexCostBasisService(repo);
+    const out = await svc.computeForUser("u1");
+    expect(out[0]!.asset).toBe("BTC");
+    expect(out[0]!.costBasisUsd).toBeCloseTo(10000, 2);
+    expect(out[0]!.source).toBe("fiat-direct");
+  });
+
+  it("D4: same-asset fee in wrapped — splits cost correctly через canonical pool", async () => {
+    // Pool seeded через BTC/USDT buy. Withdrawal WBTC с fee в WBTC
+    // (биржа списывает в wrapped symbol на EVM-выводе). Должно
+    // правильно отщепить fee от того же пула.
+    const repo = makeRepo({
+      accounts: [ACC],
+      trades: {
+        "acc-1": [
+          trade({
+            id: "T-1",
+            symbol: "BTC/USDT",
+            side: "buy",
+            amount: "0.201",
+            cost: "20100",
+            ts: 1000,
+          }),
+        ],
+      },
+      transfers: {
+        "acc-1": [
+          transfer({
+            id: "WD-1",
+            direction: "withdrawal",
+            asset: "WBTC",
+            amount: "0.2",
+            feeAmount: "0.001",
+            feeCurrency: "WBTC",
+            txHash: "0xwfee",
+            ts: 2000,
+          }),
+        ],
+      },
+    });
+    const svc = new CexCostBasisService(repo);
+    const out = await svc.computeForUser("u1");
+    expect(out).toHaveLength(1);
+    expect(out[0]!.asset).toBe("WBTC");
+    // Per-unit cost was $100000/BTC. Recipient got 0.2 → $20000.
+    expect(out[0]!.costBasisUsd).toBeCloseTo(20000, 1);
+    // Fee = 0.001 × $100000 = $100.
+    expect(out[0]!.feeLossUsd).toBeCloseTo(100, 1);
+    expect(out[0]!.feeAsset).toBe("WBTC");
+    expect(out[0]!.costBasisUsd + out[0]!.feeLossUsd).toBeCloseTo(20100, 1);
+  });
 });

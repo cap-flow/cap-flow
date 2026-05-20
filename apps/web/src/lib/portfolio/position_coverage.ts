@@ -30,6 +30,7 @@
  */
 
 import type { PurchaseEvent } from "./purchase_history";
+import { canonicalSymbol as normalizeSymbol } from "./wrapped_symbols";
 
 /**
  * Расширенный PurchaseEvent с пометкой источника cost basis — для
@@ -121,15 +122,14 @@ export interface ComputePositionCoverageInput {
 }
 
 /**
- * WETH→ETH (для группировки). Совпадает с локальной функцией в
- * purchase_history.ts — намеренно дублируем чтобы избежать import
- * cycles в будущем (там же `normalizeSymbol` приватный).
+ * UCB D4 client mirror: `normalizeSymbol` использует общий wrapped-token
+ * map (`canonicalSymbol`), чтобы withdrawal `WBTC` мог быть сопоставлен
+ * с on-chain `transfer_in` `BTC` (и наоборот). НЕ переиспользуется
+ * функция из purchase_history/lot_tracker — там нормализация WETH→ETH
+ * применима к on-chain группировке lot'ов; расширение map'ой может
+ * изменить tracking. Поэтому помимо `normalizeSymbol` используем только
+ * для CEX↔on-chain matching по symbol'у в `computePositionCoverage`.
  */
-function normalizeSymbol(s: string): string {
-  const u = s.toUpperCase();
-  if (u === "WETH") return "ETH";
-  return u;
-}
 
 export function computePositionCoverage(
   input: ComputePositionCoverageInput,

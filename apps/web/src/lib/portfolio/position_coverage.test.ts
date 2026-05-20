@@ -214,6 +214,33 @@ describe("computePositionCoverage — CEX inheritance", () => {
     expect(r.cexInheritance.usd).toBe(12500);
   });
 
+  it("WBTC ↔ BTC normalization (UCB D4 client mirror): CEX отдала WBTC, позиция держит BTC", () => {
+    // Симметричный D4: server canonicalize'ит pool как BTC, surface
+    // asset = WBTC. On-chain wallet может в редком cross-chain кейсе
+    // показать transfer_in `BTC`. Match должен сработать.
+    const r = computePositionCoverage({
+      totalAmount: 0.2,
+      events: [ev({ kind: "transfer_in", amount: 0.176, hash: "0xwbtc" })],
+      cexCostBasisByHash: mapOf(["0xwbtc", 20000, "WBTC"]),
+      targetSymbol: "BTC",
+    });
+    expect(r.cexInheritance.amount).toBeCloseTo(0.176, 6);
+    expect(r.cexInheritance.usd).toBe(20000);
+  });
+
+  it("WBTC ↔ WBTC normalization (типичный кейс): CEX отдала WBTC, позиция держит WBTC", () => {
+    // Обычный сценарий лекса (POS-007): EVM-wallet, withdrawal в Ethereum.
+    // Asset на обеих сторонах = WBTC. После UCB D4 — fiat-direct, не unknown.
+    const r = computePositionCoverage({
+      totalAmount: 0.176625,
+      events: [ev({ kind: "transfer_in", amount: 0.17609496, hash: "0x851144" })],
+      cexCostBasisByHash: mapOf(["0x851144", 20000, "WBTC"]),
+      targetSymbol: "WBTC",
+    });
+    expect(r.cexInheritance.amount).toBeCloseTo(0.17609496, 6);
+    expect(r.cexInheritance.usd).toBe(20000);
+  });
+
   it("CEX match с costBasisUsd=0 (source=unknown) → НЕ считается покрытием", () => {
     // У биржи нет фиатной точки опоры → не атрибутируем cost,
     // но amount остаётся в unknown bucket.
