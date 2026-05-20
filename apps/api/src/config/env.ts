@@ -63,7 +63,13 @@ const envSchema = z.object({
   RESEND_API_KEY: z.string().optional(),
   RESEND_FROM_EMAIL: z.string().email().default("noreply@cap-flow.ru"),
   RESEND_FROM_NAME: z.string().default("Capflow"),
-  TELEGRAM_BOT_USERNAME: z.string().optional(),
+  // Public Capflow bot username. Default = "defiCapflow_bot" (the official
+  // Capflow bot on Telegram). Admin override possible via /admin/integrations.
+  TELEGRAM_BOT_USERNAME: z.string().optional().default("defiCapflow_bot"),
+  // Bot API token. Secret — no default. Set via env or via the
+  // /admin/integrations UI (stored AES-encrypted in integration_secrets).
+  // Without it TelegramService.send() is a no-op.
+  TELEGRAM_BOT_API_TOKEN: z.string().optional(),
   TELEGRAM_LINK_TTL_MIN: z.coerce.number().int().positive().default(15),
 
   /**

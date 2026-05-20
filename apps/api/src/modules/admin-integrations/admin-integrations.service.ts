@@ -204,10 +204,24 @@ export class AdminIntegrationsService {
       },
       {
         key: "telegram",
-        name: "Telegram Bot",
-        purpose: "Telegram notifications link/start.",
+        name: "Telegram Bot Username",
+        purpose:
+          "Публичный username Telegram-бота (без @). Подставляется в deep-link авторизации.",
         envVar: "TELEGRAM_BOT_USERNAME",
         envValue: e.TELEGRAM_BOT_USERNAME,
+        isPublic: false,
+        perUserQuotaPerDay: null,
+        usageProvider: null,
+      },
+      {
+        // Bot API token (секретный). Без него TelegramService.send() —
+        // no-op. Хранится AES-encrypted в integration_secrets.
+        key: "telegram_token",
+        name: "Telegram Bot API Token",
+        purpose:
+          "Секретный bot API token из BotFather. Нужен для отправки уведомлений в чат пользователя.",
+        envVar: "TELEGRAM_BOT_API_TOKEN",
+        envValue: e.TELEGRAM_BOT_API_TOKEN,
         isPublic: false,
         perUserQuotaPerDay: null,
         usageProvider: null,

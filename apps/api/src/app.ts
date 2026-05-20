@@ -288,7 +288,15 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   });
   const telegramRepo = new TelegramRepository(app.db);
   const telegramService = new TelegramService(telegramRepo, app.audit, {
-    botUsername: env.TELEGRAM_BOT_USERNAME,
+    // Live getters: admin PATCH on /admin/integrations/telegram or
+    // /telegram_token mutates process.env → next call picks up the new
+    // value without a restart. Falls back to boot-time env (which
+    // includes the zod default "defiCapflow_bot" for username).
+    getBotUsername: () =>
+      process.env["TELEGRAM_BOT_USERNAME"]?.trim() || env.TELEGRAM_BOT_USERNAME,
+    getBotApiToken: () =>
+      process.env["TELEGRAM_BOT_API_TOKEN"]?.trim() ||
+      env.TELEGRAM_BOT_API_TOKEN,
     linkTtlMinutes: env.TELEGRAM_LINK_TTL_MIN,
   });
   const notificationSubsRepo = new NotificationSubscriptionsRepository(

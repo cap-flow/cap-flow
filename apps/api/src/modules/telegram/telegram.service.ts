@@ -5,8 +5,18 @@ import type { TelegramRepository, TelegramLinkRow } from "./telegram.repository.
 import type { TelegramProxyState } from "./telegram.proxy.js";
 
 export interface TelegramServiceConfig {
-  readonly botUsername: string | undefined;
-  readonly botApiToken?: string | undefined;
+  /**
+   * Live getter for the bot username. Called on every `startLink()` so
+   * admin PATCH on `/admin/integrations/telegram` takes effect without
+   * a restart (admin setSecret() mutates process.env and the wiring in
+   * app.ts reads from process.env first, then the boot-time env value).
+   */
+  readonly getBotUsername: () => string | undefined;
+  /**
+   * Live getter for the bot API token. Same hot-reload rationale as
+   * `getBotUsername`. Returning undefined makes `send()` no-op.
+   */
+  readonly getBotApiToken: () => string | undefined;
   readonly linkTtlMinutes: number;
 }
 
@@ -80,8 +90,9 @@ export class TelegramService {
       payload: { expiresAt: expiresAt.toISOString() },
     });
 
-    const deepLink = this.cfg.botUsername
-      ? `https://t.me/${this.cfg.botUsername}?start=${code}`
+    const username = this.cfg.getBotUsername()?.trim() ?? "";
+    const deepLink = username
+      ? `https://t.me/${username}?start=${code}`
       : "";
     return { code, deepLink, expiresAt };
   }
@@ -134,7 +145,8 @@ export class TelegramService {
   async send(userId: string, text: string): Promise<boolean> {
     const link = await this.repo.findActiveByUser(userId);
     if (!link || link.chatId === null) return false;
-    if (!this.cfg.botApiToken) return false;
+    const botApiToken = this.cfg.getBotApiToken()?.trim();
+    if (!botApiToken) return false;
 
     const proxy = this.proxyState?.currentSync() ?? null;
     // undici-specific `dispatcher` field is missing from the standard
@@ -151,7 +163,7 @@ export class TelegramService {
       ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
     } as unknown as RequestInit;
     const res = await fetch(
-      `https://api.telegram.org/bot${this.cfg.botApiToken}/sendMessage`,
+      `https://api.telegram.org/bot${botApiToken}/sendMessage`,
       init,
     );
     if (!res.ok) {
