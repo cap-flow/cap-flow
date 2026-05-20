@@ -14,8 +14,17 @@ import {
   ValidationError,
 } from "../core/errors.js";
 
+type ErrorShape = {
+  readonly code?: string;
+  readonly name?: string;
+  readonly message?: string;
+  readonly statusCode?: unknown;
+};
+
 export const errorHandlerPlugin = fp(async (app: FastifyInstance) => {
-  app.setErrorHandler((error, request, reply) => {
+  app.setErrorHandler((error: unknown, request, reply) => {
+    const e = error as ErrorShape;
+
     if (hasZodFastifySchemaValidationErrors(error)) {
       return reply.status(400).send({
         error: "ValidationError",
@@ -73,14 +82,11 @@ export const errorHandlerPlugin = fp(async (app: FastifyInstance) => {
     // these surfaced as 500 because they're not instanceof AppError —
     // the user got "Something went wrong" instead of the actual
     // rate-limit explanation.
-    const code =
-      typeof (error as { statusCode?: unknown }).statusCode === "number"
-        ? ((error as { statusCode: number }).statusCode)
-        : 0;
+    const code = typeof e.statusCode === "number" ? e.statusCode : 0;
     if (code >= 400 && code < 600) {
       return reply.status(code).send({
-        error: (error as { code?: string }).code ?? error.name ?? "Error",
-        message: error.message ?? "Request failed.",
+        error: e.code ?? e.name ?? "Error",
+        message: e.message ?? "Request failed.",
       });
     }
 

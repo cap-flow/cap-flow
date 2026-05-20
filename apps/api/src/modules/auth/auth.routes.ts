@@ -305,7 +305,7 @@ export async function authRoutes(
       clearRefreshCookie(reply, cookieCfg);
       clearAccessCookie(reply, accessCookieCfg);
       clearCsrfCookie(reply, csrfCookieCfg);
-      return reply.status(204).send();
+      return reply.status(204).send(null);
     }
   );
 }

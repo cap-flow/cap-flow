@@ -2,7 +2,7 @@ import type { AuditService } from "../audit/audit.service.js";
 import type { ChainClassifierService } from "../classifier/chain_classifier.service.js";
 import { isProtocolToken } from "../classifier/protocols.js";
 import { computeCostBasis } from "../cost-basis/cost-basis.js";
-import type { DeBankClient } from "../integrations/debank.js";
+import type { DeBankClient, DebankProtocolsSummary } from "../integrations/debank.js";
 import type { HeliusClient } from "../integrations/helius.js";
 import type { ApiUsageRepository } from "../api-usage/api-usage.repository.js";
 import type { OperationsRepository } from "../operations/operations.repository.js";
@@ -170,12 +170,7 @@ export class PortfolioRefreshService {
         // "fetch failed" (Node undici TypeError that loses upstream
         // status info).
         let bal: { totalUsdValue: number; chains: Array<{ id: string; usdValue: number }> } | null = null;
-        let proto: {
-          protocolsAssetUsd: number;
-          totalDebtUsd: number;
-          protocolsCount: number;
-          supplyTokens: ReadonlyArray<{ symbol: string; amount: number; priceUsd: number; chain: string }>;
-        } | null = null;
+        let proto: DebankProtocolsSummary | null = null;
 
         const t0 = Date.now();
         try {

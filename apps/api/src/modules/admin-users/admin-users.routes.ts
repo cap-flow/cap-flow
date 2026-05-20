@@ -194,7 +194,7 @@ export async function adminUsersRoutes(
       const u = req.user;
       if (!u) throw new UnauthorizedError();
       await service.deleteUser(req.params.id, u.id);
-      return reply.status(204).send();
+      return reply.status(204).send(null);
     }
   );
 
