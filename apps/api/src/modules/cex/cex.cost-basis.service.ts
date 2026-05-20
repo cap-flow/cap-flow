@@ -7,6 +7,7 @@ import type {
   CexTradeRow,
   CexTransferRow,
 } from "./cex.repository.js";
+import { canonicalSymbol } from "./wrapped-symbols.js";
 
 /**
  * Cost-basis chain across a CEX account.
@@ -248,6 +249,7 @@ export class CexCostBasisService {
     fxRates: ReadonlyMap<string, number>,
   ): void {
     const asset = r.asset.toUpperCase();
+    const poolKey = canonicalSymbol(asset);
     const amount = Number(r.amount);
     if (!Number.isFinite(amount) || amount <= 0) return;
 
@@ -261,11 +263,11 @@ export class CexCostBasisService {
         r.executedAt,
         fxRates,
       );
-      add(pools, asset, amount, costUsd, costUsd > 0);
+      add(pools, poolKey, amount, costUsd, costUsd > 0);
     } else if (r.side === "sell") {
       // User sent crypto, got fiat. Remove from pool — realized cost
       // exits the chain (we don't follow outgoing fiat).
-      remove(pools, asset, amount);
+      remove(pools, poolKey, amount);
     }
   }
 
@@ -275,8 +277,14 @@ export class CexCostBasisService {
     if (parts.length !== 2) return;
     const [baseRaw, quoteRaw] = parts;
     if (!baseRaw || !quoteRaw) return;
-    const base = baseRaw.toUpperCase();
-    const quote = quoteRaw.toUpperCase();
+    // UCB D4: route pools through canonical (unwrapped) symbol so that
+    // a `BTC/USDT` trade and a `WBTC` withdrawal share a pool. Stable-
+    // check still uses the surface symbol because the alias map covers
+    // only 1:1 wrapped tokens, not pegged stables.
+    const baseQuoted = baseRaw.toUpperCase();
+    const quoteQuoted = quoteRaw.toUpperCase();
+    const base = canonicalSymbol(baseQuoted);
+    const quote = canonicalSymbol(quoteQuoted);
     const baseAmount = Number(t.amount);
     const quoteAmount = Number(t.cost);
     if (!Number.isFinite(baseAmount) || baseAmount <= 0) return;
@@ -292,7 +300,7 @@ export class CexCostBasisService {
       // deposit-then-trade leave with zero cost.
       const seedCost = removedCost > 0
         ? removedCost
-        : isStableSymbol(quote)
+        : isStableSymbol(quoteQuoted)
           ? quoteAmount
           : 0;
       add(pools, base, baseAmount, seedCost, hadFiat || seedCost > 0);
@@ -302,7 +310,7 @@ export class CexCostBasisService {
       const hadFiat = pools.get(base)?.hasFiat ?? false;
       const seedCost = removedCost > 0
         ? removedCost
-        : isStableSymbol(quote)
+        : isStableSymbol(quoteQuoted)
           ? quoteAmount
           : 0;
       add(pools, quote, quoteAmount, seedCost, hadFiat || seedCost > 0);
@@ -315,6 +323,7 @@ export class CexCostBasisService {
     seedsByHash: ReadonlyMap<string, number>,
   ): void {
     const asset = t.asset.toUpperCase();
+    const poolKey = canonicalSymbol(asset);
     const amount = Number(t.amount);
     if (!Number.isFinite(amount) || amount <= 0) return;
     // UCB C1: если client заранее POST'ил seed для этого txHash —
@@ -325,7 +334,7 @@ export class CexCostBasisService {
     const seeded = txHash != null ? seedsByHash.get(txHash) : undefined;
     if (seeded != null && Number.isFinite(seeded) && seeded >= 0) {
       // hadFiat=true потому что seed = real money trail (client посчитал).
-      add(pools, asset, amount, seeded, true);
+      add(pools, poolKey, amount, seeded, true);
       return;
     }
     // Fallback (legacy): deposit from on-chain — cost basis is unknown
@@ -333,9 +342,9 @@ export class CexCostBasisService {
     // Add zero-cost. If the asset is a USD-pegged stable we approximate
     // cost = amount.
     if (isStableSymbol(asset)) {
-      add(pools, asset, amount, amount, false);
+      add(pools, poolKey, amount, amount, false);
     } else {
-      add(pools, asset, amount, 0, false);
+      add(pools, poolKey, amount, 0, false);
     }
   }
 
@@ -346,6 +355,11 @@ export class CexCostBasisService {
   ): WithdrawalCostBasis | null {
     if (!t.txHash) return null;
     const asset = t.asset.toUpperCase();
+    // UCB D4: pool routed through canonical (unwrapped) symbol. WBTC
+    // withdrawal consumes from BTC pool because exchange wraps at
+    // payout. The response still surfaces the original `asset` so on-
+    // chain matching by symbol keeps working.
+    const poolKey = canonicalSymbol(asset);
     const amount = Number(t.amount);
     if (!Number.isFinite(amount) || amount <= 0) return null;
 
@@ -361,28 +375,30 @@ export class CexCostBasisService {
       : feeAmount > 0
         ? asset // assume same asset if currency missing but amount present
         : null;
+    const feePoolKey = feeAsset ? canonicalSymbol(feeAsset) : null;
 
-    const pool = pools.get(asset);
+    const pool = pools.get(poolKey);
     let removedCost: number;
     let feeLossUsd = 0;
 
-    if (feeAmount > 0 && feeAsset === asset) {
-      // Same-asset fee: consume amount + fee from the pool, then split
-      // removed cost proportionally. user paid (amount+fee) of asset,
-      // recipient got `amount` → fee = realized loss.
+    if (feeAmount > 0 && feePoolKey === poolKey) {
+      // Same-asset fee (after canonical alias): consume amount + fee
+      // from the pool, then split removed cost proportionally. User
+      // paid (amount+fee) of asset, recipient got `amount` → fee =
+      // realized loss.
       const total = amount + feeAmount;
-      const totalCostRemoved = remove(pools, asset, total);
+      const totalCostRemoved = remove(pools, poolKey, total);
       removedCost = totalCostRemoved * (amount / total);
       feeLossUsd = totalCostRemoved * (feeAmount / total);
     } else {
       // Either no fee, or fee in a different currency.
-      removedCost = remove(pools, asset, amount);
-      if (feeAmount > 0 && feeAsset) {
+      removedCost = remove(pools, poolKey, amount);
+      if (feeAmount > 0 && feePoolKey) {
         // Consume fee from its own pool.
-        feeLossUsd = remove(pools, feeAsset, feeAmount);
+        feeLossUsd = remove(pools, feePoolKey, feeAmount);
         // If fee asset is a USD-stable, approximate fee USD = amount
         // even if pool didn't have cost basis (e.g. fresh BNB topup).
-        if (feeLossUsd === 0 && isStableSymbol(feeAsset)) {
+        if (feeLossUsd === 0 && feeAsset && isStableSymbol(feeAsset)) {
           feeLossUsd = feeAmount;
         }
       }
