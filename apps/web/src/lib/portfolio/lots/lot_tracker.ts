@@ -127,7 +127,7 @@ export class LotTracker {
       let totA = 0;
       let totC = 0;
       for (const lot of arr) {
-        if (opts.tokenId && lot.tokenId !== opts.tokenId.toLowerCase()) continue;
+        if (opts.tokenId && lot.tokenId && lot.tokenId !== opts.tokenId.toLowerCase()) continue;
         if (opts.chain && lot.chain !== opts.chain) continue;
         totA += lot.amount;
         totC += lot.amount * lot.costPerUnitUsd;
@@ -138,7 +138,14 @@ export class LotTracker {
     for (const lot of order) {
       if (remaining <= 1e-12) break;
       if (lot.amount <= 1e-12) continue;
-      if (opts.tokenId && lot.tokenId !== opts.tokenId.toLowerCase()) continue;
+      // UCB C12: лоты с пустым tokenId (типичный кейс — lend_withdraw
+      // где DeBank не отдаёт underlying contract address) НЕ должны
+      // игнорироваться по tokenId-фильтру. Match по symbol+chain
+      // достаточно — если лот без tokenId, доверяем что consume на
+      // ту же (walletId, symbol) пару — это его. Без C12 supply
+      // consume пропускал lend_withdraw лот → cost basis раздут
+      // (баг POS-005: $31,558 вместо $30,000).
+      if (opts.tokenId && lot.tokenId && lot.tokenId !== opts.tokenId.toLowerCase()) continue;
       if (opts.chain && lot.chain !== opts.chain) continue;
       const take = Math.min(lot.amount, remaining);
       // WAC: консумируем по running average. FIFO/LIFO: по цене конкретного лота.
@@ -180,7 +187,7 @@ export class LotTracker {
     if (this.methodology === "WAC" && wacCostPerUnit != null && wacCostPerUnit > 0) {
       for (const lot of arr) {
         if (lot.amount <= 1e-9) continue;
-        if (opts.tokenId && lot.tokenId !== opts.tokenId.toLowerCase()) continue;
+        if (opts.tokenId && lot.tokenId && lot.tokenId !== opts.tokenId.toLowerCase()) continue;
         if (opts.chain && lot.chain !== opts.chain) continue;
         (lot as { costPerUnitUsd: number }).costPerUnitUsd = wacCostPerUnit;
       }

@@ -255,4 +255,60 @@ describe("UCB C10: self-borrow inheritance (Morpho receipt-less leverage loop)",
       0.226 * wacAtFirstSupply! + 0.142 * wacAtSecondSupply!;
     expect(totalHistoricalCost).toBeCloseTo(30000, 0);
   });
+
+  it("UCB C12: lend_withdraw лот с пустым tokenId всё равно consume'ится supply'ем", () => {
+    // Бывшая прод-проблема artur@gmail.com POS-005:
+    // - lend_withdraw возвращал 0.226 WBTC с tokenId="" (DeBank не дал)
+    // - lend_supply Fluid пытался consume по tokenId="0x2f2a..." (real WBTC addr)
+    // - consume filter `lot.tokenId !== opts.tokenId` skipped лот с empty tokenId
+    // - Лот оставался alive → следующий supply видел WAC через ВСЕ лоты →
+    //   раздутый cost basis.
+    //
+    // Fix C12: relax filter — лоты с empty tokenId match по symbol+chain.
+    const ops: ClassifiedOp[] = [
+      // 0xwithdraw возвращает 0.226 WBTC с empty tokenId (синтетический
+      // case — реально DeBank lend_withdraw сейчас именно так)
+      {
+        hash: "0xwithdraw",
+        type: "lend_withdraw",
+        time: 1000,
+        chain: "arb",
+        protocol: { id: "arb_morpho", name: "Morpho", category: "lending" },
+        status: "ok",
+        movement: [
+          { direction: "out", symbol: "fUSDC", amount: 1, usd: 0, tokenId: "0xreceipt", isStable: false, isProtocolToken: true },
+          { direction: "in", symbol: "WBTC", amount: 0.226, usd: 20000, tokenId: "", isStable: false, isProtocolToken: false },
+        ],
+      } as unknown as ClassifiedOp,
+      // Fluid lend_supply 0.226 WBTC с реальным tokenId
+      {
+        hash: "0xsupply",
+        type: "lend_supply",
+        time: 2000,
+        chain: "arb",
+        protocol: { id: "arb_fluid", name: "Fluid", category: "lending" },
+        status: "ok",
+        movement: [
+          { direction: "out", symbol: "WBTC", amount: 0.226, usd: 17280, tokenId: "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f", isStable: false, isProtocolToken: false },
+        ],
+      } as unknown as ClassifiedOp,
+    ];
+
+    const tracker = buildLotTrackerFromOps(ops, {
+      walletId: "w1", histPrices: new Map(),
+    });
+
+    // После supply WBTC pool должен быть пустой (лот consumed).
+    expect(tracker.currentAmount("w1", "WBTC")).toBeLessThan(0.001);
+
+    // Лот должен иметь consume entry с правильным amount.
+    // Достаём из приватного state (доступ через as any для теста).
+    const allLots = (tracker as unknown as {
+      lots: Map<string, { sourceHash: string; consumes?: { time: number; amount: number }[] }[]>;
+    }).lots.get("w1|WBTC") ?? [];
+    const withdrawLot = allLots.find((l) => l.sourceHash === "0xwithdraw");
+    expect(withdrawLot).toBeDefined();
+    expect(withdrawLot!.consumes?.length).toBe(1);
+    expect(withdrawLot!.consumes![0]!.amount).toBeCloseTo(0.226, 6);
+  });
 });
