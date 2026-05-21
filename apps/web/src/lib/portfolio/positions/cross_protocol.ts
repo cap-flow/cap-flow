@@ -114,6 +114,21 @@ export function buildLotsAndPositions(
   // basis в matching bridge_in (та же chain-agnostic family key).
   const lastBridgeOutWac = new Map<string, number>();
 
+  // UCB C10: self-loop collateral state — отслеживает consumed cost
+  // basis WBTC/ETH/etc. при supply в lending protocol. Если потом
+  // тот же asset borrow'ится из ТОГО ЖЕ protocol (leverage loop),
+  // borrow inherits cost pro-rata. Иначе borrow = $0 (strict UCB).
+  //
+  // Канарейка: artur@gmail.com POS-005 — Morpho supply $20k WBTC →
+  // Morpho borrow 0.226 WBTC → Fluid supply. До C10 в cross_protocol
+  // borrow создавал lot с cost=0 → Fluid supply видел пустой пул →
+  // walker fallback на m.usd $17,280 (не $20k реальных трат).
+  // Key: `walletId|protocolId|symbol`. Value: { amount, totalCost }.
+  const selfLoopCollateral = new Map<
+    string,
+    { amount: number; totalCost: number }
+  >();
+
   const sorted = [...ops].sort((a, b) => a.time - b.time);
 
   for (const op of sorted) {
@@ -149,6 +164,7 @@ export function buildLotsAndPositions(
         positions,
         lots,
         histPrices,
+        selfLoopCollateral,
       );
     }
   }
@@ -468,6 +484,7 @@ function emitPositionEvent(
   positions: PositionTracker,
   lots: LotTracker,
   histPrices: Map<string, number>,
+  selfLoopCollateral: Map<string, { amount: number; totalCost: number }>,
 ): void {
   const protoId = op.protocol?.id ?? "";
   const isReceipt = (m: TokenMovement) =>
@@ -500,6 +517,23 @@ function emitPositionEvent(
         walletId,
       });
       lotCost = consumed.totalCostUsd;
+      // UCB C10: record consumed collateral cost basis для self-loop borrow
+      // inheritance. consumedCost == 0 fallback на m.usd чтобы borrow
+      // мог наследовать market-derived cost даже когда lots tracker пустой
+      // (case lend_withdraw→supply chain где tracker не достал cost basis).
+      const consumedCostForLoop =
+        lotCost > 0
+          ? lotCost
+          : isStableSymbol(m.symbol)
+            ? m.amount
+            : tokenUsdHist(m, op.chain, op.time, histPrices);
+      if (consumedCostForLoop > 0) {
+        const key = `${walletId}|${protoId}|${m.symbol.toUpperCase()}`;
+        const cur = selfLoopCollateral.get(key) ?? { amount: 0, totalCost: 0 };
+        cur.amount += m.amount;
+        cur.totalCost += consumedCostForLoop;
+        selfLoopCollateral.set(key, cur);
+      }
     } else if (eventType === "withdraw_collateral" && isReceipt(m)) {
       const consumed = lots.consume({
         symbol: m.symbol,
@@ -566,19 +600,45 @@ function emitPositionEvent(
         });
       }
     }
-    // Borrow proceeds (non-receipt in) — lot с cost=0.
+  }
+
+  // UCB C10: borrow event — создаёт lot для borrowed proceeds. Если same
+  // asset из ТОГО ЖЕ protocol только что был consumed как collateral
+  // (selfLoopCollateral!), inherit cost basis pro-rata. Иначе $0 (strict
+  // UCB — debt is not own money). Раньше этот код висел в
+  // deposit_collateral ветке → никогда не активировался для borrow ops
+  // (mapOpToEventType("borrow") === "borrow", не "deposit_collateral").
+  if (eventType === "borrow") {
     const borrowIns = op.movement.filter(
       (m) => m.direction === "in" && !isReceipt(m) && m.amount > 0,
     );
     for (const m of borrowIns) {
+      let costPerUnitUsd = 0;
+      let acquiredVia: AcquiredVia = "borrow";
+      const key = `${walletId}|${protoId}|${m.symbol.toUpperCase()}`;
+      const pool = selfLoopCollateral.get(key);
+      if (pool && pool.amount > 0 && pool.totalCost > 0) {
+        const inheritAmount = Math.min(m.amount, pool.amount);
+        const pricePerUnit = pool.totalCost / pool.amount;
+        const inheritedCost = inheritAmount * pricePerUnit;
+        costPerUnitUsd =
+          inheritAmount >= m.amount
+            ? pricePerUnit
+            : inheritedCost / m.amount; // pro-rata: inherited part, rest @ 0
+        acquiredVia = "borrow_self_loop";
+        pool.amount -= inheritAmount;
+        pool.totalCost -= inheritedCost;
+        if (pool.amount <= 1e-9) selfLoopCollateral.delete(key);
+        else selfLoopCollateral.set(key, pool);
+      }
       lots.acquire({
         symbol: m.symbol,
         tokenId: m.tokenId,
         chain: op.chain,
         amount: m.amount,
-        costPerUnitUsd: 0,
+        costPerUnitUsd,
         acquiredAt: op.time,
-        acquiredVia: "borrow",
+        acquiredVia,
         sourceHash: op.hash,
         walletId,
       });
