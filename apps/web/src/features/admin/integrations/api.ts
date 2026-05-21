@@ -81,4 +81,17 @@ export const adminIntegrationsApi = {
         telegramResponse: z.unknown(),
       }),
     ),
+  /** Pure-diagnostic ping: GET api.telegram.org/getMe через текущий proxy. */
+  testTelegramProxy: () =>
+    api.post(
+      "/v1/admin/telegram/test-proxy",
+      undefined as unknown,
+      z.object({
+        ok: z.boolean(),
+        proxyConfigured: z.boolean(),
+        proxyKind: z.string().nullable(),
+        durationMs: z.number(),
+        telegramResponse: z.unknown(),
+      }),
+    ),
 };

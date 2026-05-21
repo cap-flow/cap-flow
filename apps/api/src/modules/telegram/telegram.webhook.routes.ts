@@ -196,6 +196,76 @@ export async function telegramWebhookAdminRoutes(
   const route = app.withTypeProvider<ZodTypeProvider>();
   route.addHook("preHandler", app.requireAdmin);
 
+  // Quick diagnostic — пробует достучаться до api.telegram.org через
+  // текущий прокси-стейт и возвращает развёрнутый результат. Не меняет
+  // ничего в Telegram. Удобно когда setup-webhook падает с "fetch failed"
+  // и нужно понять что конкретно сломано.
+  route.post(
+    "/test-proxy",
+    {
+      schema: {
+        response: {
+          200: z.object({
+            ok: z.boolean(),
+            proxyConfigured: z.boolean(),
+            proxyKind: z.string().nullable(),
+            durationMs: z.number(),
+            telegramResponse: z.unknown(),
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const u = req.user;
+      if (!u) throw new UnauthorizedError();
+      const token = opts.getBotApiToken()?.trim();
+      if (!token) {
+        return {
+          ok: false,
+          proxyConfigured: false,
+          proxyKind: null,
+          durationMs: 0,
+          telegramResponse: {
+            error: "TELEGRAM_BOT_API_TOKEN не задан в админке.",
+          },
+        };
+      }
+      const proxy = opts.proxyState.currentSync();
+      const init = {
+        method: "GET",
+        ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
+      } as unknown as RequestInit;
+      const t0 = Date.now();
+      try {
+        const res = await fetch(
+          `https://api.telegram.org/bot${token}/getMe`,
+          init,
+        );
+        const dt = Date.now() - t0;
+        const json: unknown = await res.json().catch(() => ({
+          error: `non-JSON HTTP ${res.status}`,
+        }));
+        return {
+          ok: res.ok,
+          proxyConfigured: !!proxy,
+          proxyKind: proxy?.kind ?? null,
+          durationMs: dt,
+          telegramResponse: json,
+        };
+      } catch (e) {
+        return {
+          ok: false,
+          proxyConfigured: !!proxy,
+          proxyKind: proxy?.kind ?? null,
+          durationMs: Date.now() - t0,
+          telegramResponse: {
+            error: describeFetchError(e),
+          },
+        };
+      }
+    },
+  );
+
   route.post(
     "/setup-webhook",
     { schema: { response: { 200: setupResponseSchema } } },
@@ -317,6 +387,9 @@ async function handleSetupWebhook(
       init,
     );
   } catch (e) {
+    // undici оборачивает реальную причину в .cause — surface всю цепочку,
+    // иначе видим бесполезное "fetch failed".
+    const reason = describeFetchError(e);
     return {
       ok: false,
       url: webhookUrl,
@@ -325,7 +398,11 @@ async function handleSetupWebhook(
         error:
           `Не удалось достучаться до api.telegram.org` +
           (proxy ? ` через прокси (${proxy.kind})` : "") +
-          `: ${(e as Error).message}. Проверьте Telegram Bot Proxy в админке.`,
+          `: ${reason}. ` +
+          (proxy
+            ? `Возможные причины: прокси упал, не поддерживает HTTP CONNECT для HTTPS, неверные креды, или Telegram заблокирован для этого IP. ` +
+              `Проверьте через "Тест прокси" в админке.`
+            : `Возможно нужен прокси — настройте Telegram Bot Proxy в админке.`),
       },
     };
   }
@@ -339,3 +416,24 @@ async function handleSetupWebhook(
     telegramResponse: json,
   };
 }
+
+/**
+ * undici-style fetch errors hide the real reason in `.cause` (sometimes
+ * deeply nested). Walk the chain and pull out a readable description.
+ */
+function describeFetchError(e: unknown): string {
+  const parts: string[] = [];
+  let cur: unknown = e;
+  let depth = 0;
+  while (cur && depth < 5) {
+    const err = cur as { message?: string; code?: string; cause?: unknown };
+    const piece =
+      [err.code, err.message].filter(Boolean).join(" ").trim() ||
+      String(cur);
+    if (piece && !parts.includes(piece)) parts.push(piece);
+    cur = err.cause;
+    depth++;
+  }
+  return parts.join(" ← ") || "unknown error";
+}
+

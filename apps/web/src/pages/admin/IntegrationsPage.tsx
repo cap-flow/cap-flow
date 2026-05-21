@@ -22,6 +22,7 @@ import {
   useClearIntegration,
   useSetupTelegramWebhook,
   useTestCexProxy,
+  useTestTelegramProxy,
   useUpdateIntegration,
 } from "@/features/admin/integrations/hooks";
 import type {
@@ -182,6 +183,7 @@ function TelegramGroupHeader({
   readonly rowCount: number;
 }): JSX.Element {
   const setup = useSetupTelegramWebhook();
+  const test = useTestTelegramProxy();
   const [result, setResult] = useState<{
     ok: boolean;
     description: string;
@@ -210,6 +212,34 @@ function TelegramGroupHeader({
         ok: !!tgResp?.ok && r.ok,
         description: message,
       });
+    } catch (e) {
+      setResult({ ok: false, description: (e as Error).message });
+    }
+  }
+
+  async function onTestProxy(e: React.MouseEvent) {
+    e.stopPropagation();
+    setResult(null);
+    try {
+      const r = await test.mutateAsync();
+      const tgResp = r.telegramResponse as
+        | {
+            ok?: boolean;
+            description?: string;
+            result?: { username?: string };
+            error?: string;
+          }
+        | null;
+      const msg = r.ok
+        ? `✓ Прокси (${r.proxyKind ?? "direct"}) работает, ${r.durationMs}ms. ` +
+          (tgResp?.result?.username
+            ? `Бот: @${tgResp.result.username}`
+            : "")
+        : `Прокси (${r.proxyKind ?? "direct"}), ${r.durationMs}ms: ` +
+          (tgResp?.error ??
+            tgResp?.description ??
+            "Telegram вернул не-ok");
+      setResult({ ok: r.ok, description: msg });
     } catch (e) {
       setResult({ ok: false, description: (e as Error).message });
     }
@@ -255,15 +285,27 @@ function TelegramGroupHeader({
               )}
             </div>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={(e) => void onSetup(e)}
-            disabled={setup.isPending}
-          >
-            {setup.isPending ? "Регистрируем…" : "Зарегистрировать webhook"}
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={(e) => void onTestProxy(e)}
+              disabled={test.isPending}
+              title="Простой ping api.telegram.org/getMe через текущий прокси"
+            >
+              {test.isPending ? "Тестируем…" : "Тест прокси"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={(e) => void onSetup(e)}
+              disabled={setup.isPending}
+            >
+              {setup.isPending ? "Регистрируем…" : "Зарегистрировать webhook"}
+            </Button>
+          </div>
         </div>
       </td>
     </tr>

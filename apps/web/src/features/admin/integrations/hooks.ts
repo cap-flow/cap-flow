@@ -49,3 +49,10 @@ export function useSetupTelegramWebhook() {
     mutationFn: () => adminIntegrationsApi.setupTelegramWebhook(),
   });
 }
+
+/** Diagnostic: ping api.telegram.org/getMe through current proxy. */
+export function useTestTelegramProxy() {
+  return useMutation({
+    mutationFn: () => adminIntegrationsApi.testTelegramProxy(),
+  });
+}
