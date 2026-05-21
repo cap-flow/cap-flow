@@ -87,6 +87,13 @@ const envSchema = z.object({
   TELEGRAM_BOT_HTTPS_PROXY: z.string().optional(),
 
   /**
+   * Public origin сайта (без trailing slash). Используется для
+   * генерации absolute-ссылок в Telegram bot чате (finish-URL для
+   * signup-flow). В prod = `https://cap-flow.ru`, в dev = `http://localhost:5173`.
+   */
+  SITE_ORIGIN: z.string().default("https://cap-flow.ru"),
+
+  /**
    * Use long-polling (getUpdates) instead of webhook. Required when the
    * server is hosted behind an asymmetrically blocked network — RU/RKN
    * TSPU drops incoming TCP from Telegram DC ranges (149.154.x.x) to

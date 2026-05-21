@@ -52,6 +52,16 @@ export const users = pgTable(
     emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true }),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
 
+    /**
+     * Phase «Telegram signup» (2026-05-21, migration 0022): unique
+     * username для входа по нику — preset = telegram_username при
+     * регистрации через бот. Старые email-only юзеры остаются с
+     * username=NULL. Партиальный UNIQUE-индекс `WHERE username IS NOT
+     * NULL` создан в миграции (drizzle PG indices не поддерживают
+     * partial напрямую — index только декларативно).
+     */
+    username: text("username"),
+
     // Common fields.
     role: userRoleEnum("role").notNull().default("user"),
     status: userStatusEnum("status").notNull().default("active"),

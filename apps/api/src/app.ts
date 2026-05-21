@@ -110,6 +110,9 @@ import {
   telegramWebhookRoutes,
   telegramWebhookAdminRoutes,
 } from "./modules/telegram/telegram.webhook.routes.js";
+import { TelegramSignupRepository } from "./modules/auth-telegram-signup/signup.repository.js";
+import { TelegramSignupService } from "./modules/auth-telegram-signup/signup.service.js";
+import { telegramSignupRoutes } from "./modules/auth-telegram-signup/signup.routes.js";
 import { passwordResetRoutes } from "./modules/auth/password-reset.routes.js";
 import { emailVerificationRoutes } from "./modules/auth/email-verification.routes.js";
 import { EmailVerificationRepository } from "./modules/auth/email-verification.repository.js";
@@ -467,6 +470,23 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   await telegramProxyState.refresh();
   telegramService.attachProxyState(telegramProxyState);
 
+  // Telegram-signup сервис (создаёт аккаунты через бот для anonymous
+  // visitor'ов на /login). Должен быть инициализирован ДО poller'а
+  // чтобы передать его как dep — иначе /start s_<nonce> попадёт в
+  // legacy flow и ответит "Код недействителен".
+  const telegramSignupRepo = new TelegramSignupRepository(app.db);
+  const telegramSignupService = new TelegramSignupService(
+    telegramSignupRepo,
+    app.audit,
+    {
+      siteOrigin: env.SITE_ORIGIN,
+      nonceTtlMinutes: 10,
+    },
+    app.log,
+    () =>
+      process.env["TELEGRAM_BOT_USERNAME"]?.trim() || env.TELEGRAM_BOT_USERNAME,
+  );
+
   // Long-polling worker: starts only if TELEGRAM_BOT_USE_POLLING=true.
   // Reads bot token live (same getter as webhook routes), so admin can
   // configure the token after boot and polling picks it up on the next
@@ -478,6 +498,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         env.TELEGRAM_BOT_API_TOKEN,
       proxyState: telegramProxyState,
       telegram: telegramService,
+      signup: telegramSignupService,
       log: app.log,
     });
     poller.start();
@@ -761,10 +782,19 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       // bot token).
       await api.register(telegramWebhookRoutes, {
         telegram: telegramService,
+        signup: telegramSignupService,
         getBotApiToken: () =>
           process.env["TELEGRAM_BOT_API_TOKEN"]?.trim() ||
           env.TELEGRAM_BOT_API_TOKEN,
         prefix: "/webhooks/telegram",
+      });
+      // Anonymous Telegram signup/login routes (POST start, GET finish,
+      // POST set-password).
+      await api.register(telegramSignupRoutes, {
+        env,
+        signup: telegramSignupService,
+        auth: app.auth,
+        prefix: "/auth/telegram",
       });
       // Admin-triggered registration of the webhook URL with Telegram.
       await api.register(telegramWebhookAdminRoutes, {

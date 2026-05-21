@@ -244,4 +244,61 @@ export class AuthService {
   async hashPasswordForStorage(plain: string): Promise<string> {
     return hashPassword(plain);
   }
+
+  /**
+   * Выпустить session+access tokens для уже-аутентифицированного user'а
+   * (по результату Telegram bot flow, email verification и т. п.).
+   *
+   * В отличие от `login()` здесь нет verifyPassword — caller уже доказал
+   * identity (вошёл через bot deeplink или verified email-token). Также
+   * принимает `userRow` напрямую, чтобы избежать лишнего lookup'а.
+   *
+   * `status` проверка снаружи: signup-flow создаёт юзера со
+   * status="pending", и нам нужно выдать сессию ему чтобы он смог
+   * пройти set-password (где status переключится на "active").
+   * Стандартный `requireAuth` middleware пропускает любые non-blocked
+   * статусы.
+   */
+  async issueTokensForUser(
+    user: UserRow,
+    meta: { userAgent: string | null; ip: string | null },
+  ): Promise<AuthTokensBundle> {
+    const now = new Date();
+    const refreshToken = generateRefreshToken();
+    const refreshTokenHash = hashToken(refreshToken);
+    const refreshExpires = new Date(
+      now.getTime() + this.config.refreshTtlDays * 24 * 60 * 60 * 1000,
+    );
+
+    const session = await this.repo.createSession({
+      userId: user.id,
+      sessionTokenHash: refreshTokenHash,
+      userAgent: meta.userAgent,
+      ip: meta.ip,
+      expiresAt: refreshExpires,
+    });
+
+    const access = signAccessToken(
+      { sub: user.id, role: user.role as UserRole, sid: session.id },
+      this.config.jwtSecret,
+      this.config.accessTtlMinutes,
+    );
+
+    await this.repo.touchUserLastLogin(user.id, now);
+    await this.audit.log({
+      actorUserId: user.id,
+      action: "auth.login_via_telegram",
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      payload: { sessionId: session.id },
+    });
+
+    return {
+      accessToken: access.token,
+      accessTokenExpiresAt: access.expiresAt,
+      refreshToken,
+      refreshTokenExpiresAt: refreshExpires,
+      user,
+    };
+  }
 }

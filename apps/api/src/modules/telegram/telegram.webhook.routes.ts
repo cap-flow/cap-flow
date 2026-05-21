@@ -46,7 +46,10 @@ export const telegramUpdateSchema = z
         chat: z.object({ id: z.number() }).passthrough(),
         from: z
           .object({
+            id: z.number().optional(),
             username: z.string().optional().nullable(),
+            first_name: z.string().optional().nullable(),
+            last_name: z.string().optional().nullable(),
           })
           .partial()
           .optional(),
@@ -70,10 +73,20 @@ export type TelegramUpdate = z.infer<typeof telegramUpdateSchema>;
  * retry), poller logs and continues to the next update (the offset
  * still advances so we don't loop on a poison message).
  */
+export interface ProcessTelegramUpdateDeps {
+  readonly telegram: TelegramService;
+  /**
+   * Опциональный — нужен для нового signup-flow (`/start s_<nonce>`).
+   * Если не задан, signup-коды получают friendly "сервис недоступен".
+   */
+  readonly signup?: import("../auth-telegram-signup/signup.service.js").TelegramSignupService;
+}
+
 export async function processTelegramUpdate(
   update: TelegramUpdate,
-  telegram: TelegramService,
+  deps: ProcessTelegramUpdateDeps,
 ): Promise<boolean> {
+  const { telegram, signup } = deps;
   const msg = update.message;
   if (!msg || typeof msg.text !== "string" || !msg.chat?.id) {
     return false;
@@ -84,6 +97,57 @@ export async function processTelegramUpdate(
   const chatId = msg.chat.id;
   const tgUsername = msg.from?.username?.trim() || null;
 
+  // Dispatcher: `s_<nonce>` → новый signup-flow (anonymous user creates
+  // account from /login). Иначе — legacy link-existing-account flow
+  // через `telegram_links` table (/preferences «Авторизоваться в TG»).
+  const { parseSignupStartCode, SignupNonceError, defaultSignupBotMessages } =
+    await import("../auth-telegram-signup/signup.service.js");
+  const signupRawNonce = parseSignupStartCode(rawCode);
+
+  if (signupRawNonce) {
+    if (!signup) {
+      await telegram.sendToChat(
+        chatId,
+        "❌ Сервис регистрации временно недоступен. Попробуйте позже.",
+      );
+      return true;
+    }
+    const telegramUserId = msg.from?.id;
+    if (typeof telegramUserId !== "number") {
+      // Без telegram_user_id мы не можем создать / найти юзера.
+      await telegram.sendToChat(
+        chatId,
+        "❌ Не удалось определить ваш Telegram ID. Откройте Telegram и попробуйте снова.",
+      );
+      return true;
+    }
+    try {
+      const r = await signup.handleBotStart({
+        rawNonce: signupRawNonce,
+        telegramUserId,
+        telegramChatId: chatId,
+        telegramUsername: tgUsername,
+        firstName: msg.from?.first_name?.trim() || null,
+        lastName: msg.from?.last_name?.trim() || null,
+      });
+      await telegram.sendToChat(
+        chatId,
+        defaultSignupBotMessages.ok(r.finishUrl, r.createdNewUser),
+      );
+    } catch (e) {
+      if (e instanceof SignupNonceError) {
+        await telegram.sendToChat(
+          chatId,
+          defaultSignupBotMessages.error(e.reason),
+        );
+        return true;
+      }
+      throw e;
+    }
+    return true;
+  }
+
+  // Legacy link-existing-account flow.
   const link = await telegram.completeLink({
     rawCode,
     chatId,
@@ -108,6 +172,7 @@ export async function processTelegramUpdate(
 interface WebhookOptions {
   readonly telegram: TelegramService;
   readonly getBotApiToken: () => string | undefined;
+  readonly signup?: import("../auth-telegram-signup/signup.service.js").TelegramSignupService;
 }
 
 export async function telegramWebhookRoutes(
@@ -162,7 +227,10 @@ export async function telegramWebhookRoutes(
         return { ok: true };
       }
       try {
-        await processTelegramUpdate(parsed.data, opts.telegram);
+        await processTelegramUpdate(parsed.data, {
+          telegram: opts.telegram,
+          ...(opts.signup ? { signup: opts.signup } : {}),
+        });
       } catch (e) {
         app.log.error(
           { err: (e as Error).message },

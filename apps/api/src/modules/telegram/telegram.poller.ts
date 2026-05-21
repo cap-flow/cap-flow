@@ -42,6 +42,11 @@ export interface TelegramPollerOptions {
   readonly telegram: TelegramService;
   readonly log: FastifyBaseLogger;
   /**
+   * Optional: signup-сервис для обработки `/start s_<nonce>` flow.
+   * Без него такие коды получают friendly "сервис недоступен".
+   */
+  readonly signup?: import("../auth-telegram-signup/signup.service.js").TelegramSignupService;
+  /**
    * Long-poll timeout (seconds) — Telegram holds the connection open
    * up to this long if no update is ready. Server-side cap is 50s; we
    * use 25s as a safe default that survives most NAT keepalives.
@@ -92,7 +97,10 @@ export class TelegramPoller {
         const updates = await this.fetchUpdates(token, timeoutSec);
         for (const u of updates) {
           try {
-            await processTelegramUpdate(u, this.opts.telegram);
+            await processTelegramUpdate(u, {
+              telegram: this.opts.telegram,
+              ...(this.opts.signup ? { signup: this.opts.signup } : {}),
+            });
           } catch (e) {
             this.opts.log.error(
               { err: (e as Error).message, update_id: u.update_id },

@@ -176,6 +176,7 @@ export class NotificationsService {
       telegramUsername: null,
       firstName: null,
       lastName: null,
+      username: null,
       role: "user",
       status: "active",
       notes: null,

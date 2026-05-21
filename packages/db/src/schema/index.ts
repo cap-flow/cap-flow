@@ -25,6 +25,9 @@ export * from "./portfolio_snapshots.js";
 export * from "./telegram_links.js";
 export * from "./notification_subscriptions.js";
 
+// Telegram-based primary auth (signup/login through bot, 2026-05-21).
+export * from "./telegram_signup_nonces.js";
+
 // Crypto subscription billing (Phase 8).
 export * from "./crypto_payment_addresses.js";
 export * from "./payment_transactions.js";
