@@ -86,6 +86,30 @@ const envSchema = z.object({
    */
   TELEGRAM_BOT_HTTPS_PROXY: z.string().optional(),
 
+  /**
+   * Use long-polling (getUpdates) instead of webhook. Required when the
+   * server is hosted behind an asymmetrically blocked network — RU/RKN
+   * TSPU drops incoming TCP from Telegram DC ranges (149.154.x.x) to
+   * Russian IPs, even though outgoing to api.telegram.org via the
+   * configured proxy works fine. Polling reverses the connection
+   * direction and is unaffected.
+   *
+   * Defaults to `false` so behaviour stays the same for existing
+   * deployments. Set `TELEGRAM_BOT_USE_POLLING=true` in `.env` on the
+   * RU prod to switch. Admin should ALSO press «Удалить webhook» once
+   * after toggling, otherwise Telegram returns 409 to getUpdates.
+   */
+  TELEGRAM_BOT_USE_POLLING: z
+    .union([
+      z.literal("true"),
+      z.literal("false"),
+      z.literal("1"),
+      z.literal("0"),
+      z.literal(""),
+    ])
+    .optional()
+    .transform((v) => v === "true" || v === "1"),
+
   // Billing (Phase 8). On beta we run the pre-generated address pool —
   // comma-separated env vars below. HD wallet rotation comes later.
   BILLING_PRICE_3M_USD: z.coerce.number().positive().default(100),

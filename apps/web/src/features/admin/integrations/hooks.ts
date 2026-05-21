@@ -67,3 +67,10 @@ export function useTelegramWebhookInfo() {
     mutationFn: () => adminIntegrationsApi.getTelegramWebhookInfo(),
   });
 }
+
+/** Delete webhook у Telegram — для перехода на polling. */
+export function useDeleteTelegramWebhook() {
+  return useMutation({
+    mutationFn: () => adminIntegrationsApi.deleteTelegramWebhook(),
+  });
+}

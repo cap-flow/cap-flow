@@ -112,4 +112,19 @@ export const adminIntegrationsApi = {
         telegramResponse: z.unknown(),
       }),
     ),
+  /**
+   * Delete webhook у Telegram — нужно перед переключением на polling
+   * (Telegram возвращает 409 на getUpdates если webhook ещё активен).
+   */
+  deleteTelegramWebhook: () =>
+    api.post(
+      "/v1/admin/telegram/delete-webhook",
+      undefined as unknown,
+      z.object({
+        ok: z.boolean(),
+        proxyKind: z.string().nullable(),
+        durationMs: z.number(),
+        telegramResponse: z.unknown(),
+      }),
+    ),
 };

@@ -38,8 +38,9 @@ export function deriveWebhookSecret(botApiToken: string | undefined): string {
   return crypto.createHash("sha256").update(t).digest("hex").slice(0, 32);
 }
 
-const updateSchema = z
+export const telegramUpdateSchema = z
   .object({
+    update_id: z.number().optional(),
     message: z
       .object({
         chat: z.object({ id: z.number() }).passthrough(),
@@ -55,6 +56,54 @@ const updateSchema = z
       .optional(),
   })
   .passthrough();
+
+export type TelegramUpdate = z.infer<typeof telegramUpdateSchema>;
+
+/**
+ * Shared update handler — called by both the webhook receiver and the
+ * long-polling worker. Recognises `/start <code>` deep-link payloads,
+ * completes the link, and replies in the same chat. Returns `true` if
+ * the update was matched and processed (success or graceful failure),
+ * `false` if it was an unrelated update (other command / non-message).
+ *
+ * Throws are caught by the caller — webhook returns 200 anyway (no
+ * retry), poller logs and continues to the next update (the offset
+ * still advances so we don't loop on a poison message).
+ */
+export async function processTelegramUpdate(
+  update: TelegramUpdate,
+  telegram: TelegramService,
+): Promise<boolean> {
+  const msg = update.message;
+  if (!msg || typeof msg.text !== "string" || !msg.chat?.id) {
+    return false;
+  }
+  const m = msg.text.trim().match(/^\/start(?:@\S+)?\s+(\S+)/i);
+  if (!m) return false;
+  const rawCode = m[1]!;
+  const chatId = msg.chat.id;
+  const tgUsername = msg.from?.username?.trim() || null;
+
+  const link = await telegram.completeLink({
+    rawCode,
+    chatId,
+    telegramUsername: tgUsername,
+  });
+  if (!link) {
+    await telegram.sendToChat(
+      chatId,
+      "❌ Код активации недействителен или истёк. Откройте /preferences в Capflow и нажмите *Авторизоваться в Telegram* ещё раз.",
+    );
+  } else {
+    await telegram.sendToChat(
+      chatId,
+      "✅ Готово! Ваш Capflow-аккаунт связан с этим Telegram-чатом.\n\n" +
+        "Теперь вы будете получать здесь уведомления о ваших позициях.\n" +
+        "Откройте /preferences в Capflow чтобы выбрать какие именно события приходят.",
+    );
+  }
+  return true;
+}
 
 interface WebhookOptions {
   readonly telegram: TelegramService;
@@ -104,60 +153,23 @@ export async function telegramWebhookRoutes(
         return { ok: false };
       }
 
-      const parsed = updateSchema.safeParse(req.body);
+      const parsed = telegramUpdateSchema.safeParse(req.body);
       if (!parsed.success) {
-        // Malformed update — log and 200 OK so Telegram doesn't retry.
         app.log.warn(
           { err: parsed.error.message },
           "[telegram-webhook] malformed update body",
         );
         return { ok: true };
       }
-
-      const msg = parsed.data.message;
-      if (!msg || typeof msg.text !== "string" || !msg.chat?.id) {
-        // Non-message update (edited_message, callback_query, …) —
-        // ignore for now.
-        return { ok: true };
-      }
-
-      // Parse `/start <code>` — allow leading whitespace and a trailing
-      // `@BotName` suffix some clients append.
-      const m = msg.text.trim().match(/^\/start(?:@\S+)?\s+(\S+)/i);
-      if (!m) {
-        // Some other command/text. Polite no-op for now.
-        return { ok: true };
-      }
-      const rawCode = m[1]!;
-      const chatId = msg.chat.id;
-      const tgUsername = msg.from?.username?.trim() || null;
-
       try {
-        const link = await opts.telegram.completeLink({
-          rawCode,
-          chatId,
-          telegramUsername: tgUsername,
-        });
-        if (!link) {
-          await opts.telegram.sendToChat(
-            chatId,
-            "❌ Код активации недействителен или истёк. Откройте /preferences в Capflow и нажмите *Авторизоваться в Telegram* ещё раз.",
-          );
-        } else {
-          await opts.telegram.sendToChat(
-            chatId,
-            "✅ Готово! Ваш Capflow-аккаунт связан с этим Telegram-чатом.\n\n" +
-              "Теперь вы будете получать здесь уведомления о ваших позициях.\n" +
-              "Откройте /preferences в Capflow чтобы выбрать какие именно события приходят.",
-          );
-        }
+        await processTelegramUpdate(parsed.data, opts.telegram);
       } catch (e) {
         app.log.error(
           { err: (e as Error).message },
           "[telegram-webhook] completeLink/send failed",
         );
-        // Still 200 — Telegram will retry on non-2xx and we don't want
-        // a perma-stuck poison message.
+        // Still 200 — Telegram retries on non-2xx; poison messages
+        // shouldn't perma-stick.
       }
       return { ok: true };
     },
@@ -329,6 +341,73 @@ export async function telegramWebhookAdminRoutes(
         return {
           ok: false,
           tokenConfigured: true,
+          proxyKind: proxy?.kind ?? null,
+          durationMs: Date.now() - t0,
+          telegramResponse: { error: describeFetchError(e) },
+        };
+      }
+    },
+  );
+
+  // Delete the registered webhook so the bot can switch to long-polling.
+  // Telegram refuses getUpdates with 409 «terminated by other getUpdates
+  // request» if a webhook is still registered. Idempotent — calling on
+  // an already-empty bot returns ok:true with description "Webhook is
+  // already deleted".
+  route.post(
+    "/delete-webhook",
+    {
+      schema: {
+        response: {
+          200: z.object({
+            ok: z.boolean(),
+            proxyKind: z.string().nullable(),
+            durationMs: z.number(),
+            telegramResponse: z.unknown(),
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const u = req.user;
+      if (!u) throw new UnauthorizedError();
+      const token = opts.getBotApiToken()?.trim();
+      if (!token) {
+        return {
+          ok: false,
+          proxyKind: null,
+          durationMs: 0,
+          telegramResponse: {
+            error: "TELEGRAM_BOT_API_TOKEN не задан в админке.",
+          },
+        };
+      }
+      const proxy = opts.proxyState.currentSync();
+      const init = {
+        method: "POST" as const,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drop_pending_updates: false }),
+        ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
+      };
+      const t0 = Date.now();
+      try {
+        const res = await undiciFetch(
+          `https://api.telegram.org/bot${token}/deleteWebhook`,
+          init,
+        );
+        const dt = Date.now() - t0;
+        const json: unknown = await res.json().catch(() => ({
+          error: `non-JSON HTTP ${res.status}`,
+        }));
+        return {
+          ok: res.ok,
+          proxyKind: proxy?.kind ?? null,
+          durationMs: dt,
+          telegramResponse: json,
+        };
+      } catch (e) {
+        return {
+          ok: false,
           proxyKind: proxy?.kind ?? null,
           durationMs: Date.now() - t0,
           telegramResponse: { error: describeFetchError(e) },

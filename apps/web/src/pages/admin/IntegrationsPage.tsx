@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import {
   useAdminIntegrations,
   useClearIntegration,
+  useDeleteTelegramWebhook,
   useSetupTelegramWebhook,
   useTelegramWebhookInfo,
   useTestCexProxy,
@@ -186,6 +187,7 @@ function TelegramGroupHeader({
   const setup = useSetupTelegramWebhook();
   const test = useTestTelegramProxy();
   const info = useTelegramWebhookInfo();
+  const del = useDeleteTelegramWebhook();
   const [result, setResult] = useState<{
     ok: boolean;
     description: string;
@@ -269,6 +271,33 @@ function TelegramGroupHeader({
           ` · pending=${w.pending_update_count ?? 0}` +
           (w.ip_address ? ` · ip=${w.ip_address}` : "") +
           errLine,
+      });
+    } catch (e) {
+      setResult({ ok: false, description: (e as Error).message });
+    }
+  }
+
+  async function onDeleteWebhook(e: React.MouseEvent) {
+    e.stopPropagation();
+    setResult(null);
+    try {
+      const r = await del.mutateAsync();
+      const tgResp = r.telegramResponse as
+        | { ok?: boolean; description?: string; error?: string }
+        | null;
+      if (tgResp?.error) {
+        setResult({
+          ok: false,
+          description: `(${r.proxyKind ?? "direct"}, ${r.durationMs}ms) ${tgResp.error}`,
+        });
+        return;
+      }
+      setResult({
+        ok: r.ok,
+        description:
+          (r.ok ? "✓ " : "") +
+          (tgResp?.description ?? "Webhook удалён") +
+          " — теперь polling-worker сможет читать getUpdates без 409.",
       });
     } catch (e) {
       setResult({ ok: false, description: (e as Error).message });
@@ -363,6 +392,16 @@ function TelegramGroupHeader({
               title="Покажет, что Telegram сейчас знает о webhook: url, pending updates, last_error"
             >
               {info.isPending ? "Запрашиваем…" : "Статус webhook"}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={(e) => void onDeleteWebhook(e)}
+              disabled={del.isPending}
+              title="Удалить webhook у Telegram — нужно перед переходом на polling-режим (TELEGRAM_BOT_USE_POLLING=true). Telegram возвращает 409 на getUpdates, пока webhook активен."
+            >
+              {del.isPending ? "Удаляем…" : "Удалить webhook"}
             </Button>
             <Button
               type="button"

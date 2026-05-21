@@ -105,6 +105,7 @@ import { TelegramRepository } from "./modules/telegram/telegram.repository.js";
 import { telegramRoutes } from "./modules/telegram/telegram.routes.js";
 import { TelegramService } from "./modules/telegram/telegram.service.js";
 import { TelegramProxyState } from "./modules/telegram/telegram.proxy.js";
+import { TelegramPoller } from "./modules/telegram/telegram.poller.js";
 import {
   telegramWebhookRoutes,
   telegramWebhookAdminRoutes,
@@ -465,6 +466,28 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   );
   await telegramProxyState.refresh();
   telegramService.attachProxyState(telegramProxyState);
+
+  // Long-polling worker: starts only if TELEGRAM_BOT_USE_POLLING=true.
+  // Reads bot token live (same getter as webhook routes), so admin can
+  // configure the token after boot and polling picks it up on the next
+  // iteration without restart.
+  if (env.TELEGRAM_BOT_USE_POLLING) {
+    const poller = new TelegramPoller({
+      getBotApiToken: () =>
+        process.env["TELEGRAM_BOT_API_TOKEN"]?.trim() ||
+        env.TELEGRAM_BOT_API_TOKEN,
+      proxyState: telegramProxyState,
+      telegram: telegramService,
+      log: app.log,
+    });
+    poller.start();
+    app.addHook("onClose", async () => {
+      await poller.stop();
+    });
+    app.log.info(
+      "[telegram] long-polling worker started (TELEGRAM_BOT_USE_POLLING=true)",
+    );
+  }
 
   const cexRepo = new CexRepository(app.db);
   const cexService = new CexService(
