@@ -129,16 +129,13 @@ function looksLikeAddrAttempt(s: string): boolean {
   // mistake; we still flag.
   if (s.startsWith("0x")) {
     // Канонический tx hash / block hash / bytes32 slot — НЕ malformed-flag.
-    // 0x + 64 hex = 66 chars total. Любой `eth_getTransactionReceipt`,
-    // `eth_getBlockByHash`, `eth_getStorageAt` имеет такой param[0] —
-    // мы НЕ должны помечать его как malformed address. Это **не** address
-    // attempt вообще. Без этого фильтра P1 V3 pool-resolver получает 400
-    // на каждом receipt-fetch'е.
-    //
-    // 10-char shapes (function selectors типа 0xdeadbeef) НЕ exempted —
-    // они могут быть и malformed address attempt'ом (slot ожидает 42 char
-    // address, передали что-то короткое). Test coverage в address-guard.test
-    // явно требует флагать `0xdeadbeef` как malformed.
+    // 0x + 64 hex = 66 chars total. Param[0] для
+    // `eth_getTransactionReceipt`, `eth_getBlockByHash`, `eth_getStorageAt`.
+    // Без exempt P1 V3 pool-resolver получал 400. 10-char shapes
+    // (`0xdeadbeef`) остаются flagged — test coverage явно требует.
+    // Block numbers / chain IDs (params[1] для eth_call etc.) НЕ
+    // достигают этой функции потому что они skip'аются в
+    // `handleRpcCall` — мы checks ТОЛЬКО params[0] для read-methods.
     if (s.length === 66 && /^0x[a-fA-F0-9]{64}$/.test(s)) return false;
     return true; // hex-ish but failed EVM regex (40 hex chars)
   }
@@ -223,11 +220,21 @@ function extractAlchemy(
     if (Array.isArray(params)) {
       // `params[0]` may be string (addr) OR object (filter w/ from/to).
       walkParamElement(params[0], `body${idx}.params[0]`, out, invalid);
-      // Some methods take `to` as second/third arg — keep walking
-      // shallow for safety.
-      for (let i = 1; i < params.length; i++) {
-        walkParamElement(params[i], `body${idx}.params[${i}]`, out, invalid);
-      }
+      // params[1+] для standard read-methods (`eth_call`, `eth_getBalance`,
+      // `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount`) — это
+      // **block tag** (типа "latest" или hex block number "0x17de95d"), не
+      // address. Раньше мы шли через все params шалово, но это давало false
+      // positive на block numbers: `0x17de95d` (9 chars) НЕ адрес и НЕ
+      // tx hash, но `looksLikeAddrAttempt` помечала как malformed.
+      //
+      // Для `eth_call` второй param — block tag. То же для других
+      // account-методов. Single-param методы типа
+      // `eth_getTransactionReceipt(txHash)` тут не задеваются (только
+      // params[0] check'ается).
+      //
+      // Если в будущем появится метод где params[1+] — address slot, явно
+      // добавим case-by-case через RPC method whitelist. Сейчас "shallow
+      // for safety" walking создавал больше проблем чем решал.
     } else if (typeof params === "object" && params !== null) {
       // JSON-RPC by-name params (DAS RPC).
       walkParamElement(params, `body${idx}.params`, out, invalid);

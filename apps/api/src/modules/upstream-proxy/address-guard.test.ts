@@ -184,6 +184,33 @@ describe("address-guard — Alchemy extraction", () => {
     expect(r.invalid).toHaveLength(0);
   });
 
+  it("eth_call с block tag в params[1] — block hex НЕ flag'нуть", () => {
+    // V3 hist-price hook делает eth_call({to: pool, data: 0x3850c7bd}, "0x17de95d")
+    // чтобы fetch'нуть slot0() на конкретном block height. Block tag
+    // params[1] не должен превращаться в malformed address — раньше
+    // он flag'ировался потому что `0x17de95d` ≠ 42-char address.
+    const r = extractAddresses(
+      req({
+        provider: "alchemy",
+        method: "POST",
+        path: "eth-mainnet",
+        body: {
+          jsonrpc: "2.0",
+          method: "eth_call",
+          params: [
+            { to: "0xb431c70f800100d87554ac1142c4a94c5fe4c0c4", data: "0x3850c7bd" },
+            "0x17de95d", // block number hex
+          ],
+          id: 1,
+        },
+      }),
+    );
+    // `to` field is in NON_USER_KEYS (skipped), params[1] is block tag
+    // (skipped in handleRpcCall). 0 addresses extracted, 0 invalid.
+    expect(r.addresses).toHaveLength(0);
+    expect(r.invalid).toHaveLength(0);
+  });
+
   it("decide() для eth_getTransactionReceipt → allow", () => {
     const txHash =
       "0xa4b7940802fa46b801102989ed5d363beb1579004893c680ce3e5234db7ec3c9";
