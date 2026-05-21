@@ -569,6 +569,13 @@ function emitPositionEvent(
   // получает recovered cost пропорционально amount).
   if (eventType === "withdraw_collateral" && attributedCost > 0) {
     const totalInUsd = inTokens.reduce((s, t) => s + t.usd, 0);
+    // UCB anti-recurrence #1: position delta для withdraw_collateral
+    // должен снимать ИМЕННО attributedCost (фактический cost basis,
+    // возвращённый из receipt lots), а не market spot. Иначе positions
+    // currentCostBasisUsd дрейфует при partial supply/withdraw сериях
+    // (нашёл deterministic fuzz). Перезаписываем inTokens[i].usd чтобы
+    // PositionTracker.deltaCostBasis получил корректное значение
+    // (= -attributedCost суммарно).
     for (const t of inTokens) {
       const share = totalInUsd > 0 ? t.usd / totalInUsd : 1 / inTokens.length;
       const costForLot = attributedCost * share;
@@ -586,6 +593,7 @@ function emitPositionEvent(
         sourceHash: op.hash,
         walletId,
       });
+      t.usd = costForLot;
     }
   }
 
