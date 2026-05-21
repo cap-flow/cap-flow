@@ -200,114 +200,142 @@ export async function telegramWebhookAdminRoutes(
     "/setup-webhook",
     { schema: { response: { 200: setupResponseSchema } } },
     async (req) => {
-      // Always return 200 with a structured error in `telegramResponse`
-      // so the admin UI can render a readable message instead of opaque
-      // "500 Internal Server Error". The `ok` field reflects success.
-      const u = req.user;
-      if (!u) throw new UnauthorizedError();
-
-      const token = opts.getBotApiToken()?.trim();
-      if (!token) {
-        return {
-          ok: false,
-          url: "",
-          secretConfigured: false,
-          telegramResponse: {
-            error:
-              "TELEGRAM_BOT_API_TOKEN не задан. Откройте /admin/integrations → Telegram → API Token и вставьте токен из BotFather.",
-          },
-        };
-      }
-
-      // Headers могут быть string | string[] | undefined. На Caddy/Vite
-      // обычно строка, но защитимся от array case.
-      const rawHost =
-        req.headers["x-forwarded-host"] ?? req.headers.host;
-      const host = Array.isArray(rawHost) ? rawHost[0] : rawHost;
-      if (!host) {
-        return {
-          ok: false,
-          url: "",
-          secretConfigured: false,
-          telegramResponse: {
-            error: "Не удалось определить публичный hostname из request.",
-          },
-        };
-      }
-
-      const rawProto = req.headers["x-forwarded-proto"];
-      const proto = (
-        Array.isArray(rawProto) ? rawProto[0] : rawProto
-      )?.toLowerCase();
-      const isHttps = proto === "https";
-      const webhookUrl = `${isHttps ? "https" : "http"}://${host}/api/v1/webhooks/telegram`;
-
-      // Telegram требует публичный HTTPS URL — отклоняет localhost/127.0.0.1
-      // и любой http://. Сразу даём явную ошибку вместо отправки бесполезного
-      // запроса.
-      const isLocal =
-        host.startsWith("localhost") ||
-        host.startsWith("127.") ||
-        host.includes(":5173") ||
-        host.includes(":3000");
-      if (isLocal || !isHttps) {
-        return {
-          ok: false,
-          url: webhookUrl,
-          secretConfigured: !!deriveWebhookSecret(token),
-          telegramResponse: {
-            error:
-              `Webhook URL '${webhookUrl}' Telegram отвергнет — нужен публичный HTTPS. ` +
-              `Для локалки используйте ngrok (ngrok http <port> + setup из тоннельного URL) ` +
-              `или сначала задеплойте в прод и регистрируйте webhook оттуда.`,
-          },
-        };
-      }
-
-      const secret = deriveWebhookSecret(token);
-      const body = {
-        url: webhookUrl,
-        secret_token: secret,
-        // Receive only message updates — we don't handle callbacks etc.
-        allowed_updates: ["message"],
-        drop_pending_updates: false,
-      };
-      const proxy = opts.proxyState.currentSync();
-      const init = {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
-      } as unknown as RequestInit;
-
-      let res: Response;
+      // Top-level try/catch ловит ВСЁ неожиданное и возвращает
+      // структурированный 200 — иначе fastify-zod валидация схемы
+      // ответа или необработанный throw превращаются в опаковый 500.
       try {
-        res = await fetch(
-          `https://api.telegram.org/bot${token}/setWebhook`,
-          init,
-        );
+        return await handleSetupWebhook(req, opts);
       } catch (e) {
+        const msg = (e as Error)?.message ?? String(e);
+        const stack = (e as Error)?.stack?.split("\n").slice(0, 3).join("\n");
+        app.log.error(
+          { err: msg, stack },
+          "[telegram-setup-webhook] unexpected error",
+        );
         return {
           ok: false,
-          url: webhookUrl,
-          secretConfigured: !!secret,
+          url: "",
+          secretConfigured: false,
           telegramResponse: {
-            error:
-              `Не удалось достучаться до api.telegram.org` +
-              (proxy ? ` через прокси (${proxy.kind})` : "") +
-              `: ${(e as Error).message}. Проверьте Telegram Bot Proxy в админке.`,
+            error: `Серверная ошибка: ${msg}`,
           },
         };
       }
-      const json: unknown = await res.json().catch(() => ({
-        error: `Telegram вернул не-JSON: HTTP ${res.status}`,
-      }));
-      return {
-        ok: res.ok,
-        url: webhookUrl,
-        secretConfigured: !!secret,
-        telegramResponse: json,
-      };
     },
   );
+}
+
+async function handleSetupWebhook(
+  req: { user?: { id: string }; headers: Record<string, string | string[] | undefined> },
+  opts: SetupOptions,
+): Promise<{
+  ok: boolean;
+  url: string;
+  secretConfigured: boolean;
+  telegramResponse: unknown;
+}> {
+  const u = req.user;
+  if (!u) throw new UnauthorizedError();
+
+  const token = opts.getBotApiToken()?.trim();
+  if (!token) {
+    return {
+      ok: false,
+      url: "",
+      secretConfigured: false,
+      telegramResponse: {
+        error:
+          "TELEGRAM_BOT_API_TOKEN не задан. Откройте /admin/integrations → Telegram → API Token и вставьте токен из BotFather.",
+      },
+    };
+  }
+
+  // Headers могут быть string | string[] | undefined. На Caddy/Vite
+  // обычно строка, но защитимся от array case.
+  const rawHost = req.headers["x-forwarded-host"] ?? req.headers.host;
+  const host = Array.isArray(rawHost) ? rawHost[0] : rawHost;
+  if (!host) {
+    return {
+      ok: false,
+      url: "",
+      secretConfigured: false,
+      telegramResponse: {
+        error: "Не удалось определить публичный hostname из request.",
+      },
+    };
+  }
+
+  const rawProto = req.headers["x-forwarded-proto"];
+  const proto = (
+    Array.isArray(rawProto) ? rawProto[0] : rawProto
+  )?.toLowerCase();
+  const isHttps = proto === "https";
+  const webhookUrl = `${isHttps ? "https" : "http"}://${host}/api/v1/webhooks/telegram`;
+
+  // Telegram требует публичный HTTPS URL — отклоняет localhost/127.0.0.1
+  // и любой http://. Сразу даём явную ошибку вместо отправки бесполезного
+  // запроса.
+  const isLocal =
+    host.startsWith("localhost") ||
+    host.startsWith("127.") ||
+    host.includes(":5173") ||
+    host.includes(":3000");
+  if (isLocal || !isHttps) {
+    return {
+      ok: false,
+      url: webhookUrl,
+      secretConfigured: !!deriveWebhookSecret(token),
+      telegramResponse: {
+        error:
+          `Webhook URL '${webhookUrl}' Telegram отвергнет — нужен публичный HTTPS. ` +
+          `Для локалки используйте ngrok (ngrok http <port> + setup из тоннельного URL) ` +
+          `или сначала задеплойте в прод и регистрируйте webhook оттуда.`,
+      },
+    };
+  }
+
+  const secret = deriveWebhookSecret(token);
+  const body = {
+    url: webhookUrl,
+    secret_token: secret,
+    // Receive only message updates — we don't handle callbacks etc.
+    allowed_updates: ["message"],
+    drop_pending_updates: false,
+  };
+  const proxy = opts.proxyState.currentSync();
+  const init = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
+  } as unknown as RequestInit;
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://api.telegram.org/bot${token}/setWebhook`,
+      init,
+    );
+  } catch (e) {
+    return {
+      ok: false,
+      url: webhookUrl,
+      secretConfigured: !!secret,
+      telegramResponse: {
+        error:
+          `Не удалось достучаться до api.telegram.org` +
+          (proxy ? ` через прокси (${proxy.kind})` : "") +
+          `: ${(e as Error).message}. Проверьте Telegram Bot Proxy в админке.`,
+      },
+    };
+  }
+  const json: unknown = await res.json().catch(() => ({
+    error: `Telegram вернул не-JSON: HTTP ${res.status}`,
+  }));
+  return {
+    ok: res.ok,
+    url: webhookUrl,
+    secretConfigured: !!secret,
+    telegramResponse: json,
+  };
 }
