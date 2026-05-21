@@ -353,6 +353,24 @@ export interface OpenPosition {
    * вместо "N NFTs" (group fallback). Не задан если override не нашёл match.
    */
   matchedV3TokenId?: string;
+  /**
+   * V3 LP: эта NFT — orphan (mint event не нашёлся в реестре). Возможные
+   * причины:
+   *   1. Mint произошёл ДО sync horizon (старый кошелёк, > 2 лет назад).
+   *   2. NFT перенесена transfer'ом из другого адреса (мы видим её live,
+   *      но историю по адресу не строим).
+   *   3. **Multi-pool same-pair edge case**: 2 NFT в разных fee-tier'ах
+   *      одного pair. matchV3LiveToMints матчит по amounts, разделяет
+   *      mints между ними. Один из лайвов всё равно остаётся orphan, если
+   *      mint его специфического pool'а отсутствует.
+   *
+   * Для orphan'ов мы НЕ применяем pair-only fallback (он подбирает
+   * lp_add ops sibling-NFT'а и приписывает им чужой cost basis →
+   * POS-007/008 bug). Вместо этого `startUsd = currentUsd` (честный
+   * «не знаем историю — текущее значение»), `openedAt = null`,
+   * UI показывает «⚠ Cost basis incomplete» badge.
+   */
+  coverageIncomplete?: boolean;
 }
 
 /**
@@ -2624,6 +2642,25 @@ function buildOne(
     startUsd = openedInUsd;
   }
 
+  // Orphan V3 NFT detect: buildV3Details вернул null когда мы знаем что
+  // это V3 LP протокол, И есть consumedMintHashes (siblings матчились).
+  // Это означает: mint этой NFT не нашёлся в нашей chain-ops истории
+  // → нет cost basis на момент открытия. Fallback на currentUsd как
+  // самое честное «не знаем историю» значение. openedAt = null.
+  //
+  // **POS-008 PAXG/USDC fix**: раньше pair-fallback подбирал sibling'овский
+  // increaseLiquidity op (May 16) и приписывал его как mint orphan'а → wrong
+  // attribution $206. Теперь orphan честно говорит «не знаем».
+  const isV3Lp = isV3LpProtocol(lp.protocolName);
+  const coverageIncomplete =
+    isV3Lp &&
+    !v3 &&
+    consumedMintHashes !== undefined &&
+    consumedMintHashes.size > 0;
+  if (coverageIncomplete) {
+    startUsd = lp.assetUsd;
+  }
+
   // instanceId — стабильный per-position discriminator. Для V3 NFT и других
   // multi-position-в-одном-пуле случаев нужен, чтобы override'ы (credit
   // toggle, hidden, currentValue) применялись к КАЖДОЙ позиции отдельно.
@@ -2645,9 +2682,11 @@ function buildOne(
     // классифицируем как LP. Включаем itemName в детект для таких случаев.
     kind: kindFromCategory(`${lp.category} ${lp.itemName ?? ""}`),
     itemName: lp.itemName,
-    openedAt: opened?.time ?? null,
-    openHash: opened?.hash ?? null,
-    ageDays,
+    // Для orphan'ов opened-event скопирован из sibling-NFT mint'а —
+    // это вводит в заблуждение, потому что это не НАШ mint. Обнуляем.
+    openedAt: coverageIncomplete ? null : (opened?.time ?? null),
+    openHash: coverageIncomplete ? null : (opened?.hash ?? null),
+    ageDays: coverageIncomplete ? null : ageDays,
     instanceId: stableInstanceId,
     supplyTokens,
     debtTokens: lp.borrow.map((b) => ({
@@ -2655,7 +2694,7 @@ function buildOne(
       amount: b.amount,
       usd: b.usd,
     })),
-    openedInTokens,
+    openedInTokens: coverageIncomplete ? [] : openedInTokens,
     startUsd,
     // UCB D7: net cost basis с учётом borrow leg. Для no-borrow позиций
     // netStartUsd === startUsd.
@@ -2670,14 +2709,18 @@ function buildOne(
     feesSource,
     feesClaimedUsd,
     feesLifetimeUsd,
-    feeApr,
-    feeAprLifetime,
+    // Orphan-NFT: openedAt = null → ageDays null → feeApr формула не
+    // считается (защита от деления на 0 и от ложных APR на фейковом
+    // ageDays sibling-NFT'а). UI покажет «—» в APR.
+    feeApr: coverageIncomplete ? null : feeApr,
+    feeAprLifetime: coverageIncomplete ? null : feeAprLifetime,
     feesClaimedHistory,
     feesByToken,
     // По умолчанию 0 — кредитный статус выставляется вручную через
     // override-чекбокс в UI (см. credit_overrides.ts).
     creditFundedUsd: 0,
     ...(v3 ? { v3 } : {}),
+    ...(coverageIncomplete ? { coverageIncomplete: true } : {}),
   };
 }
 
@@ -3238,10 +3281,18 @@ function buildV3Details(
   if (v3MintOpHash) {
     matched = matched.filter((op) => op.hash === v3MintOpHash);
   } else if (consumedMintHashes && consumedMintHashes.size > 0) {
-    // Этот NFT не получил матч в matchV3LiveToMints — но другие NFT в
-    // том же пуле получили. Исключаем их mints из fallback strict-pair
-    // filter чтобы не дублировать cost basis (баг POS-009/010).
-    matched = matched.filter((op) => !consumedMintHashes.has(op.hash));
+    // Этот NFT — orphan: matchV3LiveToMints не нашёл ему mint в нашей
+    // chain-ops истории, но siblings в том же pair-group получили
+    // matches. Раньше здесь был pair-only fallback (`!consumedMintHashes`),
+    // но он причислял sibling'овский `IncreaseLiquidity` op как «мой
+    // mint» → POS-008 PAXG/USDC получала $206 из May 16 increase
+    // POS-007. Это **wrong attribution** — increase на одном NFT не
+    // создаёт mint другого.
+    //
+    // Правильное поведение: orphan-NFT помечается `coverageIncomplete`,
+    // depositUsd = null (= caller сделает fallback на currentUsd).
+    // Возвращаем null чтобы caller знал об отсутствии истории.
+    return null;
   }
   if (matched.length === 0) return null;
 
