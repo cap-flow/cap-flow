@@ -50,6 +50,22 @@ export async function upstreamProxyRoutes(
   route.route({
     method: [...SUPPORTED_METHODS],
     url: "/:provider/*",
+    config: {
+      // Upstream-proxy — это сетевой переброс к внешним RPC (Alchemy,
+      // DeBank, Helius, Etherscan). Никакого собственного state мы не
+      // меняем. CSRF normally защищает state-changing requests от
+      // cross-site forging — но здесь:
+      //   - `requireAuth` уже проверяет access cookie (sameSite=lax →
+      //     cross-site POST cookies не отправляются → no auth → 401)
+      //   - `address-guard` проверяет ownership адресов в запросе
+      //   - `rateLimit` ограничивает per-user budget
+      //   - Allow-list путей в `UpstreamProxyService.forward`
+      // viem RPC клиент не умеет добавлять X-CSRF-Token header (он
+      // делает «голые» JSON-RPC POSTs). Без skipCsrf клиент-V3 фичи
+      // (pool-lookup, hist prices, lending-audit) получают 403 на
+      // каждом receipt-fetch'е → broken P1 matching.
+      skipCsrf: true,
+    },
     handler: async (req, reply) => {
       const u = req.user;
       if (!u) throw new UnauthorizedError();
