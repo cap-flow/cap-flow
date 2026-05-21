@@ -21,6 +21,7 @@ import {
   useAdminIntegrations,
   useClearIntegration,
   useSetupTelegramWebhook,
+  useTelegramWebhookInfo,
   useTestCexProxy,
   useTestTelegramProxy,
   useUpdateIntegration,
@@ -184,6 +185,7 @@ function TelegramGroupHeader({
 }): JSX.Element {
   const setup = useSetupTelegramWebhook();
   const test = useTestTelegramProxy();
+  const info = useTelegramWebhookInfo();
   const [result, setResult] = useState<{
     ok: boolean;
     description: string;
@@ -211,6 +213,62 @@ function TelegramGroupHeader({
       setResult({
         ok: !!tgResp?.ok && r.ok,
         description: message,
+      });
+    } catch (e) {
+      setResult({ ok: false, description: (e as Error).message });
+    }
+  }
+
+  async function onWebhookInfo(e: React.MouseEvent) {
+    e.stopPropagation();
+    setResult(null);
+    try {
+      const r = await info.mutateAsync();
+      const tgResp = r.telegramResponse as
+        | {
+            ok?: boolean;
+            description?: string;
+            error?: string;
+            result?: {
+              url?: string;
+              has_custom_certificate?: boolean;
+              pending_update_count?: number;
+              last_error_date?: number;
+              last_error_message?: string;
+              ip_address?: string;
+              allowed_updates?: string[];
+            };
+          }
+        | null;
+      if (tgResp?.error) {
+        setResult({
+          ok: false,
+          description: `(${r.proxyKind ?? "direct"}, ${r.durationMs}ms) ${tgResp.error}`,
+        });
+        return;
+      }
+      const w = tgResp?.result;
+      if (!w?.url) {
+        setResult({
+          ok: false,
+          description:
+            "Webhook не зарегистрирован у Telegram (url пуст). Нажмите «Зарегистрировать webhook».",
+        });
+        return;
+      }
+      const errLine = w.last_error_message
+        ? ` ⚠ last_error: ${w.last_error_message}` +
+          (w.last_error_date
+            ? ` (${new Date(w.last_error_date * 1000).toISOString().slice(0, 19).replace("T", " ")} UTC)`
+            : "")
+        : "";
+      setResult({
+        ok: !w.last_error_message,
+        description:
+          `url=${w.url}` +
+          ` · pending=${w.pending_update_count ?? 0}` +
+          (w.ip_address ? ` · ip=${w.ip_address}` : "") +
+          errLine,
       });
     } catch (e) {
       setResult({ ok: false, description: (e as Error).message });
@@ -295,6 +353,16 @@ function TelegramGroupHeader({
               title="Простой ping api.telegram.org/getMe через текущий прокси"
             >
               {test.isPending ? "Тестируем…" : "Тест прокси"}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={(e) => void onWebhookInfo(e)}
+              disabled={info.isPending}
+              title="Покажет, что Telegram сейчас знает о webhook: url, pending updates, last_error"
+            >
+              {info.isPending ? "Запрашиваем…" : "Статус webhook"}
             </Button>
             <Button
               type="button"

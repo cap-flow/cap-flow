@@ -94,4 +94,22 @@ export const adminIntegrationsApi = {
         telegramResponse: z.unknown(),
       }),
     ),
+  /**
+   * Read-only diagnostic: GET api.telegram.org/getWebhookInfo через
+   * текущий proxy. Возвращает то, что Telegram сейчас знает о webhook
+   * — url, pending_update_count, last_error_date/message. Лучший
+   * single source of truth для отладки «нажал /start — ничего не пришло».
+   */
+  getTelegramWebhookInfo: () =>
+    api.post(
+      "/v1/admin/telegram/webhook-info",
+      undefined as unknown,
+      z.object({
+        ok: z.boolean(),
+        tokenConfigured: z.boolean(),
+        proxyKind: z.string().nullable(),
+        durationMs: z.number(),
+        telegramResponse: z.unknown(),
+      }),
+    ),
 };

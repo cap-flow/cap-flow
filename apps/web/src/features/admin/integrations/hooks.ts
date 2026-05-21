@@ -56,3 +56,14 @@ export function useTestTelegramProxy() {
     mutationFn: () => adminIntegrationsApi.testTelegramProxy(),
   });
 }
+
+/**
+ * Read-only diagnostic: getWebhookInfo через proxy. Возвращает url,
+ * pending_update_count, last_error_date/message — best source of truth
+ * для отладки «нажал /start — ничего не пришло».
+ */
+export function useTelegramWebhookInfo() {
+  return useMutation({
+    mutationFn: () => adminIntegrationsApi.getTelegramWebhookInfo(),
+  });
+}

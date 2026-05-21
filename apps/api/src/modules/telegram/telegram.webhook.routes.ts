@@ -267,6 +267,76 @@ export async function telegramWebhookAdminRoutes(
     },
   );
 
+  // GET-equivalent diagnostic: что Telegram сейчас знает о webhook.
+  // Возвращает url, pending_update_count, last_error_date/message,
+  // ip_address. Самый полезный single source of truth для отладки
+  // «нажал /start — ничего не пришло». POST потому что у нас
+  // requireAdmin + CSRF на write-mutations; читать через POST с
+  // пустым body — нет body, нет mutation.
+  route.post(
+    "/webhook-info",
+    {
+      schema: {
+        response: {
+          200: z.object({
+            ok: z.boolean(),
+            tokenConfigured: z.boolean(),
+            proxyKind: z.string().nullable(),
+            durationMs: z.number(),
+            telegramResponse: z.unknown(),
+          }),
+        },
+      },
+    },
+    async (req) => {
+      const u = req.user;
+      if (!u) throw new UnauthorizedError();
+      const token = opts.getBotApiToken()?.trim();
+      if (!token) {
+        return {
+          ok: false,
+          tokenConfigured: false,
+          proxyKind: null,
+          durationMs: 0,
+          telegramResponse: {
+            error: "TELEGRAM_BOT_API_TOKEN не задан в админке.",
+          },
+        };
+      }
+      const proxy = opts.proxyState.currentSync();
+      const init = {
+        method: "GET" as const,
+        ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
+      };
+      const t0 = Date.now();
+      try {
+        const res = await undiciFetch(
+          `https://api.telegram.org/bot${token}/getWebhookInfo`,
+          init,
+        );
+        const dt = Date.now() - t0;
+        const json: unknown = await res.json().catch(() => ({
+          error: `non-JSON HTTP ${res.status}`,
+        }));
+        return {
+          ok: res.ok,
+          tokenConfigured: true,
+          proxyKind: proxy?.kind ?? null,
+          durationMs: dt,
+          telegramResponse: json,
+        };
+      } catch (e) {
+        return {
+          ok: false,
+          tokenConfigured: true,
+          proxyKind: proxy?.kind ?? null,
+          durationMs: Date.now() - t0,
+          telegramResponse: { error: describeFetchError(e) },
+        };
+      }
+    },
+  );
+
   route.post(
     "/setup-webhook",
     { schema: { response: { 200: setupResponseSchema } } },
