@@ -43,6 +43,19 @@ export interface Lot {
   amount: number;
   /** USD/токен в момент приобретения. Не меняется при partial consume. */
   readonly costPerUnitUsd: number;
+  /**
+   * UCB C11 (2026-05-20): история всех consume-событий из этого лота —
+   * timestamp и сколько было списано. Без неё `wacAt(time)` не может
+   * восстановить «сколько токена БЫЛО в лоте на момент `time`» — после
+   * full consume `lot.amount = 0` и lot либо удаляется из arr, либо
+   * перестаёт вносить вклад в historical WAC. Это приводило к null
+   * результату → walker fallback на market price → cost basis раздут
+   * (баг artur@gmail.com POS-005: $31,558 вместо $30,000).
+   *
+   * Push'ится в `consume()`; используется в `wacAt(time)` для undo
+   * consumes с `c.time >= time`.
+   */
+  consumes?: { time: number; amount: number }[];
   /** Когда лот появился (unix sec). */
   readonly acquiredAt: number;
   /** Источник приобретения. */

@@ -227,14 +227,32 @@ describe("UCB C10: self-borrow inheritance (Morpho receipt-less leverage loop)",
     });
 
     // After all ops, both Fluid supplies consumed their lots.
-    // Pool should be empty (or near). But the TOTAL cost basis transferred
-    // to Fluid lots = $20k + $10k = $30k.
-    //
-    // Verify by acquiring a fictional next lot and reading consumed cost,
-    // OR by re-running through computePositionConsumedCostFromLots.
-    //
-    // Here we test indirectly: pool empty after all consumes.
     const remaining = tracker.currentAmount("w1", "WBTC");
     expect(remaining).toBeLessThan(0.001); // ~0
+
+    // UCB C11 regression: wacAt(time) должен реконструировать historical
+    // amount-at-time даже для полностью consumed lots. Без C11 fix
+    // эти проверки fail'или (wacAt возвращал null → walker fallback на
+    // market price → cost basis раздут до $31,558 вместо $30,000 на /positions).
+    //
+    // 1st Fluid supply (time=4000): pool должен показать WAC = $20k/0.226
+    // = $88,496/WBTC (cost basis самого первого лота, унаследованного через
+    // self-borrow). Был null до C11.
+    const wacAtFirstSupply = tracker.wacAt("w1", "WBTC", 4000);
+    expect(wacAtFirstSupply).not.toBeNull();
+    expect(wacAtFirstSupply!).toBeCloseTo(20000 / 0.226, 0);
+
+    // 2nd Fluid supply (time=6000): pool должен показать WAC = $10k/0.142
+    // = $70,422/WBTC (cost basis нового лота от 0xbuy2). Был null до C11.
+    const wacAtSecondSupply = tracker.wacAt("w1", "WBTC", 6000);
+    expect(wacAtSecondSupply).not.toBeNull();
+    expect(wacAtSecondSupply!).toBeCloseTo(10000 / 0.142, 0);
+
+    // Σ historical cost при supply moments = real spending $30k.
+    // Это то значение которое walker (computePositionConsumedCostFromLots)
+    // должен производить для POS-005 startUsd.
+    const totalHistoricalCost =
+      0.226 * wacAtFirstSupply! + 0.142 * wacAtSecondSupply!;
+    expect(totalHistoricalCost).toBeCloseTo(30000, 0);
   });
 });

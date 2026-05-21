@@ -1,16 +1,11 @@
 /**
  * UCB E2: standalone position breakdown page.
  *
- * Раньше детали позиции жили только в строке таблицы /performance —
- * пользователю надо было прокручивать горизонтально + раскрывать inline
- * popovers. Теперь — full route `/positions/:positionId` с полной
- * картиной: cost basis, supply/debt токены, V3 IL, fees history, age.
- *
- * Reads positions через `buildOpenPositions(loadedList)` — без v3MintPoolPrices
- * enrichment (это decoration слой; для v1 принимаем что V3 deposits могут
- * показать `fallback` source). Phase 2 (E2.1) перенесёт shared positions
- * через context чтобы /performance и /positions/:id reused один и тот же
- * compute.
+ * Cost basis приходит через `useComputedPositions()` — тот же
+ * post-override список, что у /positions. Раньше эта страница вызывала
+ * `buildOpenPositions` инлайн без V3/Lending/CEX overrides → один и тот же
+ * `position.id` показывал разные `startUsd` в листе и в детальной. См. UCB
+ * principle #2 (single source of truth).
  */
 import { useMemo } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -20,7 +15,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useLoadedWallets } from "@/components/data/LoadedWalletsProvider";
 import type { AcquiredVia, Lot } from "@/lib/portfolio/lots";
-import { buildOpenPositions, type OpenPosition } from "@/lib/portfolio/open_positions";
+import type { OpenPosition } from "@/lib/portfolio/open_positions";
+import { useComputedPositions } from "@/lib/portfolio/use_computed_positions";
 
 function formatUsd(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return "—";
@@ -210,28 +206,13 @@ function KpiCard({ label, value, subtitle, valueClass, tooltip }: KpiCardProps):
 
 export function PositionDetailPage(): JSX.Element {
   const { positionId } = useParams<{ positionId: string }>();
-  const { loadedById, newTrackers, costBasisOverrideByHash } =
-    useLoadedWallets();
+  const { newTrackers } = useLoadedWallets();
+  const { positions } = useComputedPositions();
 
-  const position = useMemo<OpenPosition | null>(() => {
-    if (!positionId) return null;
-    const inputs = Object.values(loadedById).map((l) => ({
-      wallet: l.wallet,
-      ops: l.ops,
-      ...(l.live !== undefined && { live: l.live }),
-    }));
-    // UCB E2.1: используем те же inputs что и OpenPositionsPage, чтобы
-    // position.startUsd был консистентен между /positions и
-    // /positions/:id. До этого детальная страница НЕ передавала
-    // `lotsByWallet` (legacy CostBasisTracker fallback), листовая —
-    // передавала (UCB C5 SoT). Из-за этого один position.id показывал
-    // разные cost basis. См. UCB SoT инвариант.
-    const all = buildOpenPositions(inputs, {
-      costBasisOverrideByHash,
-      lotsByWallet: newTrackers.lotsByWallet,
-    });
-    return all.find((p) => p.id === positionId) ?? null;
-  }, [loadedById, positionId, costBasisOverrideByHash, newTrackers.lotsByWallet]);
+  const position = useMemo<OpenPosition | null>(
+    () => (positionId ? positions.find((p) => p.id === positionId) ?? null : null),
+    [positions, positionId],
+  );
 
   if (!positionId) {
     return (

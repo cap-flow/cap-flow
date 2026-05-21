@@ -27,20 +27,16 @@ import { useLoadedWallets } from "@/components/data/LoadedWalletsProvider";
 import { useT, useI18n } from "@/i18n/I18nProvider";
 import { formatDateShort, formatNumber, formatUsd } from "@/i18n/format";
 import {
-  buildOpenPositions,
   isV3LpProtocol,
   totalAssetsOf,
   type OpenPosition,
   type PositionKind,
 } from "@/lib/portfolio/open_positions";
-import { warnOnProvenanceIssues } from "@/lib/portfolio/position_provenance";
 import { PurchaseHistoryPopup } from "@/components/PurchaseHistoryPopup";
 import { useCexWithdrawalCostBasis } from "@/features/cex/hooks";
 import type { CexCostBasisMatch } from "@/lib/portfolio/position_coverage";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
-import { applyLendingCostBasisOverride } from "@/lib/portfolio/lending_cost_basis_override";
-import { applyCexInheritanceCostBasisOverride } from "@/lib/portfolio/cex_inheritance_cost_basis_override";
-import type { ClassifiedOp } from "@/lib/portfolio/types";
+import { useComputedPositions } from "@/lib/portfolio/use_computed_positions";
 import { useLotMethodology } from "@/lib/lot_methodology";
 import { LotMethodologyHelpDialog } from "@/components/LotMethodologyHelpDialog";
 import { ColumnHelpDialog, hasColumnHelp } from "@/components/ColumnHelpDialog";
@@ -62,13 +58,6 @@ import {
   type PositionOverrides,
 } from "@/lib/portfolio/position_overrides";
 import { useV3Positions, v3PositionKey, type V3PositionMap } from "@/lib/v3/hook";
-import { useV3LiquidityEvents } from "@/lib/v3/use_liquidity_events";
-import { useLendingAudit } from "@/lib/lending/use_lending_audit";
-import { isLendingAuditEnabled } from "@/lib/portfolio/feature_flags";
-import { useResolvedFeatureFlag } from "@/features/feature-flags/hooks";
-import { applyV3CostBasisOverride } from "@/lib/portfolio/v3_cost_basis_override";
-import { useV3HistoricalPoolPrices } from "@/lib/v3/use_historical_prices";
-import { useV3CoinGeckoPrices } from "@/lib/coingecko_v3_prices";
 import { findV3Deployments } from "@/lib/v3/chains";
 import type { V3Position } from "@/lib/v3/positions";
 import { isStableSymbol } from "@/lib/portfolio/protocols";
@@ -161,6 +150,12 @@ function OpenPositionsPageInner(): JSX.Element {
   const [integrations] = useIntegrations();
   const alchemyKey = (integrations.alchemyApiKey ?? "").trim();
 
+  // UCB SoT: canonical position list (post-overrides) lives in
+  // `useComputedPositions`. Local hooks below remain because downstream UI
+  // (PurchaseHistoryPopup, V3 NFT rows, audit summary) consumes them
+  // independently; the cost-basis pipeline itself is no longer rebuilt here.
+  const computed = useComputedPositions();
+
   const loadedList = useMemo(
     () => Object.values(loadedById).sort((a, b) => a.loadedAt - b.loadedAt),
     [loadedById],
@@ -184,39 +179,10 @@ function OpenPositionsPageInner(): JSX.Element {
   }, [cexCostBasisQ.data]);
 
   const v3 = useV3Positions(loadedList, alchemyKey);
-  // V3 cumulative cost basis через IncreaseLiquidity events.
-  // Источник #1 (приоритет): Etherscan v2 API — нет block-range limit.
-  // Источник #2 (fallback): Alchemy — free tier 10-block limit, обычно
-  // empty results для нашего use case.
-  // Если оба пустые — startUsd остаётся approximation от mint event'а.
-  const v3PositionsFlat = useMemo(() => {
-    const out: import("@/lib/v3/positions").V3Position[] = [];
-    for (const arr of v3.data.values()) for (const p of arr) out.push(p);
-    return out;
-  }, [v3.data]);
-  const etherscanKey = (integrations.etherscanApiKey ?? "").trim();
-  const v3CostBasisHook = useV3LiquidityEvents(
-    v3PositionsFlat,
-    alchemyKey,
-    etherscanKey,
-  );
-  // Универсальный on-chain audit для **всех** lending positions
-  // (Aave V3, Spark, Compound V3, …). Закрывает класс багов от неполного
-  // DeBank history (см. POS-008: пропущенная supply tx 0.069 WBTC давала
-  // $5 282 фейкового yield). Использует Etherscan tokentx для получения
-  // всех Mint/Burn events receipt-token'а → authoritative netDeposited.
-  const lendingAuditHook = useLendingAudit(
-    loadedList,
-    alchemyKey,
-    etherscanKey,
-  );
-  // Feature flag resolve: server-first (через /me/feature-flags) с fallback
-  // на client-side localStorage flag. Server allows админу раскатывать
-  // фичу выборочно: один user → бета-группа → global. Client-flag — dev-only.
-  const lendingAuditFlag = useResolvedFeatureFlag(
-    "capflow.feature.lendingAudit",
-  );
-  const lendingAuditOn = lendingAuditFlag.enabled || isLendingAuditEnabled();
+  // Cost-basis hooks (V3 IncreaseLiquidity events, lending audit,
+  // V3 mint pool/CoinGecko prices) живут внутри `useComputedPositions` —
+  // здесь они больше не нужны. `useV3Positions` остаётся ради NFT-карточек
+  // в таблице.
   const [creditOverrides, setCreditOverrides] = useCreditOverrides();
   const [positionOverrides, setPositionOverrides] = usePositionOverrides();
   const [assetCompositions] = useAssetCompositions();
@@ -248,12 +214,13 @@ function OpenPositionsPageInner(): JSX.Element {
     [columnPrefs],
   );
 
-  /* ---------- DefiLlama: исторические цены для V3 lp_add tx ---------- */
-  const [histPrices, setHistPrices] = useState<Map<string, number>>(new Map());
+  /* ---------- DefiLlama loading indicator для V3 lp_add tx ---------- */
+  // `useComputedPositions` тянет точно такие же hist prices (для V3 lp_add
+  // OUT-токенов), но без exposed loading. Здесь оставлен лёгкий effect
+  // только чтобы зажечь "Загружаются исторические цены…" badge — данные
+  // потребляются хуком pipeline (через кеш `fetchHistoricalPrices`).
   const [histLoading, setHistLoading] = useState(false);
 
-  // Какие пары `(coin, timestamp)` нужны: проходим по lp_add tx во всех V3
-  // протоколах, для каждого OUT-токена строим coinKey + берём op.time.
   const histRequests = useMemo(() => {
     const items: { coin: string; timestamp: number }[] = [];
     const seen = new Set<string>();
@@ -288,90 +255,38 @@ function OpenPositionsPageInner(): JSX.Element {
     let cancelled = false;
     const ctrl = new AbortController();
     setHistLoading(true);
-    void fetchHistoricalPrices(histRequests, ctrl.signal)
-      .then((m) => {
-        if (!cancelled) setHistPrices(m);
-      })
-      .finally(() => {
-        if (!cancelled) setHistLoading(false);
-      });
+    void fetchHistoricalPrices(histRequests, ctrl.signal).finally(() => {
+      if (!cancelled) setHistLoading(false);
+    });
     return () => {
       cancelled = true;
       ctrl.abort();
     };
   }, [histRequests]);
 
-  // V3 mint USD-цены — два источника:
-  //   1) Pool.slot0() — детерминированный on-chain (для fallback и для
-  //      pool ratio в volatile/volatile парах)
-  //   2) CoinGecko aggregator на timestamp mint'а — совпадает с Revert
-  //      Finance методологией (multi-venue volume-weighted)
-  const v3MintPoolPrices = useV3HistoricalPoolPrices(loadedList, alchemyKey);
-  const v3MintCgPrices = useV3CoinGeckoPrices(loadedList);
+  // UCB SoT: см. useComputedPositions() выше — single canonical pipeline
+  // (buildOpenPositions + V3 + Lending + CEX overrides).
+  const positionsRaw = computed.positionsRaw;
 
-  const positionsRaw = useMemo(
-    () => {
-      const result = buildOpenPositions(
-        loadedList.map((l) => ({
-          wallet: l.wallet,
-          ops: l.ops,
-          ...(l.live !== undefined && { live: l.live }),
-        })),
-        {
-          histPrices,
-          v3MintPoolPrices: v3MintPoolPrices.data,
-          v3MintCgPrices: v3MintCgPrices.data,
-          // UCB single-source-of-truth: D3 CEX inheritance + A4 manual
-          // annotations → consistent cost basis с lot-by-lot display.
-          costBasisOverrideByHash,
-          // UCB C5: per-wallet LotTracker от ucb_pipeline (single source of
-          // truth). buildOpenPositions использует его вместо legacy
-          // CostBasisTracker — устраняет divergence на $200-2k для
-          // позиций с CEX inheritance / manual annotations / bridge.
-          lotsByWallet: newTrackers.lotsByWallet,
-          // On-chain audit для Aave V3 lending positions — переопределяет
-          // depositAmountSum в computeFees, чтобы supply yield считался от
-          // authoritative on-chain Σ mint − Σ burn aToken'а, а не от
-          // (возможно неполной) DeBank history.
-          // Gated через server-side feature flag (с client-fallback).
-          ...(lendingAuditOn && {
-            lendingAuditByKey: lendingAuditHook.data,
-          }),
-        },
-      );
-      // Provenance integrity check (dev console). Любое нарушение
-      // инварианта между UI-агрегатами и raw ops → console.warn.
-      // Поймал бы ghost-fee POS-007 (claim_rewards до openedAt).
-      const opsByWalletId = new Map(
-        loadedList.map((l) => [l.wallet.id, l.ops as readonly typeof l.ops[number][]]),
-      );
-      warnOnProvenanceIssues(result, opsByWalletId);
-      return result;
-    },
-    [
-      loadedList,
-      histPrices,
-      v3MintPoolPrices.data,
-      v3MintCgPrices.data,
-      costBasisOverrideByHash,
-      newTrackers.lotsByWallet,
-      lendingAuditHook.data,
-      lendingAuditOn,
-    ],
-  );
+  // Broad hist-prices Map (все non-stable in/out movements всех wallets) —
+  // используется в PurchaseHistoryPopup и других downstream UI consumers.
+  // Cost-basis pipeline сам тянет такой же map через useComputedPositions.
+  const walletHistPrices = useWalletHistPrices(loadedList);
 
-  // Применяем ручные метки «кредитная» поверх алгоритмической атрибуции +
-  // оверрайды текущей стоимости и fees. Когда currentValueUsd или feesUsd
-  // выставлены вручную — каскадно пересчитываем `feesLifetimeUsd`,
-  // `feeAprLifetime` и Total APR (последний считается в строке таблицы).
-  const positions = useMemo(
+  // Глобальная lot-консумация методология (FIFO/LIFO/WAC) — общий setting
+  // на всю страницу, persist в localStorage. Применяется к lending позициям.
+  const [lotMethodology, setLotMethodology] = useLotMethodology();
+  const [methodologyHelpOpen, setMethodologyHelpOpen] = useState(false);
+  const [columnHelpId, setColumnHelpId] = useState<string | null>(null);
+
+  // Применяем ручные метки «кредитная» поверх UCB canonical списка
+  // (`computed.positions` уже содержит V3 + Lending + CEX overrides).
+  // Когда currentValueUsd или feesUsd выставлены вручную — каскадно
+  // пересчитываем `feesLifetimeUsd`, `feeAprLifetime` и Total APR.
+  const positionsWithAlchemyOverride = useMemo(
     () =>
-      positionsRaw.map((p) => {
+      computed.positions.map((p) => {
         const symbols = p.supplyTokens.map((t) => t.symbol);
-        // Для inferred-позиций добавляем openHash как дискриминатор —
-        // у нескольких inferred-позиций одного протокола одинаковые
-        // wallet/chain/protocolId/symbols, и без discriminator overrides
-        // схлопываются в одну ячейку.
         const instanceId = p.instanceId;
         const overrideK = positionOverrideKey({
           walletId: p.walletId,
@@ -391,7 +306,6 @@ function OpenPositionsPageInner(): JSX.Element {
             next.feesUsd = ov.feesUsd;
             next.feesSource = next.feesSource ?? "v3_rewards";
           }
-          // Каскад: feesLifetimeUsd, feeAprLifetime — пересчёт.
           next.feesLifetimeUsd = (next.feesUsd ?? 0) + next.feesClaimedUsd;
           next.feeAprLifetime =
             next.startUsd > 0 && next.ageDays && next.ageDays > 0
@@ -414,73 +328,12 @@ function OpenPositionsPageInner(): JSX.Element {
         }
         return next;
       }),
-    [positionsRaw, creditOverrides, positionOverrides],
+    [computed.positions, creditOverrides, positionOverrides],
   );
 
-  // Broad hist-prices Map (все non-stable in/out movements всех wallets) —
-  // используется в applyLendingCostBasisOverride и в PurchaseHistoryPopup
-  // для замены DeBank m.usd на historical price (DeBank m.usd для
-  // transfer_in non-stable = current spot, не historical).
-  const walletHistPrices = useWalletHistPrices(loadedList);
-
-  // Глобальная lot-консумация методология (FIFO/LIFO/WAC) — общий setting
-  // на всю страницу, persist в localStorage. Применяется к lending позициям.
-  const [lotMethodology, setLotMethodology] = useLotMethodology();
-  const [methodologyHelpOpen, setMethodologyHelpOpen] = useState(false);
-  const [columnHelpId, setColumnHelpId] = useState<string | null>(null);
-
-  // Override startUsd: 1) V3 LP через Etherscan slot0, 2) Lending по WAC.
-  // Если падает — V3OverrideErrorBoundary поймает.
-  const positionsWithAlchemyOverride = useMemo(() => {
-    let working: OpenPosition[] = positions.slice();
-    // 1. V3 cost basis override (Etherscan IncreaseLiquidity events + slot0).
-    if (v3CostBasisHook.data.size > 0 && v3.data.size > 0) {
-      const v3Result = applyV3CostBasisOverride(
-        working,
-        v3.data,
-        v3CostBasisHook.data,
-      );
-      working = v3Result.positions;
-      if (v3Result.overriddenCount > 0) {
-        for (const w of v3Result.warnings) console.warn(w);
-      }
-    }
-    // 2. Lending FIFO lot-aware override: Стартовая $ = consumed lots cost.
-    // Использует LotTracker FIFO — каждая lend_supply op consume'ит из
-    // ранее acquired lots по FIFO, capture'ит cost basis именно тех ETH
-    // которые ушли в позицию (а не глобальная WAC).
-    const opsByWallet = new Map<string, ClassifiedOp[]>();
-    for (const l of loadedList) opsByWallet.set(l.wallet.id, l.ops);
-    const lendingResult = applyLendingCostBasisOverride(
-      working,
-      opsByWallet,
-      walletHistPrices.histPrices,
-      lotMethodology,
-      costBasisOverrideByHash,
-    );
-    if (lendingResult.overriddenCount > 0) {
-      for (const w of lendingResult.warnings) console.warn(w);
-    }
-    working = lendingResult.positions;
-    // 3. CEX-withdrawal + LP-unwind inheritance override: для позиций
-    // где underlying пришёл с биржи (matched по tx-hash) или из закрытой
-    // LP — подставляем blended WAC из server-side P2P→trade→withdrawal
-    // пула. Срабатывает ТОЛЬКО когда direct-buy покрытие < 95% (т.е.
-    // lending FIFO не сработал, потому что у tracker'а нет lot'ов).
-    if (cexCostBasisByHash.size > 0) {
-      const cexResult = applyCexInheritanceCostBasisOverride(
-        working,
-        opsByWallet,
-        cexCostBasisByHash,
-        walletHistPrices.histPrices,
-      );
-      if (cexResult.overriddenCount > 0) {
-        for (const w of cexResult.warnings) console.warn(w);
-      }
-      working = cexResult.positions;
-    }
-    return working;
-  }, [positions, v3.data, v3CostBasisHook.data, loadedList, walletHistPrices.histPrices, lotMethodology, cexCostBasisByHash, costBasisOverrideByHash]);
+  // Backward-compat alias: downstream code (hiddenKeys etc.) iterates
+  // `positions`. UCB canonical + user overrides → one source.
+  const positions = positionsWithAlchemyOverride;
 
 
 

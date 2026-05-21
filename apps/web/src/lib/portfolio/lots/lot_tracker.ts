@@ -153,6 +153,10 @@ export class LotTracker {
         costAttributedUsd: costPart,
       });
       lot.amount -= take;
+      // UCB C11: запоминаем consume чтобы `wacAt(time)` мог восстановить
+      // historical amount-at-time (undo future consumes).
+      if (!lot.consumes) lot.consumes = [];
+      lot.consumes.push({ time: opts.consumedAt, amount: take });
       remaining -= take;
       totalCost += costPart;
       totalAmount += take;
@@ -182,11 +186,10 @@ export class LotTracker {
       }
     }
 
-    // Чистим пустые лоты (amount ≈ 0).
-    const filtered = arr.filter((l) => l.amount > 1e-9);
-    if (filtered.length !== arr.length) {
-      this.lots.set(k, filtered);
-    }
+    // UCB C11: НЕ удаляем zero-amount lots — они нужны для
+    // `wacAt(time)` чтобы восстановить historical amount через
+    // `lot.consumes`. `currentAmount` / `currentWac` / `getLots`
+    // фильтруют их при чтении.
 
     return {
       consumed,
@@ -212,8 +215,20 @@ export class LotTracker {
     let cost = 0;
     for (const lot of arr) {
       if (lot.acquiredAt > time) break;
-      amount += lot.amount;
-      cost += lot.amount * lot.costPerUnitUsd;
+      // UCB C11: реконструируем «сколько было в лоте на момент time»,
+      // отменяя consumes с c.time >= time (т.е. при query "before this
+      // supply" мы хотим видеть состояние ДО самого supply consume).
+      // lot.amount — финальный остаток после ВСЕХ consume'ов.
+      let undoneFuture = 0;
+      if (lot.consumes) {
+        for (const c of lot.consumes) {
+          if (c.time >= time) undoneFuture += c.amount;
+        }
+      }
+      const amountAtTime = lot.amount + undoneFuture;
+      if (amountAtTime <= 0) continue;
+      amount += amountAtTime;
+      cost += amountAtTime * lot.costPerUnitUsd;
     }
     if (amount <= 0) return null;
     return cost / amount;
@@ -221,6 +236,8 @@ export class LotTracker {
 
   /**
    * Текущий WAC (== wacAt(walletId, symbol, now)).
+   * UCB C11: пропускаем zero-amount lots — они хранятся в arr для
+   * historical wacAt, но к "сейчас" не относятся.
    */
   currentWac(walletId: string, symbol: string): number | null {
     const k = key(walletId, symbol);
@@ -229,6 +246,7 @@ export class LotTracker {
     let amount = 0;
     let cost = 0;
     for (const lot of arr) {
+      if (lot.amount <= 1e-9) continue;
       amount += lot.amount;
       cost += lot.amount * lot.costPerUnitUsd;
     }
@@ -236,10 +254,13 @@ export class LotTracker {
   }
 
   /**
-   * Все лоты для (wallet, symbol) — для debug / UI отображения.
+   * Все ЖИВЫЕ лоты для (wallet, symbol) — для debug / UI отображения.
+   * UCB C11: zero-amount lots в array остаются (для historical wacAt),
+   * но в UI отдавать их не нужно.
    */
   getLots(walletId: string, symbol: string): readonly Lot[] {
-    return this.lots.get(key(walletId, symbol)) ?? [];
+    const arr = this.lots.get(key(walletId, symbol)) ?? [];
+    return arr.filter((l) => l.amount > 1e-9);
   }
 
   /**
