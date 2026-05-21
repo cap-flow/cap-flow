@@ -159,6 +159,76 @@ describe("DeBankClient.getHistory — pagination", () => {
     expect(bundle.history_list.length).toBe(1);
   });
 
+  it("stops at sinceTime когда tail time_at <= sinceTime (incremental sync)", async () => {
+    let p = 0;
+    fetchSpy.mockImplementation(async (input, init) => {
+      captureCall(input, init);
+      p++;
+      if (p === 1) {
+        // tail.time_at = 2000 - 19 = 1981
+        return jsonResponse({
+          history_list: Array.from({ length: 20 }, (_, i) =>
+            deBankItem(`0xA${i}`, 2000 - i)
+          ),
+          token_dict: {},
+          project_dict: {},
+          cex_dict: {},
+        });
+      }
+      // tail.time_at = 1500 — БОЛЬШЕ sinceTime=1000 → продолжаем
+      if (p === 2) {
+        return jsonResponse({
+          history_list: Array.from({ length: 20 }, (_, i) =>
+            deBankItem(`0xB${i}`, 1900 - i * 20)
+          ),
+          token_dict: {},
+          project_dict: {},
+          cex_dict: {},
+        });
+      }
+      // tail.time_at = 800 — МЕНЬШЕ sinceTime=1000 → должны остановиться
+      return jsonResponse({
+        history_list: Array.from({ length: 20 }, (_, i) =>
+          deBankItem(`0xC${i}`, 1400 - i * 30)
+        ),
+        token_dict: {},
+        project_dict: {},
+        cex_dict: {},
+      });
+    });
+    const client = new DeBankClient("key");
+    const bundle = await client.getHistory("0xaddr", {
+      maxPages: 100,
+      sinceTime: 1000,
+    });
+    // Должны были загрузить 3 страницы и остановиться (3я страница имеет
+    // tail 800 <= 1000).
+    expect(calls.length).toBe(3);
+    expect(bundle.history_list.length).toBe(60);
+  });
+
+  it("default maxPages=100 — power-user history покрывает ~2-5 лет", async () => {
+    // Симулируем deep history — 105 страниц по 20 ops каждая.
+    fetchSpy.mockImplementation(async (input, init) => {
+      captureCall(input, init);
+      const pageIdx = calls.length - 1;
+      return jsonResponse({
+        history_list: Array.from({ length: 20 }, (_, i) =>
+          deBankItem(`0xP${pageIdx}-${i}`, 1_000_000 - pageIdx * 100 - i)
+        ),
+        token_dict: {},
+        project_dict: {},
+        cex_dict: {},
+      });
+    });
+    const client = new DeBankClient("key");
+    // НЕ передаём maxPages → проверяем default
+    const bundle = await client.getHistory("0xaddr");
+    // Должны прерваться на 100 → bundle.history_list.length = 100 × 20 = 2000
+    expect(calls.length).toBe(100);
+    expect(bundle.history_list.length).toBe(2000);
+  });
+
   it("deduplicates items if the API returns same id on adjacent pages", async () => {
     let p = 0;
     fetchSpy.mockImplementation(async (input, init) => {

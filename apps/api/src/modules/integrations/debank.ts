@@ -182,10 +182,24 @@ export interface DeBankHistoryBundle {
 }
 
 export interface GetHistoryOptions {
-  /** Hard cap on pagination loops (each page = 20 tx). Default 10. */
+  /**
+   * Hard cap на pagination loops. Каждая страница = 20 tx. Default 100
+   * → 2000 ops max per address. Раньше было 10 (= 200 ops, ~3 месяца
+   * истории для активного юзера) и пользователи жаловались что не
+   * видят deposits старше 3 месяцев — это и был баг "POS-001 без
+   * декабрьских/февральских depositов". Стоит 1 DeBank credit per
+   * page worst-case, но в реальности pagination обрывается раньше
+   * по `items.length < page_count`.
+   */
   readonly maxPages?: number;
   /** Restrict to specific DeBank chain ids (e.g. "eth,arb,op"). */
   readonly chainIds?: string;
+  /**
+   * Stop pagination когда tail page time_at <= этому значению. Полезно
+   * для инкрементальных syncs: не дотягиваем до самого начала истории
+   * если у нас уже есть данные после `sinceTime`. Unix seconds.
+   */
+  readonly sinceTime?: number;
 }
 
 export class DeBankClient implements IBalanceProvider {
@@ -375,21 +389,27 @@ export class DeBankClient implements IBalanceProvider {
   /**
    * Fetch the full address history with paginated cursor `start_time`
    * over `/v1/user/all_history_list`. DeBank caps each page at ~20 tx;
-   * we walk pages until: empty page, partial page, or `maxPages`.
+   * we walk pages until: empty page, partial page, `maxPages`, или
+   * (для incremental sync) tail time_at <= `sinceTime`.
    *
    * Dictionaries (`token_dict`, `project_dict`, `cex_dict`) are merged
    * across all pages; duplicate tx ids are de-duped.
    *
-   * **Cost**: 1 DeBank credit per page. With default maxPages=10 that
-   * caps a per-address call at 10 credits. Per-user rate-limit (S2) on
-   * the upstream-proxy gives a second ceiling.
+   * **Cost**: 1 DeBank credit per page. Worst-case maxPages=100 = 100
+   * credits per address, но на практике pagination обрывается раньше
+   * (последняя страница < 20 items). Для incremental sync передавайте
+   * `sinceTime` = max(time_at) уже-загруженных ops чтобы стоп раньше.
    */
   async getHistory(
     address: string,
     opts: GetHistoryOptions = {}
   ): Promise<DeBankHistoryBundle> {
     if (!this.isLive) throw new ProviderNotConfiguredError("debank");
-    const maxPages = opts.maxPages ?? 10;
+    // Bumped 10 → 100: для long-history кошельков (Capflow-юзеры с 1-5
+    // лет DeFi-активности на mainnet) 10 страниц = только последние
+    // ~3 месяца. POS-001/POS-007 audit показал что декабрьские/
+    // февральские deposits не загружались. 100 покрывает ~2-5 лет.
+    const maxPages = opts.maxPages ?? 100;
     const pageCount = 20;
 
     const history_list: DeBankHistoryBundle["history_list"] = [];
@@ -428,6 +448,12 @@ export class DeBankClient implements IBalanceProvider {
       const tail = items[items.length - 1]!;
       // Defensive: if the API stops moving the cursor we'd loop forever.
       if (tail.time_at >= lastSeenTime) break;
+      // Incremental sync: stop когда дошли до уже-известного диапазона.
+      // Caller передаёт max(time_at) среди уже-сохранённых ops; нет
+      // смысла лезть дальше в прошлое.
+      if (opts.sinceTime !== undefined && tail.time_at <= opts.sinceTime) {
+        break;
+      }
       lastSeenTime = tail.time_at;
       startTime = tail.time_at;
     }
