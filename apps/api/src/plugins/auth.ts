@@ -81,8 +81,17 @@ export const authPlugin = fp<AuthPluginOptions>(
         if (session.expiresAt.getTime() < Date.now()) {
           throw new UnauthorizedError("Session expired.");
         }
-        const user = await authRepo.findActiveUserById(payload.sub);
-        if (!user) throw new UnauthorizedError("User no longer active.");
+        // Note: findUserById (БЕЗ status-фильтра) + ручная проверка
+        // blocked. Telegram-signup юзеры до set-password имеют
+        // status="pending" — им нужна валидная сессия чтобы пройти
+        // /set-password endpoint. Раньше findActiveUserById блокировал
+        // их с 401 «User no longer active». См. также комментарий в
+        // AuthService.issueTokensForUser.
+        const user = await authRepo.findUserById(payload.sub);
+        if (!user) throw new UnauthorizedError("User no longer exists.");
+        if (user.status === "blocked") {
+          throw new UnauthorizedError("User is blocked.");
+        }
 
         const impersonation =
           session.impersonatedById && session.impersonationMode

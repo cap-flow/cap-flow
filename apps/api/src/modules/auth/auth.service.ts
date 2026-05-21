@@ -241,6 +241,16 @@ export class AuthService {
     return this.repo.findActiveUserById(id);
   }
 
+  /**
+   * Fetch user by id IGNORING `status`. Используется endpoint'ами,
+   * которые нужны Telegram-signup юзерам со status="pending" (set-password).
+   * Blocked users отсекаются на уровне `requireAuth`, поэтому caller
+   * получает либо null (юзер удалён), либо валидный non-blocked row.
+   */
+  async getUserAnyStatus(id: string): Promise<UserRow | null> {
+    return this.repo.findUserById(id);
+  }
+
   async hashPasswordForStorage(plain: string): Promise<string> {
     return hashPassword(plain);
   }

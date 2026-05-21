@@ -161,11 +161,12 @@ export async function telegramSignupRoutes(
       const u = req.user;
       if (!u) throw new UnauthorizedError();
 
-      const fullUser = await auth.getActiveUser(u.id);
-      // getActiveUser отсеивает blocked — но пропускает active И
-      // pending. Если юзер УЖЕ active с паролем — отвергаем.
+      // getUserAnyStatus, не getActiveUser — наш typical caller имеет
+      // status="pending" (signup-юзер, ещё не прошедший set-password).
+      // requireAuth уже отсёк blocked-юзеров.
+      const fullUser = await auth.getUserAnyStatus(u.id);
       if (!fullUser) {
-        // Юзер blocked/удалён — не должно случаться через valid cookie.
+        // Юзер удалён в гонке — cookie всё ещё валидный, но user gone.
         throw new UnauthorizedError();
       }
       if (fullUser.passwordHash) {

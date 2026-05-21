@@ -210,8 +210,11 @@ export async function authRoutes(
     async (req) => {
       const u = req.user;
       if (!u) throw new UnauthorizedError();
-      const full = await app.auth.getActiveUser(u.id);
-      if (!full) throw new UnauthorizedError("User no longer active.");
+      // getUserAnyStatus (не getActiveUser) — /me должен работать для
+      // signup-юзеров со status="pending" (до set-password). Они уже
+      // прошли requireAuth (который отсекает blocked).
+      const full = await app.auth.getUserAnyStatus(u.id);
+      if (!full) throw new UnauthorizedError("User no longer exists.");
       return toMe(full, u.impersonation ?? null);
     }
   );

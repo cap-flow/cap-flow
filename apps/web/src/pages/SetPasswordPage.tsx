@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
@@ -48,21 +48,30 @@ export function SetPasswordPage(): JSX.Element {
   // Pre-fill username из имени Telegram (поле name в /me для
   // signup-юзеров содержит telegram username). Если ничего нет —
   // оставляем пустым (валидация требует 3+ симв, юзер заполнит).
+  // Авто-заполнение должно произойти РОВНО ОДИН раз при первом
+  // получении user'а с бэка. Если юзер вручную очистил поле — не
+  // перезаписываем.
+  const autofilledRef = useRef(false);
   useEffect(() => {
-    if (!user) return;
-    // Pre-fill приоритет: telegramUsername > name (= telegram_username
-    // fallback из toMe). Без regex-санации — серверная валидация всё
-    // равно нормализует.
+    if (!user || autofilledRef.current) return;
+    // Pre-fill приоритет: telegramUsername (всегда латиница по
+    // правилам Telegram) → name (firstName+lastName, может быть
+    // кириллицей — стрипаем). Backend требует [a-zA-Z0-9_]{3,32}.
     const preset = user.telegramUsername ?? user.name ?? "";
-    if (!username && preset) {
-      const candidate = preset.replace(/[^a-zA-Z0-9_]/g, "");
-      if (candidate.length >= 3) setUsername(candidate);
+    const candidate = preset.replace(/[^a-zA-Z0-9_]/g, "");
+    if (candidate.length >= 3) {
+      setUsername(candidate);
     }
-    // Если passwordHash уже есть (зашли сюда по ошибке) — редирект.
-    if (user.needsPasswordSetup === false) {
+    autofilledRef.current = true;
+  }, [user]);
+
+  // Если у юзера уже есть пароль (зашёл на эту страницу по ошибке /
+  // refresh после set-password) — редиректим домой.
+  useEffect(() => {
+    if (user && user.needsPasswordSetup === false) {
       navigate("/", { replace: true });
     }
-  }, [user, username, navigate]);
+  }, [user, navigate]);
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>): Promise<void> {
     e.preventDefault();
