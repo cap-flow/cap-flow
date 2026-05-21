@@ -471,8 +471,20 @@ function inferMarketKey(op: ClassifiedOp, walletId: string): string | null {
     }
   }
   if (isReceiptLessProtocol(protoId)) {
+    // OUT-side underlying — для supply/repay/lp_add типов где user отдаёт
+    // коллатераль/токены протоколу.
     for (const m of op.movement) {
       if (m.direction !== "out" || m.amount <= 0) continue;
+      if (isGas(m)) continue;
+      if (isStableSymbol(m.symbol)) continue;
+      return `synthetic:${protoId}:${op.chain}:${m.symbol.toUpperCase()}:${walletId}`;
+    }
+    // UCB C10 fix: borrow (и withdraw, claim_rewards) ops имеют ТОЛЬКО IN
+    // movement — для них marketKey тоже инферится по IN-asset. Без этого
+    // inferMarketKey возвращал null → emitPositionEvent skip → my C10
+    // self-loop inheritance не работала для Morpho borrow.
+    for (const m of op.movement) {
+      if (m.direction !== "in" || m.amount <= 0) continue;
       if (isGas(m)) continue;
       if (isStableSymbol(m.symbol)) continue;
       return `synthetic:${protoId}:${op.chain}:${m.symbol.toUpperCase()}:${walletId}`;
