@@ -497,6 +497,23 @@ interface BuildOptions {
       earliestMintTime: number | null;
     }
   >;
+  /**
+   * P1 V3 pool-address resolver: ключ `${chain}|${txHash.toLowerCase()}`,
+   * значение = pool address (lowercase) или null если не найдено.
+   * Заполняется в `useComputedPositions` через
+   * `lib/v3/pool_lookup.ts::getV3PoolsForMintBatch` — парсит receipt'ы
+   * V3 lp_add tx'ов, ищет `Mint(...)` event log пула.
+   *
+   * Используется в `matchV3LiveToMints`: точный матч live→mint по
+   * pool address (DeBank даёт `lp.lpTokenId` = pool address). Это
+   * убирает orphan-NFT баги для пользователей с несколькими NFT в
+   * разных fee tiers того же pair'а (POS-007/008 PAXG/USDC bug).
+   *
+   * Fallback: если map'а пустая ИЛИ для конкретной tx pool unknown
+   * (RPC fail, не V3 mint, etc.) — матчер использует старую
+   * symbols+amounts heuristic.
+   */
+  v3PoolByTxHash?: ReadonlyMap<string, string | null>;
 }
 
 /**
@@ -1568,7 +1585,7 @@ export function buildOpenPositions(
   //  Если match не нашёлся (live > mints или нет данных) → fallback
   //  на supplyAmountsHash из buildOne.
   // ─────────────────────────────────────────────────────────────────────
-  const v3MintMatches = matchV3LiveToMints(loaded);
+  const v3MintMatches = matchV3LiveToMints(loaded, options?.v3PoolByTxHash);
 
   // Set всех mint hash'ей которые УЖЕ привязаны к конкретным NFT через
   // matchV3LiveToMints. Передаётся в buildV3Details как `consumedMintHashes`
@@ -3717,8 +3734,21 @@ function v3LiveMatchKey(args: {
 
 function matchV3LiveToMints(
   loaded: BuildInput[],
+  /**
+   * P1: pool address для каждой mint-tx. Ключ — `${chain}|${hash.toLowerCase()}`.
+   * Если задан и для конкретной mint pool известен — матчим строго по
+   * `lp.lpTokenId === pool address`. Иначе fallback на amount-distance heuristic.
+   */
+  v3PoolByTxHash?: ReadonlyMap<string, string | null>,
 ): Map<string, string /* op.hash */> {
   const out = new Map<string, string>();
+  const poolOf = (chain: string, hash: string): string | null => {
+    if (!v3PoolByTxHash) return null;
+    return (
+      v3PoolByTxHash.get(`${chain.toLowerCase()}|${hash.toLowerCase()}`) ??
+      null
+    );
+  };
 
   for (const l of loaded) {
     if (!l.live) continue;
@@ -3944,10 +3974,56 @@ function matchV3LiveToMints(
         }
         continue;
       }
-      const assignment = optimalAssign(lives, mints);
+
+      // P1: pool-address strict matching. Если у нас есть pool-address
+      // resolver (v3PoolByTxHash), сначала пытаемся точный match
+      // `lp.lpTokenId === mint pool address`. Это разделяет NFT в разных
+      // fee tiers того же pair'а (POS-007/008 PAXG/USDC bug).
+      const assignedLiveIdx = new Set<number>();
+      const assignedMintHashes = new Set<string>();
+      if (v3PoolByTxHash) {
+        // Сматчиваем поэтапно: для каждого live с известным lpTokenId
+        // ищем mint с таким же pool address.
+        for (let li = 0; li < lives.length; li++) {
+          const live = lives[li]!;
+          const livePool = live.lp.lpTokenId?.toLowerCase();
+          if (!livePool) continue;
+          for (let mi = 0; mi < mints.length; mi++) {
+            const mint = mints[mi]!;
+            if (assignedMintHashes.has(mint.hash)) continue;
+            const mintPool = poolOf(mint.chain, mint.hash);
+            if (mintPool && mintPool.toLowerCase() === livePool) {
+              // Strict match!
+              const matchKey = v3LiveMatchKey({
+                walletId: l.wallet.id,
+                protocolId: live.lp.protocolId,
+                chain: live.lp.chain,
+                symbols: live.lp.supply.map((s) => s.symbol),
+                assetUsd: live.lp.assetUsd,
+              });
+              out.set(matchKey, mint.hash);
+              assignedLiveIdx.add(li);
+              assignedMintHashes.add(mint.hash);
+              if (typeof window !== "undefined") {
+                console.info(
+                  `[V3 match] pool-exact ${live.lp.protocolId}|${livePool.slice(0, 10)} → ${mint.hash.slice(0, 10)}`,
+                );
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      // Остальные (не сматченные строго) — amount-distance heuristic.
+      const remainingLives = lives.filter((_, i) => !assignedLiveIdx.has(i));
+      const remainingMintsArr = mints.filter(
+        (m) => !assignedMintHashes.has(m.hash),
+      );
+      const assignment = optimalAssign(remainingLives, remainingMintsArr);
       for (const [liveIdx, mintIdx] of assignment) {
-        const lp = lives[liveIdx]!.lp;
-        const mintHash = mints[mintIdx]!.hash;
+        const lp = remainingLives[liveIdx]!.lp;
+        const mintHash = remainingMintsArr[mintIdx]!.hash;
         const matchKey = v3LiveMatchKey({
           walletId: l.wallet.id,
           protocolId: lp.protocolId,
@@ -3956,25 +4032,20 @@ function matchV3LiveToMints(
           assetUsd: lp.assetUsd,
         });
         out.set(matchKey, mintHash);
+        assignedMintHashes.add(mintHash);
       }
       // Удаляем сматченные mints из общего пула (для других групп — на случай
       // если два разных pair'а в одной протокол+chain имеют наложение).
-      const matchedHashes = new Set(
-        [...assignment.values()].map((j) => mints[j]!.hash),
-      );
+      // `assignedMintHashes` уже содержит и pool-exact, и amount-distance
+      // matches — единый источник истины.
       const remaining = (mintsByPC.get(liveKey) ?? []).filter(
-        (m) => !matchedHashes.has(m.hash),
+        (m) => !assignedMintHashes.has(m.hash),
       );
       mintsByPC.set(liveKey, remaining);
 
       if (typeof window !== "undefined" && (lives.length > 1 || mints.length > 1)) {
-        const summary = [...assignment.entries()].map(([li, mi]) => {
-          const lv = lives[li]!;
-          const mn = mints[mi]!;
-          return `${lv.amt0.toFixed(3)}/${lv.amt1.toFixed(3)} → ${mn.hash.slice(0, 10)} (${mn.amount0.toFixed(3)}/${mn.amount1.toFixed(3)})`;
-        });
         console.info(
-          `[V3 match] ${groupKey}: ${lives.length}L ${mints.length}M → ${summary.join(" | ")}`,
+          `[V3 match] ${groupKey}: ${lives.length}L ${mints.length}M → ${assignedMintHashes.size} matched (${assignedLiveIdx.size} pool-exact + ${assignment.size} amount-distance)`,
         );
       }
     }

@@ -22,6 +22,7 @@ import { useV3Positions } from "@/lib/v3/hook";
 import { useV3LiquidityEvents } from "@/lib/v3/use_liquidity_events";
 import { useV3HistoricalPoolPrices } from "@/lib/v3/use_historical_prices";
 import { useV3CoinGeckoPrices } from "@/lib/coingecko_v3_prices";
+import { getV3PoolsForMintBatch } from "@/lib/v3/pool_lookup";
 import { useLendingAudit } from "@/lib/lending/use_lending_audit";
 import { useResolvedFeatureFlag } from "@/features/feature-flags/hooks";
 import { isLendingAuditEnabled } from "@/lib/portfolio/feature_flags";
@@ -173,6 +174,55 @@ export function useComputedPositions(): ComputedPositions {
     };
   }, [v3LpHistRequests]);
 
+  // P1: pool-address resolver для V3 lp_add ops. Используется в
+  // matchV3LiveToMints для точного 1:1 матчинга live↔mint когда у
+  // юзера несколько NFT в разных fee tiers того же pair'а (POS-007/008
+  // PAXG/USDC bug). Кешируется в localStorage между загрузками.
+  const v3LpAddTxHashes = useMemo(() => {
+    const items: { chain: string; txHash: string }[] = [];
+    const seen = new Set<string>();
+    for (const l of loadedList) {
+      if (!l.live) continue;
+      const hasV3 = l.live.positions.some((p) =>
+        isV3LpProtocol(p.protocolName),
+      );
+      if (!hasV3) continue;
+      for (const op of l.ops) {
+        if (op.status === "failed") continue;
+        if (op.type !== "lp_add") continue;
+        if (!op.protocol) continue;
+        const key = `${op.chain}|${op.hash.toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push({ chain: op.chain, txHash: op.hash });
+      }
+    }
+    return items;
+  }, [loadedList]);
+
+  const [v3PoolByTxHash, setV3PoolByTxHash] = useState<
+    ReadonlyMap<string, string | null>
+  >(new Map());
+
+  useEffect(() => {
+    if (v3LpAddTxHashes.length === 0 || !alchemyKey) {
+      setV3PoolByTxHash(new Map());
+      return;
+    }
+    let cancelled = false;
+    void getV3PoolsForMintBatch(v3LpAddTxHashes, alchemyKey)
+      .then((m) => {
+        if (!cancelled) setV3PoolByTxHash(m);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled)
+          console.warn("useComputedPositions: v3 pool lookup failed", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [v3LpAddTxHashes, alchemyKey]);
+
   const positionsRaw = useMemo(() => {
     const result = buildOpenPositions(
       loadedList.map((l) => ({
@@ -184,6 +234,7 @@ export function useComputedPositions(): ComputedPositions {
         histPrices: v3LpHistPrices,
         v3MintPoolPrices: v3MintPoolPrices.data,
         v3MintCgPrices: v3MintCgPrices.data,
+        v3PoolByTxHash,
         costBasisOverrideByHash,
         lotsByWallet: newTrackers.lotsByWallet,
         ...(lendingAuditOn && {
@@ -201,6 +252,7 @@ export function useComputedPositions(): ComputedPositions {
     v3LpHistPrices,
     v3MintPoolPrices.data,
     v3MintCgPrices.data,
+    v3PoolByTxHash,
     costBasisOverrideByHash,
     newTrackers.lotsByWallet,
     lendingAuditHook.data,
