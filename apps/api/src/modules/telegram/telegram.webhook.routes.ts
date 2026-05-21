@@ -19,6 +19,7 @@ import crypto from "node:crypto";
 
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { fetch as undiciFetch } from "undici";
 import { z } from "zod";
 
 import { UnauthorizedError } from "../../core/errors.js";
@@ -232,12 +233,12 @@ export async function telegramWebhookAdminRoutes(
       }
       const proxy = opts.proxyState.currentSync();
       const init = {
-        method: "GET",
+        method: "GET" as const,
         ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
-      } as unknown as RequestInit;
+      };
       const t0 = Date.now();
       try {
-        const res = await fetch(
+        const res = await undiciFetch(
           `https://api.telegram.org/bot${token}/getMe`,
           init,
         );
@@ -374,15 +375,15 @@ async function handleSetupWebhook(
   };
   const proxy = opts.proxyState.currentSync();
   const init = {
-    method: "POST",
+    method: "POST" as const,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
-  } as unknown as RequestInit;
+  };
 
-  let res: Response;
+  let res: Awaited<ReturnType<typeof undiciFetch>>;
   try {
-    res = await fetch(
+    res = await undiciFetch(
       `https://api.telegram.org/bot${token}/setWebhook`,
       init,
     );

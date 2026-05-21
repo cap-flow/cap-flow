@@ -80,6 +80,9 @@ importers:
       pino-pretty:
         specifier: ^11.3.0
         version: 11.3.0
+      socks:
+        specifier: ^2.8.3
+        version: 2.8.9
       socks-proxy-agent:
         specifier: ^10.0.0
         version: 10.0.0

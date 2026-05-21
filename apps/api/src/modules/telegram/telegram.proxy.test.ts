@@ -26,10 +26,28 @@ describe("loadTelegramProxyConfig", () => {
     expect(cfg!.dispatcher).not.toBeNull();
   });
 
-  it("socks URL → kind=socks, dispatcher=null (undici has no SOCKS)", () => {
+  it("socks5 URL → kind=socks, custom undici Agent built", () => {
     const cfg = loadTelegramProxyConfig("socks5://host:1080");
     expect(cfg!.kind).toBe("socks");
-    expect(cfg!.dispatcher).toBeNull();
+    expect(cfg!.dispatcher).not.toBeNull();
+  });
+
+  it("socks5h URL → kind=socks, custom undici Agent built", () => {
+    const cfg = loadTelegramProxyConfig(
+      "socks5h://user:pass@host.example:43517",
+    );
+    expect(cfg!.kind).toBe("socks");
+    expect(cfg!.dispatcher).not.toBeNull();
+  });
+
+  it("socks4 URL → kind=socks, custom undici Agent built", () => {
+    const cfg = loadTelegramProxyConfig("socks4://host:1080");
+    expect(cfg!.kind).toBe("socks");
+    expect(cfg!.dispatcher).not.toBeNull();
+  });
+
+  it("malformed SOCKS URL (no port) → throws", () => {
+    expect(() => loadTelegramProxyConfig("socks5://host")).toThrow();
   });
 
   it("empty/null → returns null", () => {

@@ -1,18 +1,31 @@
 import type { FastifyBaseLogger } from "fastify";
-import { ProxyAgent as UndiciProxyAgent } from "undici";
+import tls from "node:tls";
+import { SocksClient } from "socks";
+import { Agent as UndiciAgent, ProxyAgent as UndiciProxyAgent } from "undici";
 
 /**
  * Optional proxy for outgoing Telegram Bot API requests.
  *
- * `TelegramService.send` uses native `fetch`, which under Node 18+ runs
- * on undici. To route through a proxy we pass a `Dispatcher` instance
- * via `fetch(url, { dispatcher })`. SOCKS is not supported by undici —
- * if a `socks://` URL is configured the dispatcher is null and the
- * request goes direct (logged at refresh time so operator notices).
+ * `TelegramService.send` uses native `fetch`, which on Node 18+ runs on
+ * undici. We pass a `Dispatcher` instance via `fetch(url, { dispatcher })`.
+ *
+ * Supported schemes:
+ *   - http://  / https://    → undici `ProxyAgent` (CONNECT tunnel)
+ *   - socks5:// / socks5h:// → custom undici `Agent` whose `connect`
+ *                              callback uses `socks` package (SocksClient)
+ *                              to open a TCP socket through the SOCKS5
+ *                              proxy, then TLS-upgrades it for HTTPS.
+ *                              `socks5h` is treated as `socks5` (we
+ *                              always send the hostname literally, not
+ *                              the resolved IP — DNS happens proxy-side).
+ *   - socks4:// / socks4a:// → same dispatcher, SocksClient `type: 4`.
+ *
+ * If the URL is malformed, `loadTelegramProxyConfig` throws; caller
+ * (`TelegramProxyState.refresh`) catches and logs.
  */
 export interface TelegramProxyConfig {
   readonly url: string;
-  readonly dispatcher: UndiciProxyAgent | null;
+  readonly dispatcher: UndiciProxyAgent | UndiciAgent | null;
   readonly kind: "http" | "https" | "socks";
 }
 
@@ -21,16 +34,90 @@ export function loadTelegramProxyConfig(
 ): TelegramProxyConfig | null {
   const trimmed = (url ?? "").trim();
   if (!trimmed) return null;
-  let kind: TelegramProxyConfig["kind"];
-  let dispatcher: UndiciProxyAgent | null;
   if (/^socks/i.test(trimmed)) {
-    kind = "socks";
-    dispatcher = null; // undici can't SOCKS
-  } else {
-    kind = /^https:/i.test(trimmed) ? "https" : "http";
-    dispatcher = new UndiciProxyAgent(trimmed);
+    return {
+      url: trimmed,
+      dispatcher: buildSocksDispatcher(trimmed),
+      kind: "socks",
+    };
   }
-  return { url: trimmed, dispatcher, kind };
+  return {
+    url: trimmed,
+    dispatcher: new UndiciProxyAgent(trimmed),
+    kind: /^https:/i.test(trimmed) ? "https" : "http",
+  };
+}
+
+/**
+ * Build an undici Agent that tunnels through a SOCKS proxy.
+ *
+ * undici doesn't have native SOCKS support, but `Agent`'s `connect`
+ * option lets us plug in a custom connector. We open the TCP socket
+ * via `SocksClient.createConnection`, and for HTTPS upgrade it with
+ * `tls.connect({ socket })`. This is the canonical pattern from the
+ * undici docs.
+ */
+function buildSocksDispatcher(url: string): UndiciAgent {
+  const parsed = new URL(url);
+  const type: 4 | 5 = /^socks4/i.test(parsed.protocol) ? 4 : 5;
+  const proxyHost = parsed.hostname;
+  const proxyPort = Number.parseInt(parsed.port, 10);
+  if (!proxyHost || !Number.isFinite(proxyPort)) {
+    throw new Error(`SOCKS URL missing host/port: ${url}`);
+  }
+  const userId = parsed.username
+    ? decodeURIComponent(parsed.username)
+    : undefined;
+  const password = parsed.password
+    ? decodeURIComponent(parsed.password)
+    : undefined;
+
+  return new UndiciAgent({
+    connect: async (opts, callback) => {
+      try {
+        const destHost = opts.hostname ?? "";
+        // undici passes `port` as either a number, string, or empty.
+        // Default to 443 (https) / 80 (http) when not specified.
+        const rawPort =
+          typeof opts.port === "number" && Number.isFinite(opts.port)
+            ? opts.port
+            : Number.parseInt(String(opts.port ?? ""), 10);
+        const destPort = Number.isFinite(rawPort) && rawPort > 0
+          ? rawPort
+          : opts.protocol === "https:"
+            ? 443
+            : 80;
+        const { socket } = await SocksClient.createConnection({
+          proxy: {
+            host: proxyHost,
+            port: proxyPort,
+            type,
+            ...(userId !== undefined && { userId }),
+            ...(password !== undefined && { password }),
+          },
+          command: "connect",
+          destination: { host: destHost, port: destPort },
+          timeout: 15_000,
+        });
+        if (opts.protocol === "https:") {
+          const tlsSocket = tls.connect({
+            socket,
+            servername:
+              (opts as { servername?: string }).servername ?? destHost,
+            ALPNProtocols: (opts as { allowH2?: boolean }).allowH2
+              ? ["h2", "http/1.1"]
+              : ["http/1.1"],
+          });
+          tlsSocket.once("secureConnect", () => callback(null, tlsSocket));
+          tlsSocket.once("error", (err) => callback(err, null));
+        } else {
+          callback(null, socket);
+        }
+      } catch (err) {
+        callback(err as Error, null);
+      }
+    },
+  });
 }
 
 /**

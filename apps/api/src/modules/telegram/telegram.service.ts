@@ -1,3 +1,5 @@
+import { fetch as undiciFetch } from "undici";
+
 import { generateInviteToken, hashToken } from "../auth/tokens.js";
 import type { AuditService } from "../audit/audit.service.js";
 
@@ -159,11 +161,14 @@ export class TelegramService {
     if (!botApiToken) return false;
 
     const proxy = this.proxyState?.currentSync() ?? null;
-    // undici-specific `dispatcher` field is missing from the standard
-    // RequestInit type — cast via unknown so TS accepts it. Native fetch
-    // in Node ignores unknown fields, so omitting is also safe.
+    // Use userland undici `fetch` (not the Node-built-in global) so the
+    // custom Dispatcher we build for SOCKS5 / HTTP proxies in
+    // `telegram.proxy.ts` is wire-compatible with the Request handler.
+    // Node bundles its own (older) undici whose Request interface differs
+    // — mixing dispatcher@undici-8 with Node-internal-fetch breaks with
+    // `invalid onRequestStart method`.
     const init = {
-      method: "POST",
+      method: "POST" as const,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
@@ -171,8 +176,8 @@ export class TelegramService {
         parse_mode: "Markdown",
       }),
       ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
-    } as unknown as RequestInit;
-    const res = await fetch(
+    };
+    const res = await undiciFetch(
       `https://api.telegram.org/bot${botApiToken}/sendMessage`,
       init,
     );
