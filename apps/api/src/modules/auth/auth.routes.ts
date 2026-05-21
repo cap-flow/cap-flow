@@ -325,8 +325,12 @@ function toMe(
 ) {
   return {
     id: u.id,
-    email: u.email ?? "",
-    name: deriveName(u),
+    // Nullable для Telegram-signup юзеров (email ещё может отсутствовать).
+    email: u.email,
+    name: u.name ?? deriveName(u),
+    username: u.username,
+    telegramUsername: u.telegramUsername,
+    needsPasswordSetup: !u.passwordHash,
     role: u.role as UserRole,
     createdAt: u.createdAt.toISOString(),
     lastLoginAt: u.lastLoginAt ? u.lastLoginAt.toISOString() : null,

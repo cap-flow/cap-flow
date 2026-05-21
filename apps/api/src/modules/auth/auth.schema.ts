@@ -12,8 +12,21 @@ export const impersonationInfoSchema = z.object({
 
 export const meResponseSchema = z.object({
   id: z.string().uuid(),
-  email: z.string(),
-  name: z.string(),
+  // Telegram-signup users могут не иметь email — nullable, чтобы /me
+  // не падал на zod после signup. Legacy email/password юзеры всегда
+  // имеют email.
+  email: z.string().nullable(),
+  name: z.string().nullable(),
+  /**
+   * Unique username (3-32 [a-zA-Z0-9_]). Заполняется на set-password
+   * page после Telegram-signup. NULL для legacy email-only юзеров и
+   * для signup-юзеров, ещё не прошедших set-password.
+   */
+  username: z.string().nullable(),
+  /** Telegram identity (если юзер прошёл signup / linked bot). */
+  telegramUsername: z.string().nullable(),
+  /** True если password_hash ещё не задан — фронт ведёт на /auth/set-password. */
+  needsPasswordSetup: z.boolean(),
   role: z.enum(["admin", "user", "viewer"]),
   createdAt: z.string().datetime(),
   lastLoginAt: z.string().datetime().nullable(),

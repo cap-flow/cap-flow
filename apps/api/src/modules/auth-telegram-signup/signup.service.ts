@@ -226,7 +226,12 @@ export class TelegramSignupService {
   }
 
   private buildFinishUrl(rawNonce: string): string {
-    return `${this.cfg.siteOrigin}/login/finish?nonce=${encodeURIComponent(rawNonce)}`;
+    // Бот ведёт ПРЯМО в API-роут — это GET, который выпускает cookies
+    // и сам делает 302 на /auth/set-password или /. Caddy в проде
+    // проксирует `/api/*` в api контейнер; на dev Vite-proxy тоже.
+    // Если шли бы на frontend `/login/finish`, пришлось бы держать
+    // там redirect-страницу или Caddy-rewrite — лишний прыжок без выгоды.
+    return `${this.cfg.siteOrigin}/api/v1/auth/telegram/finish?nonce=${encodeURIComponent(rawNonce)}`;
   }
 
   private async findUserById(userId: string): Promise<UserRow | null> {

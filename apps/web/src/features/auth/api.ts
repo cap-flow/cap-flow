@@ -13,8 +13,12 @@ export type ImpersonationInfo = z.infer<typeof impersonationInfoSchema>;
 
 export const meSchema = z.object({
   id: z.string().uuid(),
-  email: z.string(),
-  name: z.string(),
+  // Nullable для Telegram-signup юзеров (email ещё не задан).
+  email: z.string().nullable(),
+  name: z.string().nullable(),
+  username: z.string().nullable(),
+  telegramUsername: z.string().nullable(),
+  needsPasswordSetup: z.boolean(),
   role: userRoleSchema,
   createdAt: z.string(),
   lastLoginAt: z.string().nullable(),
@@ -60,5 +64,34 @@ export const authApi = {
         expiresAt: z.string(),
         user: meSchema,
       }),
+    ),
+
+  /**
+   * POST /api/v1/auth/telegram/start-signup — генерит one-shot nonce
+   * и возвращает t.me deep-link. Anonymous endpoint.
+   * Откройте `botDeepLink` в новой вкладке — пользователь нажимает
+   * /start у бота, после чего получит в чат уникальную ссылку обратно
+   * на /login/finish?nonce=…
+   */
+  startTelegramSignup: () =>
+    api.postPublic(
+      "/v1/auth/telegram/start-signup",
+      undefined as unknown,
+      z.object({ botDeepLink: z.string() }),
+    ),
+
+  /**
+   * POST /api/v1/auth/telegram/set-password — одноразовое действие
+   * после signup-flow login. Доступно ТОЛЬКО когда у юзера ещё нет
+   * password_hash. UNIQUE-conflict на username → 409.
+   */
+  setInitialPassword: (input: {
+    password: string;
+    username?: string;
+  }) =>
+    api.post(
+      "/v1/auth/telegram/set-password",
+      input,
+      z.object({ ok: z.literal(true) }),
     ),
 };

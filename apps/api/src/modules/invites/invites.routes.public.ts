@@ -109,11 +109,14 @@ export async function publicInviteRoutes(
 function toMe(u: UserRow) {
   return {
     id: u.id,
-    email: u.email ?? "",
+    email: u.email,
     name:
       (u.name && u.name.trim()) ||
       [u.firstName, u.lastName].filter(Boolean).join(" ").trim() ||
       (u.email ? u.email.split("@")[0]! : "user"),
+    username: u.username,
+    telegramUsername: u.telegramUsername,
+    needsPasswordSetup: !u.passwordHash,
     role: u.role as "admin" | "user" | "viewer",
     createdAt: u.createdAt.toISOString(),
     lastLoginAt: u.lastLoginAt ? u.lastLoginAt.toISOString() : null,

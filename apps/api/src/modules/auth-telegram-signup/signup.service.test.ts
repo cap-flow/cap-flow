@@ -204,7 +204,7 @@ describe("TelegramSignupService", () => {
     });
     expect(r.createdNewUser).toBe(true);
     expect(r.finishUrl).toBe(
-      `https://cap-flow.ru/login/finish?nonce=${encodeURIComponent(rawNonce)}`,
+      `https://cap-flow.ru/api/v1/auth/telegram/finish?nonce=${encodeURIComponent(rawNonce)}`,
     );
     const nonceRow = repo.nonces.get(sha256(rawNonce))!;
     expect(nonceRow.userId).toBeTruthy();

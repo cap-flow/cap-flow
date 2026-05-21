@@ -22,6 +22,7 @@ import { ClosedPositionsPage } from "./pages/ClosedPositionsPage";
 import { HomePage } from "./pages/HomePage";
 import { InvitePage } from "./pages/InvitePage";
 import { LoginPage } from "./pages/LoginPage";
+import { SetPasswordPage } from "./pages/SetPasswordPage";
 import { OpenPositionsPage } from "./pages/OpenPositionsPage";
 import { OperationsPage } from "./pages/OperationsPage";
 import {
@@ -112,6 +113,10 @@ export function App(): JSX.Element {
       <ImpersonationBanner />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        {/* Set-password — для Telegram-signup юзеров после finish-redirect'a.
+            Не оборачиваем в ProtectedRoute: страница сама редиректит на /
+            если у юзера уже есть пароль; cookie выдаётся /finish'ем. */}
+        <Route path="/auth/set-password" element={<SetPasswordPage />} />
         <Route path="/invite/:token" element={<InvitePage />} />
         <Route path="/verify-email/:token" element={<VerifyEmailPage />} />
         <Route path="/reset-password" element={<PasswordResetRequestPage />} />
