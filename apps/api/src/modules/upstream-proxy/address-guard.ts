@@ -127,7 +127,21 @@ function looksLikeAddrAttempt(s: string): boolean {
   // length / non-hex chars, that's malformed. Bare numbers ("1", "8453")
   // are typically chain ids — caller may put them in address slot by
   // mistake; we still flag.
-  if (s.startsWith("0x")) return true; // hex-ish but failed EVM regex
+  if (s.startsWith("0x")) {
+    // Канонический tx hash / block hash / bytes32 slot — НЕ malformed-flag.
+    // 0x + 64 hex = 66 chars total. Любой `eth_getTransactionReceipt`,
+    // `eth_getBlockByHash`, `eth_getStorageAt` имеет такой param[0] —
+    // мы НЕ должны помечать его как malformed address. Это **не** address
+    // attempt вообще. Без этого фильтра P1 V3 pool-resolver получает 400
+    // на каждом receipt-fetch'е.
+    //
+    // 10-char shapes (function selectors типа 0xdeadbeef) НЕ exempted —
+    // они могут быть и malformed address attempt'ом (slot ожидает 42 char
+    // address, передали что-то короткое). Test coverage в address-guard.test
+    // явно требует флагать `0xdeadbeef` как malformed.
+    if (s.length === 66 && /^0x[a-fA-F0-9]{64}$/.test(s)) return false;
+    return true; // hex-ish but failed EVM regex (40 hex chars)
+  }
   if (/^[1-9A-HJ-NP-Za-km-z]{20,}$/.test(s)) return true; // long base58-ish
   return false;
 }

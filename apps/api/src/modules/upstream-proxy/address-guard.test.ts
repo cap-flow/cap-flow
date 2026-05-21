@@ -158,6 +158,54 @@ describe("address-guard — Alchemy extraction", () => {
     );
     expect(r.addresses).toHaveLength(2);
   });
+
+  it("eth_getTransactionReceipt(txHash) — НЕ flag'нуть tx hash как malformed", () => {
+    // V3 pool-resolver (P1) фетчит receipt'ы для каждого V3 lp_add op.
+    // Раньше address-guard.looksLikeAddrAttempt видел `0x` + 66 chars и
+    // помечал как malformed → 400 → broken pool matching → orphan NFT bug.
+    const txHash =
+      "0xa4b7940802fa46b801102989ed5d363beb1579004893c680ce3e5234db7ec3c9";
+    const r = extractAddresses(
+      req({
+        provider: "alchemy",
+        method: "POST",
+        path: "eth-mainnet",
+        body: [
+          {
+            jsonrpc: "2.0",
+            method: "eth_getTransactionReceipt",
+            params: [txHash],
+            id: 1,
+          },
+        ],
+      }),
+    );
+    expect(r.addresses).toHaveLength(0);
+    expect(r.invalid).toHaveLength(0);
+  });
+
+  it("decide() для eth_getTransactionReceipt → allow", () => {
+    const txHash =
+      "0xa4b7940802fa46b801102989ed5d363beb1579004893c680ce3e5234db7ec3c9";
+    const d = decide(
+      req({
+        provider: "alchemy",
+        method: "POST",
+        path: "eth-mainnet",
+        body: [
+          {
+            jsonrpc: "2.0",
+            method: "eth_getTransactionReceipt",
+            params: [txHash],
+            id: 1,
+          },
+        ],
+      }),
+      owned,
+      { isAdmin: false },
+    );
+    expect(d.kind).toBe("allow");
+  });
 });
 
 describe("address-guard — decide()", () => {
