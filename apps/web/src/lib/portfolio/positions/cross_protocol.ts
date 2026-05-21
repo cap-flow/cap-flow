@@ -103,6 +103,12 @@ export function buildLotsAndPositions(
   walletId: string,
   options: BuildOptions,
 ): BuildResult {
+  // Unique deploy marker — survives minification. Если этой строки нет
+  // в собранном бандле — значит cross_protocol.ts не включён.
+  if (typeof window !== "undefined") {
+    (window as { __CAPFLOW_C10_MARKER__?: string }).__CAPFLOW_C10_MARKER__ =
+      "CAPFLOW_UCB_C10_MARKER_2026_05_21_V4";
+  }
   const lots = new LotTracker("WAC");
   const positions = new PositionTracker();
   const histPrices = options.histPrices ?? new Map<string, number>();
