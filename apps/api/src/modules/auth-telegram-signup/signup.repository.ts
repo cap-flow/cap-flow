@@ -36,6 +36,27 @@ export interface CreateTelegramUserInput {
   readonly telegramChatId: number;
 }
 
+/**
+ * Display-name приоритет: @telegramUsername (всегда латиница по
+ * правилам Telegram, годится как handle) → "First Last" → null.
+ * Возвращается null если ничего нет — caller-side toMe нарисует
+ * fallback ("user", id и т.п.).
+ */
+function deriveDisplayName(input: {
+  telegramUsername: string | null;
+  firstName: string | null;
+  lastName: string | null;
+}): string | null {
+  if (input.telegramUsername && input.telegramUsername.trim()) {
+    return input.telegramUsername.trim();
+  }
+  const composite = [input.firstName, input.lastName]
+    .filter((s) => s && s.trim())
+    .join(" ")
+    .trim();
+  return composite || null;
+}
+
 export type TelegramSignupNonceRow =
   typeof schema.telegramSignupNonces.$inferSelect;
 
@@ -164,6 +185,11 @@ export class TelegramSignupRepository implements ITelegramSignupRepository {
           telegramUsername: input.telegramUsername,
           firstName: input.firstName,
           lastName: input.lastName,
+          // `name` — display-имя для UI: admin Users, Портфели, header,
+          // приветствие. Приоритет: @telegramUsername → "First Last".
+          // Если нет ни того ни другого — оставляем NULL (toMe в /me
+          // нарисует fallback).
+          name: deriveDisplayName(input),
           // password_hash NULL → set-password page потребуется
           // status=pending → set-password переключит на active.
           status: "pending",
@@ -202,6 +228,21 @@ export class TelegramSignupRepository implements ITelegramSignupRepository {
       telegramUsername: string | null;
     },
   ): Promise<void> {
+    // Backfill `users.name` если он NULL (legacy юзеры созданные
+    // ранней версией репо без name-fill). Не перезаписываем если уже
+    // есть — юзер мог отредактировать в профиле.
+    if (input.telegramUsername) {
+      await tx
+        .update(schema.users)
+        .set({ name: input.telegramUsername })
+        .where(
+          and(
+            eq(schema.users.id, input.userId),
+            isNull(schema.users.name),
+          ),
+        );
+    }
+
     // Primary account — пропускаем если уже есть.
     const existingAccounts = await tx
       .select({ id: schema.accounts.id })

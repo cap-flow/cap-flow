@@ -55,6 +55,7 @@ type Section =
 export function SettingsPage(): JSX.Element {
   const t = useT();
   const navigate = useNavigate();
+  const { isAdmin } = useAuth();
   const [section, setSection] = useState<Section>("profile");
 
   const handleClose = () => {
@@ -113,12 +114,16 @@ export function SettingsPage(): JSX.Element {
             active={section === "notifications"}
             onClick={() => setSection("notifications")}
           />
-          <SectionTab
-            icon={<SlidersHorizontal className="h-4 w-4" />}
-            label="Дополнительно"
-            active={section === "advanced"}
-            onClick={() => setSection("advanced")}
-          />
+          {/* Дополнительно (pipeline, кэш, dev-инструменты) — только для
+              admin'ов. Обычным юзерам этот раздел не нужен и сбивает с толку. */}
+          {isAdmin && (
+            <SectionTab
+              icon={<SlidersHorizontal className="h-4 w-4" />}
+              label="Дополнительно"
+              active={section === "advanced"}
+              onClick={() => setSection("advanced")}
+            />
+          )}
         </nav>
 
         <div className="space-y-6">
@@ -127,7 +132,11 @@ export function SettingsPage(): JSX.Element {
           {section === "language" && <LanguageSection />}
           {section === "subscription" && <BillingPage />}
           {section === "notifications" && <PreferencesPage />}
-          {section === "advanced" && <AdvancedSection />}
+          {/* AdvancedSection доступен только админам (см. видимость
+              кнопки выше). Защищаемся ещё и от прямой манипуляции
+              state — если юзер изменит section вручную, fallback на
+              profile. */}
+          {section === "advanced" && isAdmin && <AdvancedSection />}
         </div>
       </div>
     </div>
