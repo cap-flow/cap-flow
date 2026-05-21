@@ -27,9 +27,17 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 FROM deps AS build
 ARG VITE_API_URL
 ENV VITE_API_URL=${VITE_API_URL}
+# CACHEBUSTER: меняем чтобы заставить buildkit invalidate cache на этом
+# слое. После C12+C10 fix CI собирал stale dist несмотря на изменения в
+# apps/web/src/. Дату/значение можно бамить вручную чтобы forced rebuild.
+ARG CACHEBUSTER=2026-05-21-c10-fix
+RUN echo "Cachebust: $CACHEBUSTER"
 COPY tsconfig.base.json ./
 COPY apps/web apps/web
-RUN pnpm --filter @cap-flow/web run build
+# Гарантируем чистый dist (vite иногда оставляет старые хешированные
+# файлы при инкрементальном rebuild — а layer cache мог сохранить их).
+RUN rm -rf apps/web/dist \
+ && pnpm --filter @cap-flow/web run build
 
 # ─────────────────────── 4. runtime (Caddy static) ───────────────────
 FROM caddy:2.8-alpine AS runtime
