@@ -591,14 +591,31 @@ function emitPositionEvent(
 
   // Deposit_collateral: receipt-токены in-side создают lot с cost = attributedCost
   // (cross-protocol cost basis carries — главное!).
+  //
+  // UCB C8 (async-deposit pattern): GMX V2 / GMSOL / Adrena делают
+  // 2-фазный депозит — Tx A (yield-deposit) шлёт USDC OUT, Tx B (yield-
+  // deposit-fill) получает GLV/GM IN. На Tx B нет OUT underlying → без
+  // C8 attributedCost = 0 → GLV lot с cost = 0 → дальнейшие операции
+  // (Morpho supply GLV → POS-006) fallback на market m.usd.
+  //
+  // `async_deposit_linker.ts` пишет `linkedCostBasisUsd` на Tx B =
+  // Σ outgoing.usd Tx A. Используем его если attributedCost = 0.
   if (eventType === "deposit_collateral") {
     const receiptIns = op.movement.filter(
       (m) => m.direction === "in" && isReceipt(m) && m.amount > 0,
     );
-    if (receiptIns.length > 0 && attributedCost > 0) {
+    const linkedCost = (op as { linkedCostBasisUsd?: number })
+      .linkedCostBasisUsd;
+    const useLinkedCost =
+      linkedCost != null &&
+      Number.isFinite(linkedCost) &&
+      linkedCost > 0 &&
+      attributedCost <= 0;
+    const totalCostForReceipts = useLinkedCost ? linkedCost! : attributedCost;
+    if (receiptIns.length > 0 && totalCostForReceipts > 0) {
       const totalRecv = receiptIns.reduce((s, m) => s + m.amount, 0);
       for (const m of receiptIns) {
-        const share = (m.amount / totalRecv) * attributedCost;
+        const share = (m.amount / totalRecv) * totalCostForReceipts;
         lots.acquire({
           symbol: m.symbol,
           tokenId: m.tokenId,
