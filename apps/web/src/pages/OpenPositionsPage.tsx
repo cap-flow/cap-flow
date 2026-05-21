@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
-import { Archive, Eye, EyeOff, History, Info, Landmark, Pencil, RefreshCw, Settings2, SlidersHorizontal, Wallet, X } from "lucide-react";
+import { AlertTriangle, Archive, Eye, EyeOff, History, Info, Landmark, Pencil, RefreshCw, Settings2, SlidersHorizontal, Wallet, X } from "lucide-react";
 
 import {
   Card,
@@ -1058,6 +1058,25 @@ function PositionRow({
           >
             {p.id}
           </Link>
+          {p.coverageIncomplete && (
+            <span
+              className="inline-flex h-4 w-4 cursor-help items-center justify-center text-amber-500"
+              title={
+                "⚠ Cost basis incomplete\n\n" +
+                "Mint этой Uniswap V3 NFT не нашёлся в загруженной chain-ops истории. " +
+                "Возможные причины:\n" +
+                "  • Mint произошёл до начала sync (2-5 лет назад)\n" +
+                "  • NFT перенесли transfer'ом из другого адреса\n" +
+                "  • Этот NFT в другом fee-tier'е, чем sibling — наш матчер пока не различает\n\n" +
+                "Стартовая $ = текущая стоимость (fallback). Срок и Fee APR " +
+                "не считаются — нужна реальная дата открытия. Можно задать " +
+                "вручную через детальную страницу позиции."
+              }
+              aria-label="Cost basis incomplete"
+            >
+              <AlertTriangle className="h-3 w-3" />
+            </span>
+          )}
           <button
             type="button"
             onClick={onToggleHidden}
