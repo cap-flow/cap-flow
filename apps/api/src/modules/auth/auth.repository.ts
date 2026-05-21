@@ -32,6 +32,16 @@ export interface CreateUserInput {
 export interface IAuthRepository {
   findActiveUserByEmail(email: string): Promise<UserRow | null>;
   findUserByEmail(email: string): Promise<UserRow | null>;
+  /**
+   * Lookup активного юзера по identifier'у который может быть email
+   * ИЛИ username. Содержит "@" → email; иначе username. Возвращает
+   * только enrolled (password_hash NOT NULL) и status=active —
+   * Telegram-signup юзеры ДО set-password (status=pending) не могут
+   * залогиниться по паролю даже если уже задали username.
+   */
+  findActiveUserByEmailOrUsername(
+    identifier: string,
+  ): Promise<UserRow | null>;
   findActiveUserById(id: string): Promise<UserRow | null>;
   /** Any user by id, including blocked/pending — used by email verification. */
   findUserById(id: string): Promise<UserRow | null>;
@@ -83,6 +93,31 @@ export class AuthRepository implements IAuthRepository {
       .select()
       .from(schema.users)
       .where(eq(schema.users.email, email.toLowerCase()))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async findActiveUserByEmailOrUsername(
+    identifier: string,
+  ): Promise<UserRow | null> {
+    const trimmed = identifier.trim();
+    if (!trimmed) return null;
+    // Эвристика: содержит "@" → ищем по email; иначе по username.
+    // Не пытаемся "ИЛИ" одним запросом — обе колонки UNIQUE, поэтому
+    // двух round-trip'ов достаточно и проще для индексного планировщика.
+    if (trimmed.includes("@")) {
+      return this.findActiveUserByEmail(trimmed);
+    }
+    const rows = await this.db
+      .select()
+      .from(schema.users)
+      .where(
+        and(
+          eq(schema.users.username, trimmed),
+          eq(schema.users.status, "active"),
+          isNotNull(schema.users.passwordHash),
+        ),
+      )
       .limit(1);
     return rows[0] ?? null;
   }

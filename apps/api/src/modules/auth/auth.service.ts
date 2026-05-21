@@ -51,14 +51,17 @@ export class AuthService {
   ) {}
 
   async login(input: LoginInput): Promise<AuthTokensBundle> {
-    const email = input.email.toLowerCase();
-    const user = await this.repo.findActiveUserByEmail(email);
+    // input.email теперь identifier — email или username. Lowercase
+    // делаем ВНУТРИ repo на email-path; username хранится как набрал
+    // юзер (case-sensitive), здесь только trim.
+    const identifier = input.email.trim();
+    const user = await this.repo.findActiveUserByEmailOrUsername(identifier);
     const ok = await verifyPassword(
       input.password,
       user?.passwordHash ?? DUMMY_HASH
     );
     if (!user || !user.passwordHash || !ok) {
-      throw new UnauthorizedError("Invalid email or password.");
+      throw new UnauthorizedError("Invalid credentials.");
     }
 
     const now = new Date();

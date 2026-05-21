@@ -62,7 +62,9 @@ export function LoginPage(): JSX.Element {
     setError(null);
     setSubmitting(true);
     try {
-      await login({ email: email.trim().toLowerCase(), password });
+      // НЕ lowercase — поле принимает username case-sensitive.
+      // Backend сам lowercase'ит email-path внутри repo.
+      await login({ email: email.trim(), password });
       navigate(from, { replace: true });
     } catch (err) {
       if (err instanceof ApiError) {
@@ -179,15 +181,17 @@ export function LoginPage(): JSX.Element {
           {/* ─── Existing email/password form ───────────────────── */}
           <form onSubmit={handleSubmit} className="space-y-4" noValidate>
             <div className="space-y-2">
-              <Label htmlFor="email">{t("login.email")}</Label>
+              <Label htmlFor="email">Email или логин</Label>
               <Input
                 id="email"
-                type="email"
-                autoComplete="email"
+                // type="text" не email — приём username тоже валидный
+                type="text"
+                autoComplete="username"
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 disabled={submitting}
+                placeholder="Например, ваш Telegram-ник или email"
               />
             </div>
             <div className="space-y-2">

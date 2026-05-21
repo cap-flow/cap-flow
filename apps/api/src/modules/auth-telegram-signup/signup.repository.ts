@@ -7,6 +7,8 @@
  *
  * См. `signup.service.ts` для high-level flow.
  */
+import { createHash, randomBytes } from "node:crypto";
+
 import { type Database, schema } from "@cap-flow/db";
 import { and, eq, isNull, sql } from "drizzle-orm";
 
@@ -30,6 +32,8 @@ export interface CreateTelegramUserInput {
   readonly telegramUsername: string | null;
   readonly firstName: string | null;
   readonly lastName: string | null;
+  /** Chat ID для авто-связи telegram_links записи (= notifications target). */
+  readonly telegramChatId: number;
 }
 
 export type TelegramSignupNonceRow =
@@ -52,6 +56,17 @@ export interface ITelegramSignupRepository {
   findUserAnyStatusById(userId: string): Promise<UserRow | null>;
   /** Создаёт shell-пользователя со status="pending" и password_hash NULL. */
   createTelegramUser(input: CreateTelegramUserInput): Promise<UserRow>;
+  /**
+   * Idempotent backfill: гарантирует что у юзера есть primary account
+   * и linked telegram_links row. Используется и для свежих signup, и
+   * для returning users (если предыдущий signup-вариант не доделал
+   * провижн). NO-OP если строки уже есть.
+   */
+  ensureUserDefaults(input: {
+    userId: string;
+    telegramChatId: number;
+    telegramUsername: string | null;
+  }): Promise<void>;
   /**
    * Записывает password_hash + (опционально) username, переводит
    * status в "active". UNIQUE-conflict на username → throws.
@@ -141,23 +156,100 @@ export class TelegramSignupRepository implements ITelegramSignupRepository {
   async createTelegramUser(
     input: CreateTelegramUserInput,
   ): Promise<UserRow> {
-    const [row] = await this.db
-      .insert(schema.users)
-      .values({
-        telegramId: input.telegramUserId,
+    return await this.db.transaction(async (tx) => {
+      const [user] = await tx
+        .insert(schema.users)
+        .values({
+          telegramId: input.telegramUserId,
+          telegramUsername: input.telegramUsername,
+          firstName: input.firstName,
+          lastName: input.lastName,
+          // password_hash NULL → set-password page потребуется
+          // status=pending → set-password переключит на active.
+          status: "pending",
+          role: "user",
+        })
+        .returning();
+      if (!user) throw new Error("User insert returned no row.");
+      await this.insertDefaultsTx(tx, {
+        userId: user.id,
+        telegramChatId: input.telegramChatId,
         telegramUsername: input.telegramUsername,
-        firstName: input.firstName,
-        lastName: input.lastName,
-        // password_hash NULL → set-password page потребуется
-        // status=pending → юзер не может логиниться по email/паролю
-        // пока не пройдёт set-password (там status переключится на
-        // active).
-        status: "pending",
-        role: "user",
-      })
-      .returning();
-    if (!row) throw new Error("User insert returned no row.");
-    return row;
+      });
+      return user;
+    });
+  }
+
+  async ensureUserDefaults(input: {
+    userId: string;
+    telegramChatId: number;
+    telegramUsername: string | null;
+  }): Promise<void> {
+    // Idempotent: проверяем существование строк перед INSERT'ом.
+    // Используется для returning users (вернулись через bot после
+    // того, как предыдущий signup-flow вышел из строя и не успел
+    // провижнуть account/link).
+    return await this.db.transaction(async (tx) => {
+      await this.insertDefaultsTx(tx, input);
+    });
+  }
+
+  private async insertDefaultsTx(
+    tx: Parameters<Parameters<Database["transaction"]>[0]>[0],
+    input: {
+      userId: string;
+      telegramChatId: number;
+      telegramUsername: string | null;
+    },
+  ): Promise<void> {
+    // Primary account — пропускаем если уже есть.
+    const existingAccounts = await tx
+      .select({ id: schema.accounts.id })
+      .from(schema.accounts)
+      .where(
+        and(
+          eq(schema.accounts.ownerId, input.userId),
+          isNull(schema.accounts.archivedAt),
+        ),
+      )
+      .limit(1);
+    if (existingAccounts.length === 0) {
+      await tx.insert(schema.accounts).values({
+        ownerId: input.userId,
+        name: "Main",
+        isPrimary: true,
+      });
+    }
+
+    // telegram_links — пропускаем если уже linked (любой row, не
+    // только revoked-aware: для signup-flow важен сам факт «бот знает
+    // этот chat»).
+    const existingLink = await tx
+      .select({ id: schema.telegramLinks.id })
+      .from(schema.telegramLinks)
+      .where(
+        and(
+          eq(schema.telegramLinks.userId, input.userId),
+          eq(schema.telegramLinks.status, "linked"),
+          isNull(schema.telegramLinks.revokedAt),
+        ),
+      )
+      .limit(1);
+    if (existingLink.length === 0) {
+      const syntheticHash =
+        "signup:" + createHash("sha256").update(randomBytes(16)).digest("hex");
+      const now = new Date();
+      await tx.insert(schema.telegramLinks).values({
+        userId: input.userId,
+        startCodeHash: syntheticHash,
+        status: "linked",
+        chatId: input.telegramChatId,
+        telegramUsername: input.telegramUsername,
+        linkedAt: now,
+        // expires_at NOT NULL — для уже-linked nominal.
+        expiresAt: now,
+      });
+    }
   }
 
   async setInitialPasswordAndUsername(

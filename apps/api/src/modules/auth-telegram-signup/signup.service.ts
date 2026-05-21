@@ -143,6 +143,7 @@ export class TelegramSignupService {
         telegramUsername: payload.telegramUsername,
         firstName: payload.firstName,
         lastName: payload.lastName,
+        telegramChatId: payload.telegramChatId,
       });
       createdNewUser = true;
       await this.audit.log({
@@ -154,6 +155,16 @@ export class TelegramSignupService {
         },
       });
     }
+
+    // Idempotent backfill: гарантируем что у юзера есть Main account
+    // + linked telegram_links. Нужно для returning users, у которых
+    // предыдущий signup-flow (до этого фикса) не успел провижнуть
+    // — иначе они зависают в UI без портфеля и без видимой Telegram-привязки.
+    await this.repo.ensureUserDefaults({
+      userId: user.id,
+      telegramChatId: payload.telegramChatId,
+      telegramUsername: payload.telegramUsername,
+    });
 
     await this.repo.bindNonceToUser({
       nonceHash,

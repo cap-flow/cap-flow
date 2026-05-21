@@ -1,7 +1,13 @@
 import { z } from "zod";
 
 export const loginBodySchema = z.object({
-  email: z.string().email().max(320),
+  /**
+   * Identifier: email (legacy email/password юзеры) ИЛИ username
+   * (Telegram-signup юзеры, у которых может не быть email). Поле
+   * называется `email` ради backward compat со старым фронтом; новый
+   * фронт отображает label «Email или логин».
+   */
+  email: z.string().min(1).max(320),
   password: z.string().min(1).max(200),
 });
 

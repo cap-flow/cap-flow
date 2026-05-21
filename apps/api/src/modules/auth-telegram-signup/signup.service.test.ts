@@ -30,6 +30,20 @@ class FakeRepo implements ITelegramSignupRepository {
   usersByTelegramId = new Map<number, UserRow>();
   nextUserId = 1;
   usernameTaken = new Set<string>();
+  defaultsByUserId = new Map<string, { hasAccount: boolean; hasLink: boolean }>();
+
+  async ensureUserDefaults(input: {
+    userId: string;
+    telegramChatId: number;
+    telegramUsername: string | null;
+  }): Promise<void> {
+    void input.telegramChatId;
+    void input.telegramUsername;
+    this.defaultsByUserId.set(input.userId, {
+      hasAccount: true,
+      hasLink: true,
+    });
+  }
 
   async createNonce(input: {
     nonceHash: string;
@@ -93,7 +107,9 @@ class FakeRepo implements ITelegramSignupRepository {
     telegramUsername: string | null;
     firstName: string | null;
     lastName: string | null;
+    telegramChatId: number;
   }): Promise<UserRow> {
+    void input.telegramChatId;
     const id = `u${this.nextUserId++}`;
     const user: UserRow = {
       id,
@@ -466,5 +482,67 @@ describe("TelegramSignupService", () => {
     // Бот ещё не пришёл — userId NULL → /finish даёт gone.
     const r = await s.finishLogin(rawNonce);
     expect(r.kind).toBe("gone");
+  });
+
+  it("handleBotStart провижит primary account + telegram_link через ensureUserDefaults", async () => {
+    const repo = new FakeRepo();
+    const s = new TelegramSignupService(
+      repo,
+      stubAudit,
+      cfg,
+      stubLog,
+      getBotUsername,
+    );
+    const { rawNonce } = await s.startSignup();
+    await s.handleBotStart({
+      rawNonce,
+      telegramUserId: 555,
+      telegramChatId: 555,
+      telegramUsername: "u555",
+      firstName: null,
+      lastName: null,
+    });
+    const userId = repo.usersByTelegramId.get(555)!.id;
+    const defaults = repo.defaultsByUserId.get(userId);
+    expect(defaults?.hasAccount).toBe(true);
+    expect(defaults?.hasLink).toBe(true);
+  });
+
+  it("ensureUserDefaults вызывается и для returning users (backfill)", async () => {
+    const repo = new FakeRepo();
+    const s = new TelegramSignupService(
+      repo,
+      stubAudit,
+      cfg,
+      stubLog,
+      getBotUsername,
+    );
+    // Первая регистрация.
+    const first = await s.startSignup();
+    await s.handleBotStart({
+      rawNonce: first.rawNonce,
+      telegramUserId: 600,
+      telegramChatId: 600,
+      telegramUsername: null,
+      firstName: null,
+      lastName: null,
+    });
+    // Симулируем что предыдущий signup не провижнул defaults (старая баг).
+    const userId = repo.usersByTelegramId.get(600)!.id;
+    repo.defaultsByUserId.delete(userId);
+
+    // Returning login через fresh nonce.
+    const second = await s.startSignup();
+    await s.handleBotStart({
+      rawNonce: second.rawNonce,
+      telegramUserId: 600,
+      telegramChatId: 600,
+      telegramUsername: null,
+      firstName: null,
+      lastName: null,
+    });
+    const defaults = repo.defaultsByUserId.get(userId);
+    expect(defaults?.hasAccount).toBe(true);
+    expect(defaults?.hasLink).toBe(true);
   });
 });
