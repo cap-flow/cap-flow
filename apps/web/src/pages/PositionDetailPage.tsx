@@ -220,9 +220,18 @@ export function PositionDetailPage(): JSX.Element {
       ops: l.ops,
       ...(l.live !== undefined && { live: l.live }),
     }));
-    const all = buildOpenPositions(inputs, { costBasisOverrideByHash });
+    // UCB E2.1: используем те же inputs что и OpenPositionsPage, чтобы
+    // position.startUsd был консистентен между /positions и
+    // /positions/:id. До этого детальная страница НЕ передавала
+    // `lotsByWallet` (legacy CostBasisTracker fallback), листовая —
+    // передавала (UCB C5 SoT). Из-за этого один position.id показывал
+    // разные cost basis. См. UCB SoT инвариант.
+    const all = buildOpenPositions(inputs, {
+      costBasisOverrideByHash,
+      lotsByWallet: newTrackers.lotsByWallet,
+    });
     return all.find((p) => p.id === positionId) ?? null;
-  }, [loadedById, positionId, costBasisOverrideByHash]);
+  }, [loadedById, positionId, costBasisOverrideByHash, newTrackers.lotsByWallet]);
 
   if (!positionId) {
     return (
