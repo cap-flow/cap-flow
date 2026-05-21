@@ -30,13 +30,17 @@ ENV VITE_API_URL=${VITE_API_URL}
 # CACHEBUSTER: меняем чтобы заставить buildkit invalidate cache на этом
 # слое. После C12+C10 fix CI собирал stale dist несмотря на изменения в
 # apps/web/src/. Дату/значение можно бамить вручную чтобы forced rebuild.
-ARG CACHEBUSTER=2026-05-21-c10-fix
+ARG CACHEBUSTER=2026-05-21-c10-fix-v2-vite-cache
 RUN echo "Cachebust: $CACHEBUSTER"
 COPY tsconfig.base.json ./
 COPY apps/web apps/web
-# Гарантируем чистый dist (vite иногда оставляет старые хешированные
-# файлы при инкрементальном rebuild — а layer cache мог сохранить их).
+# Гарантируем чистый dist + чистый Vite optimizer cache. Без второго
+# vite кэширует optimized deps в node_modules/.vite/ который пришёл из
+# deps стадии и может вести к stale bundle hashes несмотря на source
+# changes.
 RUN rm -rf apps/web/dist \
+            apps/web/node_modules/.vite \
+            node_modules/.vite \
  && pnpm --filter @cap-flow/web run build
 
 # ─────────────────────── 4. runtime (Caddy static) ───────────────────
