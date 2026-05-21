@@ -80,13 +80,7 @@ jobs:
           labels: ${{ steps.meta-web.outputs.labels }}
           build-args: |
             VITE_API_URL=${{ vars.VITE_API_URL || '/api' }}
-          # Force clean build: GHA cache залип на stale vite output dist,
-          # из-за чего deploys #21-26 продолжали выдавать тот же bundle
-          # hash несмотря на source changes. Временно отключаем cache-from
-          # чтобы получить честный rebuild; cache-to оставляем (mode=max
-          # пишет свежий снапшот для последующих deploy'ев). После
-          # подтверждения что fresh bundle на проде — можно вернуть
-          # cache-from обратно (отдельным commit'ом).
+          cache-from: type=gha,scope=web
           cache-to: type=gha,scope=web,mode=max
 
   deploy:
