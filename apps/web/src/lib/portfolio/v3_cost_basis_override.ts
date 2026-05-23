@@ -35,7 +35,38 @@ const DISTANCE_TOLERANCE = 0.01;
 import { findV3Deployments } from "@/lib/v3/chains";
 import { v3PositionKey, type V3PositionMap } from "@/lib/v3/hook";
 import type { V3CostBasisResult } from "@/lib/v3/liquidity_events";
+import type { V3Position } from "@/lib/v3/positions";
 import type { OpenPosition } from "./open_positions";
+
+/**
+ * Orphan-NFT recovery helper: применяется к любой OpenPosition с
+ * `coverageIncomplete=true`, для которой V3CostBasisHook через on-chain
+ * Etherscan/Alchemy logs предоставил cb.mintBlockTime + tokenId.
+ *
+ * Снимает flag, backfill'ит openedAt/openHash/ageDays/openedInTokens.
+ * Используется в обеих branch'ах override path (skip-because-close AND
+ * actually-overridden).
+ */
+function backfillOrphanMeta(
+  base: OpenPosition,
+  cb: V3CostBasisResult,
+  nft: V3Position,
+): OpenPosition {
+  if (!base.coverageIncomplete) return base;
+  if (cb.mintBlockTime === undefined) return base;
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    ...base,
+    coverageIncomplete: false,
+    openedAt: cb.mintBlockTime,
+    ...(cb.mintTxHash ? { openHash: cb.mintTxHash } : {}),
+    ageDays: Math.max(0, Math.floor((now - cb.mintBlockTime) / 86_400)),
+    openedInTokens: [
+      { symbol: nft.token0.symbol, amount: cb.totalDeposited0 },
+      { symbol: nft.token1.symbol, amount: cb.totalDeposited1 },
+    ],
+  };
+}
 
 interface OverrideResult {
   positions: OpenPosition[];
@@ -129,18 +160,21 @@ export function applyV3CostBasisOverride(
       if (cb && cb.netCostBasisUsd > 0) {
         const oldStartUsd = x.p.startUsd;
         const newStartUsd = cb.netCostBasisUsd;
-        // Skip override если разница < 1% (slot0 vs slot0 = тот же источник
-        // → diff < 1% это float noise, не missing events). Но всё равно
-        // прокидываем matchedV3TokenId чтобы UI показывал #{tokenId}.
-        // Раньше threshold был 5% — пропускал missing IncreaseLiquidity
-        // events (POS-002: $475 missing на $14,560 = 3.26%, под 5% threshold).
+        // NFT lookup для backfillOrphanMeta (нужны token0/token1 symbols).
+        const nftForCb = nfts.find(
+          (n) => n.tokenId.toString() === cb.tokenId.toString(),
+        );
         if (oldStartUsd > 0 && Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < DISTANCE_TOLERANCE) {
-          const next: OpenPosition = { ...x.p, matchedV3TokenId: cb.tokenId.toString() };
+          let next: OpenPosition = {
+            ...x.p,
+            matchedV3TokenId: cb.tokenId.toString(),
+          };
+          if (nftForCb) next = backfillOrphanMeta(next, cb, nftForCb);
           result[x.idx] = next;
           matchedTotalAuth.push(newStartUsd);
           continue;
         }
-        const next: OpenPosition = { ...x.p };
+        let next: OpenPosition = { ...x.p };
         next.startUsd = newStartUsd;
         next.matchedV3TokenId = cb.tokenId.toString();
         if (oldStartUsd > 0) {
@@ -149,6 +183,7 @@ export function applyV3CostBasisOverride(
             startUsd: (t.startUsd / oldStartUsd) * newStartUsd,
           }));
         }
+        if (nftForCb) next = backfillOrphanMeta(next, cb, nftForCb);
         // H6: do NOT subtract currentDebtUsd. PnL is the change in
         // collateral value only; debt is a separate liability tracked
         // via `currentDebtUsd`. Subtracting it here double-counts the
@@ -255,14 +290,20 @@ export function applyV3CostBasisOverride(
         const oldStartUsd = item.p.startUsd;
         const newStartUsd = cb.netCostBasisUsd;
         if (oldStartUsd > 0 && Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < DISTANCE_TOLERANCE) {
-          // L4: pct-diff < DISTANCE_TOLERANCE (1%) — не override, но
-          // прокидываем matchedV3TokenId чтобы downstream redistribution
-          // знал об установленной связи.
-          const next: OpenPosition = { ...item.p, matchedV3TokenId: nft.tokenId.toString() };
+          // L4: pct-diff < DISTANCE_TOLERANCE (1%) — не override startUsd,
+          // но прокидываем matchedV3TokenId. ВАЖНО: для orphan'ов
+          // (coverageIncomplete=true) всё равно backfill'им openedAt /
+          // openHash / ageDays / openedInTokens — это независимо от
+          // startUsd override'а и нужно даже когда startUsd accurate.
+          let next: OpenPosition = {
+            ...item.p,
+            matchedV3TokenId: nft.tokenId.toString(),
+          };
+          next = backfillOrphanMeta(next, cb, nft);
           result[item.idx] = next;
           continue;
         }
-        const next: OpenPosition = { ...item.p };
+        let next: OpenPosition = { ...item.p };
         next.startUsd = newStartUsd;
         next.matchedV3TokenId = nft.tokenId.toString();
         if (oldStartUsd > 0) {
@@ -271,29 +312,7 @@ export function applyV3CostBasisOverride(
             startUsd: (t.startUsd / oldStartUsd) * newStartUsd,
           }));
         }
-        // Orphan-NFT recovery (Phase B): если у позиции был
-        // coverageIncomplete=true (mint event не нашёлся в registry),
-        // но V3CostBasisHook через Etherscan/Alchemy теперь даёт
-        // на on-chain cost basis ЭТОЙ NFT (по tokenId) — снимаем
-        // флаг. Также backfill'им openedAt из earliest IncreaseLiquidity
-        // event time, ageDays пересчитываем.
-        if (item.p.coverageIncomplete && cb.mintBlockTime !== undefined) {
-          next.coverageIncomplete = false;
-          next.openedAt = cb.mintBlockTime;
-          if (cb.mintTxHash) next.openHash = cb.mintTxHash;
-          const now = Math.floor(Date.now() / 1000);
-          next.ageDays = Math.max(
-            0,
-            Math.floor((now - cb.mintBlockTime) / 86_400),
-          );
-          // openedInTokens — total deposit amounts из всех
-          // IncreaseLiquidity events. Symbol лучше брать от V3 NFT
-          // potencially-mismatched supply order (token0/token1).
-          next.openedInTokens = [
-            { symbol: nft.token0.symbol, amount: cb.totalDeposited0 },
-            { symbol: nft.token1.symbol, amount: cb.totalDeposited1 },
-          ];
-        }
+        next = backfillOrphanMeta(next, cb, nft);
         // H6: do NOT subtract currentDebtUsd. PnL is the change in
         // collateral value only; debt is a separate liability tracked
         // via `currentDebtUsd`. Subtracting it here double-counts the
