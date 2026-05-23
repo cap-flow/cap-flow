@@ -322,4 +322,7 @@ export interface V3CostBasisResult {
   /** Tx hash earliest IncreaseLiquidity = mint tx. Используется для match'а
    *  с OpenPosition.openHash в v3_cost_basis_override.ts (per-NFT precision). */
   mintTxHash?: string;
+  /** Block timestamp earliest IncreaseLiquidity = mint time. Используется для
+   *  fill'а OpenPosition.openedAt у orphan NFT'ов (где mint не в registry). */
+  mintBlockTime?: number;
 }

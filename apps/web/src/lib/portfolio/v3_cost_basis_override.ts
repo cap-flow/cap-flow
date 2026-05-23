@@ -271,6 +271,29 @@ export function applyV3CostBasisOverride(
             startUsd: (t.startUsd / oldStartUsd) * newStartUsd,
           }));
         }
+        // Orphan-NFT recovery (Phase B): если у позиции был
+        // coverageIncomplete=true (mint event не нашёлся в registry),
+        // но V3CostBasisHook через Etherscan/Alchemy теперь даёт
+        // на on-chain cost basis ЭТОЙ NFT (по tokenId) — снимаем
+        // флаг. Также backfill'им openedAt из earliest IncreaseLiquidity
+        // event time, ageDays пересчитываем.
+        if (item.p.coverageIncomplete && cb.mintBlockTime !== undefined) {
+          next.coverageIncomplete = false;
+          next.openedAt = cb.mintBlockTime;
+          if (cb.mintTxHash) next.openHash = cb.mintTxHash;
+          const now = Math.floor(Date.now() / 1000);
+          next.ageDays = Math.max(
+            0,
+            Math.floor((now - cb.mintBlockTime) / 86_400),
+          );
+          // openedInTokens — total deposit amounts из всех
+          // IncreaseLiquidity events. Symbol лучше брать от V3 NFT
+          // potencially-mismatched supply order (token0/token1).
+          next.openedInTokens = [
+            { symbol: nft.token0.symbol, amount: cb.totalDeposited0 },
+            { symbol: nft.token1.symbol, amount: cb.totalDeposited1 },
+          ];
+        }
         // H6: do NOT subtract currentDebtUsd. PnL is the change in
         // collateral value only; debt is a separate liability tracked
         // via `currentDebtUsd`. Subtracting it here double-counts the

@@ -184,8 +184,28 @@ function extractEtherscan(
   out: ExtractedAddress[],
   invalid: string[]
 ): void {
-  // Etherscan v2 unified API: every account-level call carries
-  // ?address=0x.... For `account/balancemulti` it's a CSV.
+  // Etherscan v2 unified API: address-семантика зависит от module:
+  //   - module=account (balance, txlist, tokentx, txlistinternal, balancemulti)
+  //     → address = USER wallet → enforce ownership
+  //   - module=logs (getLogs) → address = CONTRACT emitter filter (public,
+  //     не user data) → skip ownership
+  //   - module=contract (getabi, getsourcecode) → contract address (public) → skip
+  //   - module=stats / proxy → нет address param обычно
+  //
+  // useV3LiquidityEvents читает IncreaseLiquidity events с
+  // NonfungiblePositionManager contract address (0xC3644...). Это
+  // contract address, не user wallet → ownership check бы fail'ал
+  // (POS-009/010 orphan stays orphan), хотя данные publicly indexable.
+  const module = (
+    Array.isArray(req.query.module) ? req.query.module[0] : req.query.module
+  )?.toString().toLowerCase();
+  const isAccountModule = module === "account";
+  if (!isAccountModule) {
+    // Non-account modules (logs, contract, stats, proxy) — public data.
+    // НЕ extract'им address как user-owned. Address-guard пропустит
+    // запрос (0 addresses to check → allow).
+    return;
+  }
   const v = req.query.address;
   if (v !== undefined) pushFromAny(out, invalid, v, "query.address");
 }

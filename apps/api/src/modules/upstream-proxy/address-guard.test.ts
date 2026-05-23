@@ -88,22 +88,52 @@ describe("address-guard — Helius extraction", () => {
 });
 
 describe("address-guard — Etherscan extraction", () => {
-  it("finds address in query.address", () => {
-    const r = extractAddresses(
-      req({ provider: "etherscan", path: "v2/api", query: { address: OWN_EVM } })
-    );
-    expect(r.addresses).toHaveLength(1);
-  });
-
-  it("handles CSV (balancemulti)", () => {
+  it("module=account: finds address in query.address", () => {
     const r = extractAddresses(
       req({
         provider: "etherscan",
         path: "v2/api",
-        query: { address: `${OWN_EVM},${OTHER_EVM}` },
-      })
+        query: { module: "account", address: OWN_EVM },
+      }),
+    );
+    expect(r.addresses).toHaveLength(1);
+  });
+
+  it("module=account: handles CSV (balancemulti)", () => {
+    const r = extractAddresses(
+      req({
+        provider: "etherscan",
+        path: "v2/api",
+        query: {
+          module: "account",
+          action: "balancemulti",
+          address: `${OWN_EVM},${OTHER_EVM}`,
+        },
+      }),
     );
     expect(r.addresses).toHaveLength(2);
+  });
+
+  it("module=logs: address — contract emitter filter, не user → НЕ extract", () => {
+    // useV3LiquidityEvents → Etherscan getLogs с
+    // address=NonfungiblePositionManager (0xC3644…). Это публичный
+    // contract address, не user wallet — раньше address-guard блокировал
+    // (orphan NFT остаётся orphan для не-owner'ов).
+    const r = extractAddresses(
+      req({
+        provider: "etherscan",
+        path: "v2/api",
+        query: {
+          module: "logs",
+          action: "getLogs",
+          address: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+          topic0:
+            "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
+        },
+      }),
+    );
+    expect(r.addresses).toHaveLength(0);
+    expect(r.invalid).toHaveLength(0);
   });
 });
 

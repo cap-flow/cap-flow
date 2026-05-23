@@ -585,6 +585,7 @@ export function useV3LiquidityEvents(
           Number(a.blockNumber - b.blockNumber),
         );
         const mintTxHash = sortedInc[0]?.txHash;
+        const mintBlockTime = sortedInc[0]?.blockTime;
         const item: V3CostBasisResult = {
           tokenId: target.tokenId,
           totalDeposited0,
@@ -600,6 +601,7 @@ export function useV3LiquidityEvents(
           },
           hasHistPrices,
           ...(mintTxHash && { mintTxHash }),
+          ...(mintBlockTime !== undefined && { mintBlockTime }),
         };
         const cacheKey = `${target.position.chain}|${target.tokenId.toString()}`;
         // НЕ кэшируем "empty" результаты (0 increase events) — это значит
