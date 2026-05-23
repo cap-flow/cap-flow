@@ -1046,6 +1046,16 @@ function PositionRow({
         ? "сегодня"
         : `${p.ageDays} дн.`;
 
+  // UCB C5 Phase F UI (Task #19 + #38): aggregate fallbackUsd по supplyTokens.
+  // > 0 → хотя бы один supply-токен имеет cost basis derived от m.usd
+  // (silent fallback в supply walker когда LotTracker pустой). Surface'им
+  // badge'ом в ID-cell чтобы пользователь видел что startUsd подозрительный.
+  const fallbackUsd = p.supplyTokens.reduce(
+    (s, t) => s + (t.fallbackUsd ?? 0),
+    0,
+  );
+  const hasFallbackCostBasis = fallbackUsd > 0;
+
   // Словарь рендереров — ключ ↔ id колонки.
   const renderers: Record<string, () => JSX.Element> = {
     id: () => (
@@ -1062,9 +1072,9 @@ function PositionRow({
               не «прыгал» при появлении ⚠ badge на orphan-позициях. */}
           <span
             className="inline-flex h-4 w-4 shrink-0 items-center justify-center"
-            aria-hidden={!p.coverageIncomplete}
+            aria-hidden={!p.coverageIncomplete && !hasFallbackCostBasis}
           >
-            {p.coverageIncomplete && (
+            {p.coverageIncomplete ? (
               <span
                 className="inline-flex h-4 w-4 cursor-help items-center justify-center text-amber-500"
                 title={
@@ -1082,7 +1092,28 @@ function PositionRow({
               >
                 <AlertTriangle className="h-3 w-3" />
               </span>
-            )}
+            ) : hasFallbackCostBasis ? (
+              // UCB C5 Phase F UI (Task #19 + #38): silent m.usd fallback
+              // отдельно. LotTracker не имел данных для какого-то supply-токена
+              // в момент supply → cost basis derived от текущей spot price
+              // (DeBank m.usd) вместо реальной histor-цены. UI badge поменьше
+              // и фиолетовый (отличить от orphan'a).
+              <span
+                className="inline-flex h-4 w-4 cursor-help items-center justify-center text-violet-400"
+                title={
+                  "⚠ Cost basis derived from current spot price\n\n" +
+                  `Для одного из supply-токенов LotTracker не имел данных в момент supply ` +
+                  `(вероятно: токен не покрыт нашими classifier'ами для этого протокола, ` +
+                  `или missing chain-ops history). ` +
+                  `Cost basis для ${(fallbackUsd ?? 0).toFixed(2)}$ из ${p.startUsd.toFixed(2)}$ derived from DeBank spot вместо реальной hist-цены. ` +
+                  `\n\nДля long-term позиций это может inflate startUsd ` +
+                  `(купил год назад дешевле, current spot выше → wrong PnL).`
+                }
+                aria-label="Cost basis derived from spot"
+              >
+                <AlertTriangle className="h-3 w-3" />
+              </span>
+            ) : null}
           </span>
           <button
             type="button"
