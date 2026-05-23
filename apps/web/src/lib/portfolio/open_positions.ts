@@ -2405,13 +2405,31 @@ function buildOne(
     : isSingleAggregated
       ? positionLevelDeposit
       : Math.max(positionLevelDeposit, supplySumStartUsd);
-  // Используем lp.assetUsd для всех типов (включая V3) — это
-  // authoritative DeBank-видимое значение которое включает в себя:
-  //   - Underlying liquidity (PAXG + USDC)
-  //   - Accrued uncollected fees
-  // Совпадает с тем что DeBank UI показывает пользователю.
-  // Pending fees отдельно выделяются в `fees` поле через `lp.rewards`.
-  const currentUsd = lp.assetUsd;
+  // `lp.assetUsd` DeBank даёт all-in: underlying liquidity + accrued
+  // uncollected fees. Для всех протоколов кроме V3 LP это правильно
+  // (fees rebase'ятся в supply amount → не дублируются). Для V3 LP
+  // (Uniswap V3 / PancakeSwap / Aerodrome V3 etc.) fees — отдельный
+  // balance в `tokensOwed0/1`, который DeBank складывает в assetUsd.
+  // В нашем UI fees показываются ОТДЕЛЬНОЙ колонкой "Fee" + участвуют
+  // в "Итого активы" через `totalAssetsOf()`. Если не вычесть их из
+  // currentUsd, они **дважды учитываются** в Итого активы.
+  //
+  // Поэтому для V3 LP: currentUsd = lp.assetUsd − pending fees.
+  // Это даёт pure liquidity value (LP NFT принципал), что matches
+  // Uniswap UI «Position Value» / Revert «Current LP Value».
+  //
+  // ВАЖНО: `feesUsd` ещё не посчитан в этой точке — он считается
+  // через `computeFees(lp, ...)` ниже. Делаем pre-compute v3 fees
+  // из `lp.rewards` напрямую (тот же источник, что computeFees
+  // для v3_rewards), чтобы вычесть до общего currentUsd init'а.
+  let currentUsd = lp.assetUsd;
+  if (isV3LpProtocol(lp.protocolName)) {
+    const v3PendingFeesUsd = lp.rewards.reduce(
+      (s, r) => s + (Number.isFinite(r.usd) ? r.usd : 0),
+      0,
+    );
+    currentUsd = Math.max(0, lp.assetUsd - v3PendingFeesUsd);
+  }
   const currentDebtUsd = lp.borrow.reduce((acc, t) => acc + t.usd, 0);
   const ageDays = opened
     ? Math.max(0, Math.floor((Date.now() / 1000 - opened.time) / 86_400))
@@ -3697,7 +3715,17 @@ function buildV3Details(
     if (cur != null) hodlUsd += amount * cur;
   }
 
-  const currentLpUsd = lp.assetUsd;
+  // Pure liquidity value БЕЗ pending fees (rewards) — fees показываются
+  // отдельной колонкой и складываются в "Итого активы" через totalAssetsOf.
+  // Без этого вычитания fees учитываются дважды (как часть currentLp И
+  // как pending). HODL counterfactual использует только underlying
+  // deposit amounts × current price — fees не учитывает, поэтому
+  // сравнение должно быть с liquidity-only currentLpUsd.
+  const v3PendingFeesUsd = lp.rewards.reduce(
+    (s, r) => s + (Number.isFinite(r.usd) ? r.usd : 0),
+    0,
+  );
+  const currentLpUsd = Math.max(0, lp.assetUsd - v3PendingFeesUsd);
   const impermanentLossUsd = hodlUsd - currentLpUsd;
   const pnlUsd = currentLpUsd - depositUsd;
   const pnlPct = depositUsd > 0 ? (pnlUsd / depositUsd) * 100 : 0;

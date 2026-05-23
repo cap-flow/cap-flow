@@ -1,9 +1,34 @@
 ---
-updated: 2026-05-18 (UCB C5 token→token swap cost basis inheritance)
+updated: 2026-05-21 (Design System v1 brief — переход на брендбук Capflow v1.0)
 ---
 
 
 # ROADMAP
+
+## 🎨 Design System v1 — переход на брендбук Capflow (2026-05-21)
+
+**Контекст**: брендбук Capflow v1.0 готов как редакторский документ. Текущее
+UI расходится с ним по шрифтам (Inter vs Geist, нет mono), brand-цветам
+(mint `#34E0B6` не из брендбука), радиусам (на 4px меньше), light theme
+(брендбук dark-only).
+
+**Решение**: ТЗ дизайнеру оформлено в `notes/design-brief-v1.md`. Marketing
+vs Product split зафиксирован: Instrument Serif italic, hero-display 96px+,
+radial-glow фоны — только на `/`, `/login`, `/pricing`, `/changelog`. Light
+theme в v1 замораживаем. Логотип отложен отдельно.
+
+**6 deliverables дизайнера**: tokens (Figma Variables + JSON) → core components
+→ data components (table/KPI/position row) → charts spec → page templates
+→ documentation (numeric formatting, voice copy, a11y pairs).
+
+**Что меняется в коде после сдачи дизайна** (7 фаз):
+0. Tokens + шрифты (1д) → 1. Numeric formatting helpers (1д) →
+2. Table primitive + миграция 3 страниц (3–5д) → 3. Core UI rewrite (1–2н) →
+4. Layout + ⌘K palette (3д) → 5. Charts (1н) → 6. Empty/Loading/Error (3д).
+
+Подробности: `notes/decisions/design-system-v1-from-brandbook.md`.
+
+---
 
 ## 🔧 UCB C5 — token→token swap cost basis inheritance (2026-05-18)
 

@@ -1050,7 +1050,7 @@ function PositionRow({
   const renderers: Record<string, () => JSX.Element> = {
     id: () => (
       <td key="id" className={cn(cellPad, "font-mono text-center")}>
-        <div className="flex items-center justify-center gap-1">
+        <div className="flex items-center justify-center gap-1.5">
           <Link
             to={`/positions/${p.id}`}
             className="text-brand-cyan hover:underline"
@@ -1058,30 +1058,37 @@ function PositionRow({
           >
             {p.id}
           </Link>
-          {p.coverageIncomplete && (
-            <span
-              className="inline-flex h-4 w-4 cursor-help items-center justify-center text-amber-500"
-              title={
-                "⚠ Cost basis incomplete\n\n" +
-                "Mint этой Uniswap V3 NFT не нашёлся в загруженной chain-ops истории. " +
-                "Возможные причины:\n" +
-                "  • Mint произошёл до начала sync (2-5 лет назад)\n" +
-                "  • NFT перенесли transfer'ом из другого адреса\n" +
-                "  • Этот NFT в другом fee-tier'е, чем sibling — наш матчер пока не различает\n\n" +
-                "Стартовая $ = текущая стоимость (fallback). Срок и Fee APR " +
-                "не считаются — нужна реальная дата открытия. Можно задать " +
-                "вручную через детальную страницу позиции."
-              }
-              aria-label="Cost basis incomplete"
-            >
-              <AlertTriangle className="h-3 w-3" />
-            </span>
-          )}
+          {/* Warning-slot: фиксированная ширина для всех строк, чтобы eye-button
+              не «прыгал» при появлении ⚠ badge на orphan-позициях. */}
+          <span
+            className="inline-flex h-4 w-4 shrink-0 items-center justify-center"
+            aria-hidden={!p.coverageIncomplete}
+          >
+            {p.coverageIncomplete && (
+              <span
+                className="inline-flex h-4 w-4 cursor-help items-center justify-center text-amber-500"
+                title={
+                  "⚠ Cost basis incomplete\n\n" +
+                  "Mint этой Uniswap V3 NFT не нашёлся в загруженной chain-ops истории. " +
+                  "Возможные причины:\n" +
+                  "  • Mint произошёл до начала sync (2-5 лет назад)\n" +
+                  "  • NFT перенесли transfer'ом из другого адреса\n" +
+                  "  • Этот NFT в другом fee-tier'е, чем sibling — наш матчер пока не различает\n\n" +
+                  "Стартовая $ = текущая стоимость (fallback). Срок и Fee APR " +
+                  "не считаются — нужна реальная дата открытия. Можно задать " +
+                  "вручную через детальную страницу позиции."
+                }
+                aria-label="Cost basis incomplete"
+              >
+                <AlertTriangle className="h-3 w-3" />
+              </span>
+            )}
+          </span>
           <button
             type="button"
             onClick={onToggleHidden}
             className={cn(
-              "inline-flex h-4 w-4 items-center justify-center rounded text-muted-foreground/50 transition-colors hover:text-foreground",
+              "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/50 transition-colors hover:text-foreground",
               hidden && "text-warning",
             )}
             title={
