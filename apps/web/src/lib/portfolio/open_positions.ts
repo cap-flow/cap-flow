@@ -1064,8 +1064,19 @@ function computePositionConsumedCostFromLots(
    * O(target_supplies × all_ops) — perf win, plus полная консистентность
    * с lot-by-lot popup display (тот тоже читает из shared tracker).
    *
-   * Fallback на inline rebuild сохранён для backward-compat (тесты, ad-hoc
-   * вызовы без `lotsByWallet`).
+   * **UCB C5 Phase D (2026-05-23, Task #18)**: Все production callers
+   * `buildOpenPositions` обязаны передавать `lotsByWallet` (через
+   * `useLoadedWallets().newTrackers.lotsByWallet`):
+   *   - `use_computed_positions.ts:227` ✓
+   *   - `HomePage.tsx:314` ✓
+   *   - `WalletDetailPage.tsx:254` ✓ (исправлено в Phase 1)
+   *   - `PortfolioPage.tsx:186` ✓ (исправлено в Phase 1)
+   *
+   * Fallback на inline rebuild `buildLotTrackerFromOps` сохранён ТОЛЬКО для
+   * test-fixtures (`open_positions.swap-overpay.test.ts`), где production
+   * pipeline ucb_pipeline.ts слишком тяжёл для setup'а. В production коде
+   * этот код dead. Phase 2 (Task #18 cont.) — миграция тестов на
+   * `buildLotsAndPositions` и удаление build.ts полностью.
    */
   sharedLotTracker?: LotTracker,
 ): { amount: number; usd: number } {
@@ -1124,6 +1135,22 @@ function computePositionConsumedCostFromLots(
       if (sharedLotTracker) {
         wac = sharedLotTracker.wacAt(walletId, symbol, op.time);
       } else {
+        // UCB C5 Phase D (Task #18): Production callers всегда передают
+        // sharedLotTracker. Если мы здесь — это test-fixture без
+        // ucb_pipeline. В dev режиме warning'аем, чтобы детектить
+        // production регрессию (новый caller забыл передать lotsByWallet).
+        if (
+          typeof process !== "undefined" &&
+          process.env?.NODE_ENV !== "production" &&
+          process.env?.NODE_ENV !== "test"
+        ) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[open_positions] sharedLotTracker undefined — fell back to inline buildLotTrackerFromOps. ` +
+              `Production callers must pass lotsByWallet (UCB C5 Phase D). ` +
+              `Pos: wallet=${walletId} protocol=${protocolId} chain=${chain} symbol=${symbol}.`,
+          );
+        }
         const trackerNow = buildLotTrackerFromOps(incrementalOps, {
           walletId,
           histPrices,
