@@ -2843,6 +2843,20 @@ function buildOne(
     consumedMintHashes.size > 0;
   if (coverageIncomplete) {
     startUsd = lp.assetUsd;
+    // UCB C5 Phase G (Task #37): orphan v3 case ставит startUsd = lp.assetUsd
+    // (fallback). Это происходит ПОСЛЕ rescale supplyTokens выше → они
+    // снова desynced. Rescale ещё раз чтобы Σ supplyTokens === startUsd.
+    if (supplyTokens.length > 0 && startUsd > 0) {
+      const sum = supplyTokens.reduce((s, t) => s + (t.startUsd ?? 0), 0);
+      if (Math.abs(sum - startUsd) / Math.max(startUsd, 1) > 0.005) {
+        if (sum > 0) {
+          const scale = startUsd / sum;
+          for (const t of supplyTokens) t.startUsd = (t.startUsd ?? 0) * scale;
+        } else {
+          for (const t of supplyTokens) t.startUsd = startUsd / supplyTokens.length;
+        }
+      }
+    }
   }
 
   // instanceId — стабильный per-position discriminator. Для V3 NFT и других
