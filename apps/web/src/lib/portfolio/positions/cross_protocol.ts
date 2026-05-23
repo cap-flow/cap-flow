@@ -477,10 +477,17 @@ function inferMarketKey(op: ClassifiedOp, walletId: string): string | null {
     // movement — для них marketKey тоже инферится по IN-asset. Без этого
     // inferMarketKey возвращал null → emitPositionEvent skip → my C10
     // self-loop inheritance не работала для Morpho borrow.
+    //
+    // UCB C5 Phase E2 (Task #18, dual_pipeline_equivalence regression):
+    // Раньше `isStableSymbol` пропускался в IN loop, что ломало
+    // cross-asset stable borrow (USDC against WBTC collateral): marketKey=null
+    // → emitPositionEvent skip → borrowed USDC НЕ создавал lot → walker позже
+    // на consume этого USDC падал в silent `m.usd` fallback. legacy build.ts
+    // создавал lot всегда (cost=0 strict UCB). Теперь cross_protocol тоже
+    // не skip'ает stable в IN-loop.
     for (const m of op.movement) {
       if (m.direction !== "in" || m.amount <= 0) continue;
       if (isGas(m)) continue;
-      if (isStableSymbol(m.symbol)) continue;
       return `synthetic:${protoId}:${op.chain}:${m.symbol.toUpperCase()}:${walletId}`;
     }
   }
