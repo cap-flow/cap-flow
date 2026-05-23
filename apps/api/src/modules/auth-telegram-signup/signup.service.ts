@@ -20,6 +20,7 @@ import type { FastifyBaseLogger } from "fastify";
 
 import type { AuditService } from "../audit/audit.service.js";
 import type { UserRow } from "../auth/auth.repository.js";
+import { hashPassword } from "../auth/password.js";
 
 import type { ITelegramSignupRepository } from "./signup.repository.js";
 
@@ -51,6 +52,16 @@ export interface BotStartHandleResult {
   readonly finishUrl: string;
   /** Создан ли новый user (для дружелюбного сообщения). */
   readonly createdNewUser: boolean;
+  /**
+   * Task #43: для новых пользователей бот провижнит начальные login + password
+   * и отправит их в welcome-DM. Сохраняем plaintext только в этом transient
+   * объекте — в БД лежит только argon2 hash.
+   * `null` для returning users или если provisioning не удался (collision, etc.).
+   */
+  readonly initialCredentials: {
+    readonly username: string;
+    readonly password: string;
+  } | null;
 }
 
 export type FinishLoginOutcome =
@@ -126,6 +137,7 @@ export class TelegramSignupService {
       return {
         finishUrl: this.buildFinishUrl(payload.rawNonce),
         createdNewUser: false,
+        initialCredentials: null,
       };
     }
 
@@ -174,10 +186,86 @@ export class TelegramSignupService {
       telegramUsername: payload.telegramUsername,
     });
 
+    // Task #43: для новых пользователей провижним username + password
+    // автоматически, чтобы welcome-DM содержал готовые login-данные.
+    // Returning users (createdNewUser=false) уже имеют свои creds —
+    // не трогаем.
+    let initialCredentials: { username: string; password: string } | null = null;
+    if (createdNewUser && !user.passwordHash) {
+      try {
+        initialCredentials = await this.provisionInitialCredentials({
+          userId: user.id,
+          telegramUsername: payload.telegramUsername,
+          telegramUserId: payload.telegramUserId,
+        });
+      } catch (err) {
+        // Provisioning fail (UNIQUE conflict на username, etc.) — не блокируем
+        // login flow. Пользователь сможет вручную задать creds через
+        // /auth/set-password на следующем шаге.
+        this.log.warn(
+          { err, userId: user.id },
+          "[telegram-signup] auto-provision creds failed — fallback to manual set-password",
+        );
+      }
+    }
+
     return {
       finishUrl: this.buildFinishUrl(payload.rawNonce),
       createdNewUser,
+      initialCredentials,
     };
+  }
+
+  /**
+   * Task #43: генерирует initial username + password для нового
+   * Telegram-signup пользователя. Сохраняет hash в БД, возвращает
+   * plaintext password (для отправки в welcome-DM).
+   *
+   * Username derivation:
+   *   1. telegramUsername (если есть и не занят)
+   *   2. `tg_<telegramUserId>` (если телеграм-username нет или занят)
+   *   3. + `_<random>` если оба заняты (UNIQUE conflict fallback)
+   *
+   * Password: 16 cryptographically-random chars (base64url, ~96 bit entropy).
+   */
+  private async provisionInitialCredentials(args: {
+    userId: string;
+    telegramUsername: string | null;
+    telegramUserId: number;
+  }): Promise<{ username: string; password: string }> {
+    const password = randomBytes(12).toString("base64url"); // ~16 chars
+    const passwordHash = await hashPassword(password);
+    const candidates: string[] = [];
+    if (args.telegramUsername) candidates.push(args.telegramUsername);
+    candidates.push(`tg_${args.telegramUserId}`);
+    // Final fallback с rand-suffix (если оба заняты)
+    candidates.push(
+      `tg_${args.telegramUserId}_${randomBytes(2).toString("hex")}`,
+    );
+
+    let lastErr: unknown = null;
+    for (const username of candidates) {
+      try {
+        await this.repo.setInitialPasswordAndUsername(
+          args.userId,
+          passwordHash,
+          username,
+        );
+        await this.audit.log({
+          actorUserId: args.userId,
+          action: "auth.telegram_signup_auto_provisioned",
+          payload: { username },
+        });
+        return { username, password };
+      } catch (e) {
+        lastErr = e;
+        // UNIQUE conflict на username → пробуем следующего кандидата
+        continue;
+      }
+    }
+    throw new Error(
+      `provisionInitialCredentials: all candidates conflicted: ${String(lastErr)}`,
+    );
   }
 
   /**
@@ -281,16 +369,42 @@ function sha256Hex(s: string): string {
 
 export interface SignupBotMessages {
   /** Сообщение бота когда signup ok (включает finish-ссылку). */
-  ok(finishUrl: string, createdNewUser: boolean): string;
+  ok(
+    finishUrl: string,
+    createdNewUser: boolean,
+    initialCredentials?: { username: string; password: string } | null,
+  ): string;
   /** Сообщение когда nonce expired / not found / уже consumed. */
   error(reason: SignupNonceError["reason"]): string;
 }
 
 export const defaultSignupBotMessages: SignupBotMessages = {
-  ok(finishUrl, createdNewUser) {
+  ok(finishUrl, createdNewUser, initialCredentials) {
     const greeting = createdNewUser
       ? "🎉 Добро пожаловать в *Capflow*!"
       : "👋 С возвращением!";
+    // Task #43: для нового пользователя бот шлёт ГОТОВЫЕ login + password +
+    // ссылку + инструкцию. Returning users получают только finish-link.
+    if (createdNewUser && initialCredentials) {
+      const siteOrigin =
+        finishUrl.match(/^(https?:\/\/[^/]+)/)?.[1] ?? "https://cap-flow.ru";
+      return (
+        `${greeting}\n\n` +
+        `Ваш Capflow-аккаунт создан. Сохраните данные входа:\n\n` +
+        `🔑 *Логин:* \`${initialCredentials.username}\`\n` +
+        `🔒 *Пароль:* \`${initialCredentials.password}\`\n\n` +
+        `🌐 *Сайт:* ${siteOrigin}\n\n` +
+        `*Как войти:*\n` +
+        `1. Откройте ${siteOrigin}\n` +
+        `2. Нажмите «Войти» и введите логин/пароль выше\n` +
+        `3. Или используйте одноразовую ссылку ниже (действует 10 минут):\n${finishUrl}\n\n` +
+        `📚 *Что дальше:* добавьте свои кошельки в /wallets, ` +
+        `и Capflow начнёт трекать ваши DeFi-позиции, PnL, fees и доходность ` +
+        `автоматически.\n\n` +
+        `⚠️ Пароль показывается ТОЛЬКО один раз — сохраните его в менеджере паролей. ` +
+        `Сменить пароль можно в /preferences после входа.`
+      );
+    }
     return (
       `${greeting}\n\n` +
       `Чтобы войти на сайт, перейдите по ссылке:\n${finishUrl}\n\n` +

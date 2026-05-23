@@ -132,7 +132,11 @@ export async function processTelegramUpdate(
       });
       await telegram.sendToChat(
         chatId,
-        defaultSignupBotMessages.ok(r.finishUrl, r.createdNewUser),
+        defaultSignupBotMessages.ok(
+          r.finishUrl,
+          r.createdNewUser,
+          r.initialCredentials,
+        ),
       );
     } catch (e) {
       if (e instanceof SignupNonceError) {
