@@ -55,12 +55,28 @@ function backfillOrphanMeta(
   if (!base.coverageIncomplete) return base;
   if (cb.mintBlockTime === undefined) return base;
   const now = Math.floor(Date.now() / 1000);
+  const ageDays = Math.max(0, Math.floor((now - cb.mintBlockTime) / 86_400));
+  // UCB Phase H (Task #41, 2026-05-23): после backfill orphan'а ageDays стал
+  // известен → recompute fee APR (раньше buildOne ставил feeApr=null для
+  // coverageIncomplete=true → даже после backfill UI показывал «—»).
+  // Формула совпадает с buildOne: (feesUsd / startUsd) × (365 / ageDays) × 100.
+  // feesLifetimeUsd аналогично для feeAprLifetime.
+  const feeApr =
+    ageDays > 0 && base.startUsd > 0 && base.feesUsd != null
+      ? (base.feesUsd / base.startUsd) * (365 / ageDays) * 100
+      : null;
+  const feeAprLifetime =
+    ageDays > 0 && base.startUsd > 0 && base.feesLifetimeUsd > 0
+      ? (base.feesLifetimeUsd / base.startUsd) * (365 / ageDays) * 100
+      : null;
   return {
     ...base,
     coverageIncomplete: false,
     openedAt: cb.mintBlockTime,
     ...(cb.mintTxHash ? { openHash: cb.mintTxHash } : {}),
-    ageDays: Math.max(0, Math.floor((now - cb.mintBlockTime) / 86_400)),
+    ageDays,
+    feeApr,
+    feeAprLifetime,
     openedInTokens: [
       { symbol: nft.token0.symbol, amount: cb.totalDeposited0 },
       { symbol: nft.token1.symbol, amount: cb.totalDeposited1 },

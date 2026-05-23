@@ -2547,6 +2547,28 @@ function buildOne(
     );
     currentUsd = Math.max(0, lp.assetUsd - v3PendingFeesUsd);
   }
+  // UCB Phase H (Task #42, 2026-05-23): defensive clamp от негативного
+  // assetUsd. lex@mail.ru POS-001 showed Текущая $ = -\$13,861.78 (-88.34%).
+  // assetUsd идёт из DeBank и может быть негативным для перпов / leverage
+  // позиций где `notional - debt - margin` уходит ниже нуля (margin call'у
+  // близко). Для display'а это бессмысленно — показывать «минус» в Текущая $
+  // путает. Clamp на 0 + дебагeer'им через сonsole.warn (anti-recurrence #1).
+  if (currentUsd < 0) {
+    if (
+      typeof process !== "undefined" &&
+      process.env?.NODE_ENV !== "production" &&
+      process.env?.NODE_ENV !== "test"
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[open_positions] negative currentUsd clamped to 0: ` +
+          `protocol=${lp.protocolId} chain=${lp.chain} itemName=${lp.itemName} ` +
+          `assetUsd=${lp.assetUsd} (DeBank value). Likely margin/leverage edge case ` +
+          `(notional - debt < 0). Real PnL needs separate debt-aware compute.`,
+      );
+    }
+    currentUsd = 0;
+  }
   const currentDebtUsd = lp.borrow.reduce((acc, t) => acc + t.usd, 0);
   const ageDays = opened
     ? Math.max(0, Math.floor((Date.now() / 1000 - opened.time) / 86_400))
