@@ -256,4 +256,192 @@ describe("dual-pipeline equivalence: lots.build.ts ≡ positions/cross_protocol.
   it("empty ops: wacAt returns null in both pipelines", () => {
     assertWacEquivalent([], "WBTC", 1000, "empty");
   });
+
+  // ─── Сценарий 9: token-to-token swap chain (USDC → WBTC → ETH) ─────
+  it("token→token swap inherits cost basis chain (build.token_swap)", () => {
+    const ops = [
+      op({
+        hash: "0xb1", type: "swap", time: 1000,
+        movements: [
+          { direction: "out", symbol: "USDC", amount: 20000, usd: 20000, isStable: true },
+          { direction: "in", symbol: "WBTC", amount: 0.5, usd: 20000 },
+        ],
+      }),
+      op({
+        hash: "0xb2", type: "swap", time: 2000,
+        movements: [
+          { direction: "out", symbol: "WBTC", amount: 0.5, usd: 25000 }, // price appreciated
+          { direction: "in", symbol: "ETH", amount: 10, usd: 25000 },
+        ],
+      }),
+    ];
+    // ETH WAC = consumed BTC cost ($20k) / received ETH (10) = $2000
+    assertWacEquivalent(ops, "ETH", 3000, "ETH inherited from BTC chain");
+  });
+
+  // ─── Сценарий 10: partial swap → fractional inheritance ────────────
+  it("partial swap: 0.5/1 BTC → ETH inherits half of source WAC", () => {
+    const ops = [
+      op({
+        hash: "0xbuy", type: "swap", time: 1000,
+        movements: [
+          { direction: "out", symbol: "USDC", amount: 20000, usd: 20000, isStable: true },
+          { direction: "in", symbol: "WBTC", amount: 1, usd: 20000 },
+        ],
+      }),
+      op({
+        hash: "0xswap", type: "swap", time: 2000,
+        movements: [
+          { direction: "out", symbol: "WBTC", amount: 0.5, usd: 12500 },
+          { direction: "in", symbol: "ETH", amount: 5, usd: 12500 },
+        ],
+      }),
+    ];
+    assertWacEquivalent(ops, "ETH", 3000, "ETH after partial swap");
+    assertWacEquivalent(ops, "WBTC", 3000, "WBTC remaining 0.5 (WAC unchanged)");
+  });
+
+  // ─── Сценарий 11: claim_rewards + buy → blended WAC ────────────────
+  it("buy + reward: WAC = blended (1 ETH @ $2000 + 1 ETH @ $0) / 2 = $1000", () => {
+    const ops = [
+      op({
+        hash: "0xbuy", type: "swap", time: 1000, chain: "eth",
+        movements: [
+          { direction: "out", symbol: "USDT", amount: 2000, usd: 2000, isStable: true },
+          { direction: "in", symbol: "ETH", amount: 1, usd: 2000 },
+        ],
+      }),
+      op({
+        hash: "0xclaim", type: "claim_rewards", time: 1500, chain: "eth",
+        movements: [{ direction: "in", symbol: "ETH", amount: 1, usd: 3000 }],
+      }),
+    ];
+    assertWacEquivalent(ops, "ETH", 2000, "ETH blended (buy + reward)");
+  });
+
+  // ─── Сценарий 12: stable airdrop (cost=0) ──────────────────────────
+  it("stable claim_rewards (USDC airdrop) → cost=0, wac=0", () => {
+    const ops = [
+      op({
+        hash: "0xclaim", type: "claim_rewards", time: 1000,
+        movements: [
+          { direction: "in", symbol: "USDC", amount: 50, usd: 0, isStable: true },
+        ],
+      }),
+    ];
+    assertWacEquivalent(ops, "USDC", 2000, "stable airdrop");
+  });
+
+  // ─── Сценарий 13: bridge_in without prior lots → market fallback ───
+  it("bridge_in без prior lots → fallback на market (D5)", () => {
+    const ops = [
+      // No prior buy — bridge_in standalone
+      op({
+        hash: "0xbridge_in_only", type: "bridge_in", time: 1000, chain: "eth",
+        movements: [{ direction: "in", symbol: "WETH", amount: 0.5, usd: 1500 }],
+      }),
+    ];
+    assertWacEquivalent(ops, "WETH", 2000, "bridge_in without prior");
+  });
+
+  // ─── Сценарий 14a: UCB C8 — async-deposit linkedCostBasisUsd ──────
+  it("UCB C8: async deposit inherits real paid USDC via linkedCostBasisUsd", () => {
+    const GMX = { id: "arb_gmx2", name: "GMX V2", category: "yield" as const };
+    const ops: ClassifiedOp[] = [
+      // Step 1: buy 4700 USDC
+      op({
+        hash: "0xbuy_usdc", type: "swap", time: 1000,
+        movements: [
+          { direction: "out", symbol: "ETH", amount: 1.0, usd: 4700, tokenId: "eth" },
+          { direction: "in", symbol: "USDC", amount: 4700, usd: 4700, isStable: true },
+        ],
+      }),
+      // Step 2: Tx A — send USDC to GMX handler
+      op({
+        hash: "0xdeposit", type: "lp_add", time: 2000,
+        protocol: GMX,
+        movements: [
+          { direction: "out", symbol: "USDC", amount: 4700, usd: 4700, isStable: true },
+        ],
+      }),
+      // Step 3: Tx B — receive GLV (linked to Tx A's outflow)
+      {
+        ...op({
+          hash: "0xmint", type: "lp_add", time: 2005,
+          protocol: GMX,
+          movements: [
+            {
+              direction: "in", symbol: "GLV [WETH-USDC]",
+              amount: 2740.97, usd: 3328, // market underestimate
+              tokenId: "0xglv", isProtocolToken: true,
+            },
+          ],
+        }),
+        // synthetic prop: linkedCostBasisUsd patched by async_deposit_linker.ts
+        linkedCostBasisUsd: 4700,
+        linkedLpTokenId: "0xglv",
+      } as ClassifiedOp,
+    ];
+    // Expected: GLV WAC = real $4700 / 2740.97 ≈ $1.715/GLV (NOT market $1.214)
+    assertWacEquivalent(ops, "GLV [WETH-USDC]", 3000, "GLV after async deposit");
+  });
+
+  // ─── Сценарий 14b: UCB C10 partial self-loop inheritance ───────────
+  it("UCB C10: partial self-loop borrow inherits pro-rata cost", () => {
+    const MORPHO = { id: "arb_morphoblue", name: "Morpho", category: "lending" as const };
+    const ops: ClassifiedOp[] = [
+      // Buy 0.5 WBTC for $50,000
+      op({
+        hash: "0xbuy", type: "swap", time: 1000,
+        movements: [
+          { direction: "out", symbol: "USDC", amount: 50000, usd: 50000, isStable: true },
+          { direction: "in", symbol: "WBTC", amount: 0.5, usd: 50000 },
+        ],
+      }),
+      // Supply 0.5 WBTC to Morpho
+      op({
+        hash: "0xsupply", type: "lend_supply", time: 2000,
+        protocol: MORPHO,
+        movements: [{ direction: "out", symbol: "WBTC", amount: 0.5, usd: 50000 }],
+      }),
+      // Borrow 0.2 WBTC self-loop (should inherit 0.2 × $100k/BTC = $20k)
+      op({
+        hash: "0xborrow", type: "borrow", time: 3000,
+        protocol: MORPHO,
+        movements: [{ direction: "in", symbol: "WBTC", amount: 0.2, usd: 20000 }],
+      }),
+    ];
+    // Expected: WBTC WAC = $20k inherited / 0.2 BTC = $100k/BTC
+    assertWacEquivalent(ops, "WBTC", 4000, "WBTC partial self-loop");
+  });
+
+  // ─── Сценарий 14: multi-source consume (BTC + ETH → SOL) ───────────
+  it("multi-source swap: pays consumed cost across 2 input lots", () => {
+    const ops = [
+      op({
+        hash: "0xb_btc", type: "swap", time: 1000,
+        movements: [
+          { direction: "out", symbol: "USDC", amount: 10000, usd: 10000, isStable: true },
+          { direction: "in", symbol: "WBTC", amount: 0.1, usd: 10000 },
+        ],
+      }),
+      op({
+        hash: "0xb_eth", type: "swap", time: 1500,
+        movements: [
+          { direction: "out", symbol: "USDC", amount: 5000, usd: 5000, isStable: true },
+          { direction: "in", symbol: "ETH", amount: 2, usd: 5000 },
+        ],
+      }),
+      op({
+        hash: "0xmulti", type: "swap", time: 2000,
+        movements: [
+          { direction: "out", symbol: "WBTC", amount: 0.1, usd: 11000 },
+          { direction: "out", symbol: "ETH", amount: 2, usd: 5500 },
+          { direction: "in", symbol: "SOL", amount: 100, usd: 16500 },
+        ],
+      }),
+    ];
+    // SOL WAC = (10000 consumed BTC cost + 5000 consumed ETH cost) / 100 = $150
+    assertWacEquivalent(ops, "SOL", 3000, "SOL from multi-source");
+  });
 });
