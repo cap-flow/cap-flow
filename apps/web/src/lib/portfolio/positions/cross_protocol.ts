@@ -464,7 +464,27 @@ function inferMarketKey(op: ClassifiedOp, walletId: string): string | null {
       return stripChainPrefix(m.tokenId);
     }
   }
-  if (isReceiptLessProtocol(protoId)) {
+  // UCB C5 Phase 3 v2 (Task #18, 2026-05-23): для supply-style ops
+  // (lp_add/lend_supply/stake/repay/borrow/withdraw/claim_rewards) — если
+  // НЕ нашли receipt token в movement, fallback на synthetic key из
+  // underlying asset. Раньше это применялось только к receipt-less
+  // protocols (Morpho Blue), но legacy `build.ts:handleSupply` всегда
+  // consume'ил лоты при lp_add/lend_supply, независимо от receipt-presence.
+  // Без расширения cross_protocol skip'ал такие ops → no consume → Σ
+  // supplyTokens != actual cost basis в позициях с incomplete chain-ops
+  // history (e.g. Aave supply без обнаруженного aETH mint в movement из-за
+  // classifier bug). Расширяем для всех position-style ops.
+  const isPositionStyleOp =
+    op.type === "lp_add" ||
+    op.type === "lend_supply" ||
+    op.type === "stake" ||
+    op.type === "repay" ||
+    op.type === "borrow" ||
+    op.type === "lp_remove" ||
+    op.type === "lend_withdraw" ||
+    op.type === "unstake" ||
+    op.type === "claim_rewards";
+  if (isReceiptLessProtocol(protoId) || isPositionStyleOp) {
     // OUT-side underlying — для supply/repay/lp_add типов где user отдаёт
     // коллатераль/токены протоколу.
     for (const m of op.movement) {
@@ -574,8 +594,21 @@ function emitPositionEvent(
 
   // Withdraw_collateral: возвращаем cost basis в lots (in-side underlying
   // получает recovered cost пропорционально amount).
-  if (eventType === "withdraw_collateral" && attributedCost > 0) {
+  //
+  // UCB C5 Phase 3 v2 (Task #18): legacy `build.ts:handleWithdraw` создаёт
+  // lot для in-side underlying даже когда attributedCost = 0 (receipt-token
+  // не было tracked'а до withdraw). Используем market m.usd как fallback
+  // cost для underlying lot. Это match'ит legacy semantics для C12 tests
+  // (lend_withdraw с пустым tokenId receipt'а — fUSDC → WBTC lot создаётся).
+  if (
+    eventType === "withdraw_collateral" &&
+    (attributedCost > 0 || inTokens.length > 0)
+  ) {
     const totalInUsd = inTokens.reduce((s, t) => s + t.usd, 0);
+    // Если attributedCost = 0 → используем market value in-side как cost
+    // (fallback для receipt-less или receipt не tracked).
+    const effectiveAttributedCost =
+      attributedCost > 0 ? attributedCost : totalInUsd;
     // UCB anti-recurrence #1: position delta для withdraw_collateral
     // должен снимать ИМЕННО attributedCost (фактический cost basis,
     // возвращённый из receipt lots), а не market spot. Иначе positions
@@ -585,13 +618,13 @@ function emitPositionEvent(
     // (= -attributedCost суммарно).
     for (const t of inTokens) {
       const share = totalInUsd > 0 ? t.usd / totalInUsd : 1 / inTokens.length;
-      const costForLot = attributedCost * share;
+      const costForLot = effectiveAttributedCost * share;
       lots.acquire({
         symbol: t.symbol,
         tokenId: "",
         chain: op.chain,
         amount: t.amount,
-        costPerUnitUsd: costForLot / t.amount,
+        costPerUnitUsd: t.amount > 0 ? costForLot / t.amount : 0,
         acquiredAt: op.time,
         acquiredVia:
           op.type === "lp_remove"
@@ -626,7 +659,19 @@ function emitPositionEvent(
       Number.isFinite(linkedCost) &&
       linkedCost > 0 &&
       attributedCost <= 0;
-    const totalCostForReceipts = useLinkedCost ? linkedCost! : attributedCost;
+    let totalCostForReceipts = useLinkedCost ? linkedCost! : attributedCost;
+    // UCB C5 Phase 3 v2 (Task #18): legacy `build.ts:handleSupply` создавал
+    // receipt lot с cost = m.usd когда не было ни attributedCost (нет
+    // out-side underlying) ни linkedCostBasisUsd (standalone mint без
+    // async-deposit linker). Это покрывает случай "standalone fallback to
+    // market" (build.async_deposit.test.ts). Берём market value receipt-in'ов.
+    if (totalCostForReceipts <= 0 && receiptIns.length > 0) {
+      const receiptMarketSum = receiptIns.reduce(
+        (s, m) => s + tokenUsdHist(m, op.chain, op.time, histPrices),
+        0,
+      );
+      if (receiptMarketSum > 0) totalCostForReceipts = receiptMarketSum;
+    }
     if (receiptIns.length > 0 && totalCostForReceipts > 0) {
       const totalRecv = receiptIns.reduce((s, m) => s + m.amount, 0);
       for (const m of receiptIns) {
@@ -638,7 +683,11 @@ function emitPositionEvent(
           amount: m.amount,
           costPerUnitUsd: share / m.amount,
           acquiredAt: op.time,
-          acquiredVia: "linked_async_fill" as AcquiredVia,
+          acquiredVia: useLinkedCost
+            ? ("linked_async_fill" as AcquiredVia)
+            : attributedCost > 0
+              ? ("linked_async_fill" as AcquiredVia)
+              : ("buy_with_stable" as AcquiredVia),
           sourceHash: op.hash,
           walletId,
         });
