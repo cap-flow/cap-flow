@@ -2045,6 +2045,38 @@ function buildOne(
     }
   }
 
+  // Avantis-fix backfill: если до сих пор opened=null, но в protocol+chain
+  // есть `swap` ops с OUT-side underlying матчащим live LP supply tokens —
+  // вероятно это yield-vault deposit классифицированный как swap (Avantis
+  // USDC OUT → USDC.f IN; classifier не различил без `isProtocolToken`
+  // флага на receipt-токене). Берём earliest такой swap как opened-event.
+  if (!opened) {
+    const liveUnderlying = new Set(
+      lp.supply.map((s) => normalizeSymbol(s.symbol)),
+    );
+    const earliestSwap = ops
+      .filter(
+        (o) =>
+          !!o.protocol &&
+          o.protocol.id === lp.protocolId &&
+          o.chain === lp.chain &&
+          o.type === "swap" &&
+          o.status !== "failed",
+      )
+      .filter((o) => {
+        // OUT-side содержит хотя бы один underlying токен live LP.
+        const outs = o.movement.filter(
+          (m) =>
+            m.direction === "out" && m.amount > 0 && !m.isProtocolToken,
+        );
+        return outs.some((m) => liveUnderlying.has(normalizeSymbol(m.symbol)));
+      })
+      .sort((a, b) => a.time - b.time)[0];
+    if (earliestSwap) {
+      opened = { time: earliestSwap.time, hash: earliestSwap.hash };
+    }
+  }
+
   // Диагностика: live позиция есть, но `opened` остался null после всех
   // попыток. Это означает что в `ops` нет ни одного matching lp_add /
   // lend_supply / stake / perp_open. Самые частые причины:

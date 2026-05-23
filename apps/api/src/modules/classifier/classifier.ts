@@ -211,6 +211,13 @@ function doClassify(
       return base(it, seq, "lp_remove", protocol, movement, status);
     }
     if (sends.length && receives.length) {
+      // Send + receive в yield/perp могут быть И swap'ом (Pendle PT/SY
+      // exchange), И deposit'ом с vault-receipt'ом (Avantis USDC →
+      // USDC.f). Heuristic-различить трудно без protocol-specific
+      // знания. Оставляем `swap` как default → downstream `buildOpenPositions`
+      // делает live-state-aware backfill: если для protocol есть live
+      // LP но нет `lp_add` ops, рассматривает swap ops в этом protocol
+      // как кандидатов на открывающий event.
       return base(it, seq, "swap", protocol, movement, status);
     }
   }
