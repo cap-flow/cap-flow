@@ -156,7 +156,16 @@ export class TelegramService {
    * any user-link record. Throws on HTTP failure. Returns `false` only
    * when the bot API token isn't configured (graceful no-op).
    */
-  async sendToChat(chatId: number, text: string): Promise<boolean> {
+  async sendToChat(
+    chatId: number,
+    text: string,
+    /**
+     * Task #46: optional inline keyboard. Telegram's `reply_markup`
+     * structure — мы поддерживаем только `inline_keyboard` (URL/callback
+     * buttons под сообщением).
+     */
+    replyMarkup?: { inline_keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>> },
+  ): Promise<boolean> {
     const botApiToken = this.cfg.getBotApiToken()?.trim();
     if (!botApiToken) return false;
 
@@ -174,6 +183,7 @@ export class TelegramService {
         chat_id: chatId,
         text,
         parse_mode: "Markdown",
+        ...(replyMarkup && { reply_markup: replyMarkup }),
       }),
       ...(proxy?.dispatcher ? { dispatcher: proxy.dispatcher } : {}),
     };

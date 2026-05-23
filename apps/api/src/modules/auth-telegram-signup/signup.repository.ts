@@ -97,6 +97,11 @@ export interface ITelegramSignupRepository {
     passwordHash: string,
     username: string | null,
   ): Promise<void>;
+  /**
+   * Task #47: перезаписывает password_hash для existing user без
+   * изменения username / status. Используется в reset-flow.
+   */
+  updatePasswordHash(userId: string, passwordHash: string): Promise<void>;
 }
 
 export class TelegramSignupRepository implements ITelegramSignupRepository {
@@ -306,6 +311,16 @@ export class TelegramSignupRepository implements ITelegramSignupRepository {
         status: "active",
         updatedAt: new Date(),
       })
+      .where(eq(schema.users.id, userId));
+  }
+
+  async updatePasswordHash(
+    userId: string,
+    passwordHash: string,
+  ): Promise<void> {
+    await this.db
+      .update(schema.users)
+      .set({ passwordHash, updatedAt: new Date() })
       .where(eq(schema.users.id, userId));
   }
 }

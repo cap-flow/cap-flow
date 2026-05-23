@@ -43,6 +43,9 @@ export function LoginPage(): JSX.Element {
   // popup) и показываем waiting-UI с инструкцией.
   const [tgPending, setTgPending] = useState(false);
   const [tgError, setTgError] = useState<string | null>(null);
+  // Task #47: password-reset через Telegram
+  const [tgResetPending, setTgResetPending] = useState(false);
+  const [tgResetError, setTgResetError] = useState<string | null>(null);
 
   // Если редиректнули с /finish?error=expired_link — покажем баннер.
   useEffect(() => {
@@ -80,6 +83,25 @@ export function LoginPage(): JSX.Element {
       }
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleTelegramReset(): Promise<void> {
+    setTgResetError(null);
+    setTgResetPending(true);
+    try {
+      const r = await authApi.startTelegramReset();
+      const opened = window.open(r.botDeepLink, "_blank", "noopener");
+      if (!opened) window.location.assign(r.botDeepLink);
+    } catch (err) {
+      setTgResetPending(false);
+      if (err instanceof ApiError && err.status === 429) {
+        setTgResetError("Слишком частые попытки. Подождите минуту.");
+      } else if (err instanceof ApiError) {
+        setTgResetError(`Ошибка (HTTP ${err.status}).`);
+      } else {
+        setTgResetError("Сервер недоступен.");
+      }
     }
   }
 
@@ -222,13 +244,47 @@ export function LoginPage(): JSX.Element {
             >
               {submitting ? t("login.submitting") : t("login.submit")}
             </Button>
-            <div className="text-center">
+            <div className="text-center space-y-2">
               <Link
                 to="/reset-password"
                 className="text-sm text-brand-cyan hover:underline focus:underline focus:outline-none"
               >
                 {t("login.forgotPassword")}
               </Link>
+              {/* Task #47: альтернативный flow восстановления через Telegram */}
+              <div className="text-xs text-muted-foreground">
+                Привязан Telegram?{" "}
+                <button
+                  type="button"
+                  onClick={() => void handleTelegramReset()}
+                  className="text-brand-cyan hover:underline focus:underline focus:outline-none disabled:opacity-50"
+                  disabled={tgResetPending}
+                >
+                  Восстановить через Telegram
+                </button>
+              </div>
+              {tgResetPending && (
+                <div className="rounded border border-brand-cyan/40 bg-brand-cyan/5 px-3 py-2 text-xs text-left leading-relaxed">
+                  Откройте Telegram и нажмите{" "}
+                  <code className="rounded bg-muted px-1">/start</code>{" "}
+                  у бота — он пришлёт новый пароль в чат.
+                  <button
+                    type="button"
+                    onClick={() => setTgResetPending(false)}
+                    className="ml-2 underline"
+                  >
+                    Отменить
+                  </button>
+                </div>
+              )}
+              {tgResetError && (
+                <p
+                  role="alert"
+                  className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                >
+                  {tgResetError}
+                </p>
+              )}
             </div>
           </form>
         </CardContent>

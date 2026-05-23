@@ -91,18 +91,32 @@ export async function processTelegramUpdate(
   if (!msg || typeof msg.text !== "string" || !msg.chat?.id) {
     return false;
   }
-  const m = msg.text.trim().match(/^\/start(?:@\S+)?\s+(\S+)/i);
-  if (!m) return false;
-  const rawCode = m[1]!;
+  // Task #45: support both `/start <code>` (с payload) и bare `/start`
+  // (без payload). С payload → legacy link-flow или signup-nonce. Без —
+  // identifies user by TG-id и регистрирует / отправляет login-link.
+  const withPayload = msg.text.trim().match(/^\/start(?:@\S+)?\s+(\S+)/i);
+  const bareStart = msg.text.trim().match(/^\/start(?:@\S+)?\s*$/i);
+  if (!withPayload && !bareStart) return false;
+  const rawCode = withPayload ? withPayload[1]! : null;
   const chatId = msg.chat.id;
   const tgUsername = msg.from?.username?.trim() || null;
+  const telegramUserId = msg.from?.id;
+  const firstName = msg.from?.first_name?.trim() || null;
+  const lastName = msg.from?.last_name?.trim() || null;
 
   // Dispatcher: `s_<nonce>` → новый signup-flow (anonymous user creates
   // account from /login). Иначе — legacy link-existing-account flow
   // через `telegram_links` table (/preferences «Авторизоваться в TG»).
-  const { parseSignupStartCode, SignupNonceError, defaultSignupBotMessages } =
+  const { parseSignupStartCode, parseResetStartCode, SignupNonceError, defaultSignupBotMessages } =
     await import("../auth-telegram-signup/signup.service.js");
-  const signupRawNonce = parseSignupStartCode(rawCode);
+  const signupRawNonce = rawCode ? parseSignupStartCode(rawCode) : null;
+  const resetRawNonce = rawCode ? parseResetStartCode(rawCode) : null;
+
+  // Task #46: helper для inline-keyboard под welcome DM. Кнопка "🚀 Войти
+  // автоматически" с URL = finishUrl → click → cookies + auto-login на сайте.
+  const buildLoginKeyboard = (finishUrl: string) => ({
+    inline_keyboard: [[{ text: "🚀 Войти на сайт автоматически", url: finishUrl }]],
+  });
 
   if (signupRawNonce) {
     if (!signup) {
@@ -112,7 +126,6 @@ export async function processTelegramUpdate(
       );
       return true;
     }
-    const telegramUserId = msg.from?.id;
     if (typeof telegramUserId !== "number") {
       // Без telegram_user_id мы не можем создать / найти юзера.
       await telegram.sendToChat(
@@ -127,8 +140,8 @@ export async function processTelegramUpdate(
         telegramUserId,
         telegramChatId: chatId,
         telegramUsername: tgUsername,
-        firstName: msg.from?.first_name?.trim() || null,
-        lastName: msg.from?.last_name?.trim() || null,
+        firstName,
+        lastName,
       });
       await telegram.sendToChat(
         chatId,
@@ -137,6 +150,7 @@ export async function processTelegramUpdate(
           r.createdNewUser,
           r.initialCredentials,
         ),
+        buildLoginKeyboard(r.finishUrl),
       );
     } catch (e) {
       if (e instanceof SignupNonceError) {
@@ -151,7 +165,94 @@ export async function processTelegramUpdate(
     return true;
   }
 
+  // Task #47: password reset через Telegram. `r_<nonce>` → бот lookup'ит
+  // user по TG-id; existing → новый пароль + DM, new → register как
+  // обычный signup.
+  if (resetRawNonce) {
+    if (!signup) {
+      await telegram.sendToChat(
+        chatId,
+        "❌ Сервис восстановления пароля недоступен. Попробуйте позже.",
+      );
+      return true;
+    }
+    if (typeof telegramUserId !== "number") {
+      await telegram.sendToChat(
+        chatId,
+        "❌ Не удалось определить ваш Telegram ID. Откройте Telegram и попробуйте снова.",
+      );
+      return true;
+    }
+    try {
+      const r = await signup.handleBotReset({
+        rawNonce: resetRawNonce,
+        telegramUserId,
+        telegramChatId: chatId,
+        telegramUsername: tgUsername,
+        firstName,
+        lastName,
+      });
+      await telegram.sendToChat(
+        chatId,
+        defaultSignupBotMessages.passwordReset(
+          r.finishUrl,
+          r.createdNewUser,
+          r.credentials,
+        ),
+        buildLoginKeyboard(r.finishUrl),
+      );
+    } catch (e) {
+      if (e instanceof SignupNonceError) {
+        await telegram.sendToChat(
+          chatId,
+          defaultSignupBotMessages.error(e.reason),
+        );
+        return true;
+      }
+      throw e;
+    }
+    return true;
+  }
+
+  // Task #45: bare /start (no payload) — auto-detect existing user by TG-id.
+  // New → register + creds + finish-link. Existing → send fresh finish-link
+  // (без creds).
+  if (bareStart) {
+    if (!signup) {
+      await telegram.sendToChat(
+        chatId,
+        "👋 Привет! Это Capflow-бот. Откройте https://cap-flow.ru → «Войти через Telegram».",
+      );
+      return true;
+    }
+    if (typeof telegramUserId !== "number") {
+      await telegram.sendToChat(
+        chatId,
+        "❌ Не удалось определить ваш Telegram ID.",
+      );
+      return true;
+    }
+    const r = await signup.handleBareBotStart({
+      telegramUserId,
+      telegramChatId: chatId,
+      telegramUsername: tgUsername,
+      firstName,
+      lastName,
+    });
+    await telegram.sendToChat(
+      chatId,
+      defaultSignupBotMessages.ok(
+        r.finishUrl,
+        r.createdNewUser,
+        r.initialCredentials,
+      ),
+      buildLoginKeyboard(r.finishUrl),
+    );
+    return true;
+  }
+
   // Legacy link-existing-account flow.
+  if (!rawCode) return true; // bare /start уже handled выше
   const link = await telegram.completeLink({
     rawCode,
     chatId,

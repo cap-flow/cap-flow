@@ -39,6 +39,8 @@ import { LanguageSelector } from "@/components/i18n/LanguageSelector";
 import { LOCALE_LABELS, useI18n, useT } from "@/i18n/I18nProvider";
 import { AvatarPicker } from "@/components/profile/AvatarPicker";
 import { useProfile, type UserProfile } from "@/components/profile/profile";
+import { authApi } from "@/features/auth/api";
+import { ApiError } from "@/lib/api/client";
 import { usePipelineSettings } from "@/lib/portfolio/pipeline_settings";
 import { cn } from "@/lib/utils";
 import { BillingPage } from "./BillingPage";
@@ -275,7 +277,122 @@ function ProfileSection() {
           </div>
         </CardContent>
       </Card>
+
+      <PasswordChangeCard />
     </>
+  );
+}
+
+/* ---------------- Task #44: смена пароля -------------------------- */
+
+function PasswordChangeCard() {
+  const [oldPwd, setOldPwd] = useState("");
+  const [newPwd, setNewPwd] = useState("");
+  const [confirmPwd, setConfirmPwd] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const canSubmit =
+    !!oldPwd && !!newPwd && newPwd === confirmPwd && newPwd.length >= 8;
+
+  async function handleSubmit(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    setError(null);
+    setSuccess(false);
+    if (newPwd !== confirmPwd) {
+      setError("Новый пароль и подтверждение не совпадают.");
+      return;
+    }
+    if (newPwd.length < 8) {
+      setError("Минимум 8 символов.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await authApi.changePassword({ oldPassword: oldPwd, newPassword: newPwd });
+      setSuccess(true);
+      setOldPwd("");
+      setNewPwd("");
+      setConfirmPwd("");
+      window.setTimeout(() => setSuccess(false), 4000);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        const data = err.data as { error?: string; reason?: string } | undefined;
+        if (err.status === 400 && data?.error) setError(data.error);
+        else if (err.status === 403)
+          setError("Нельзя менять пароль в impersonation-сессии.");
+        else setError(`Ошибка (HTTP ${err.status})`);
+      } else {
+        setError("Сервер недоступен. Попробуйте позже.");
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Смена пароля</CardTitle>
+        <CardDescription>
+          Старый пароль → новый. Если забыли старый — на странице входа
+          используйте «Восстановить через Telegram».
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit} className="space-y-4 max-w-md">
+          <div className="space-y-1.5">
+            <Label htmlFor="old-pwd">Текущий пароль</Label>
+            <Input
+              id="old-pwd"
+              type="password"
+              value={oldPwd}
+              onChange={(e) => setOldPwd(e.target.value)}
+              autoComplete="current-password"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="new-pwd">Новый пароль (мин. 8 символов)</Label>
+            <Input
+              id="new-pwd"
+              type="password"
+              value={newPwd}
+              onChange={(e) => setNewPwd(e.target.value)}
+              autoComplete="new-password"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="confirm-pwd">Подтверждение нового пароля</Label>
+            <Input
+              id="confirm-pwd"
+              type="password"
+              value={confirmPwd}
+              onChange={(e) => setConfirmPwd(e.target.value)}
+              autoComplete="new-password"
+            />
+          </div>
+          {error && (
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
+              {error}
+            </p>
+          )}
+          {success && (
+            <p className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-sm text-success">
+              ✅ Пароль успешно изменён.
+            </p>
+          )}
+          <div className="flex justify-end">
+            <Button type="submit" disabled={!canSubmit || submitting}>
+              {submitting ? "Сохраняем…" : "Сменить пароль"}
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
   );
 }
 

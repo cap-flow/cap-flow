@@ -259,6 +259,30 @@ export class AuthService {
   }
 
   /**
+   * Task #44: смена пароля авторизованным пользователем.
+   * Проверяет старый password, hash'ит новый, записывает в БД.
+   * Возвращает true если ok, false если старый password неверен.
+   */
+  async changePassword(
+    userId: string,
+    oldPassword: string,
+    newPassword: string,
+  ): Promise<{ ok: true } | { ok: false; reason: "wrong_password" | "no_password_set" }> {
+    const user = await this.repo.findUserById(userId);
+    if (!user) return { ok: false, reason: "no_password_set" };
+    if (!user.passwordHash) {
+      // Telegram-only user без password (legacy edge case до Task #43).
+      // Должны через set-password endpoint, не change-password.
+      return { ok: false, reason: "no_password_set" };
+    }
+    const ok = await verifyPassword(oldPassword, user.passwordHash);
+    if (!ok) return { ok: false, reason: "wrong_password" };
+    const newHash = await hashPassword(newPassword);
+    await this.repo.setPasswordHash(userId, newHash);
+    return { ok: true };
+  }
+
+  /**
    * Выпустить session+access tokens для уже-аутентифицированного user'а
    * (по результату Telegram bot flow, email verification и т. п.).
    *

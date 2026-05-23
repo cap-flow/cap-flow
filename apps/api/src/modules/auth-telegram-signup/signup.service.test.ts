@@ -138,6 +138,12 @@ class FakeRepo implements ITelegramSignupRepository {
     return user;
   }
 
+  async updatePasswordHash(userId: string, passwordHash: string): Promise<void> {
+    const u = this.users.get(userId);
+    if (!u) throw new Error("not found");
+    this.users.set(userId, { ...u, passwordHash });
+  }
+
   async setInitialPasswordAndUsername(
     userId: string,
     passwordHash: string,
