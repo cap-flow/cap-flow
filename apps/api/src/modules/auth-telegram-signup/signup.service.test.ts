@@ -226,9 +226,15 @@ describe("TelegramSignupService", () => {
     expect(nonceRow.userId).toBeTruthy();
     expect(nonceRow.telegramUserId).toBe(12345);
     const user = repo.users.get(nonceRow.userId!)!;
-    expect(user.status).toBe("pending");
+    // Task #43: auto-provisioning переводит user в active + ставит password +
+    // username (= telegramUsername "alice" если свободен).
+    expect(user.status).toBe("active");
     expect(user.telegramId).toBe(12345);
     expect(user.telegramUsername).toBe("alice");
+    expect(user.passwordHash).toBeTruthy();
+    expect(r.initialCredentials).not.toBeNull();
+    expect(r.initialCredentials?.username).toBe("alice");
+    expect(r.initialCredentials?.password.length).toBeGreaterThan(8);
   });
 
   it("handleBotStart для returning user: createdNewUser=false, тот же user.id", async () => {
@@ -377,7 +383,7 @@ describe("TelegramSignupService", () => {
     ).rejects.toMatchObject({ reason: "conflict" });
   });
 
-  it("finishLogin happy path → ok + needsPasswordSetup=true для свежего user'а", async () => {
+  it("finishLogin happy path → ok + needsPasswordSetup=false (auto-provisioned password)", async () => {
     const repo = new FakeRepo();
     const s = new TelegramSignupService(
       repo,
@@ -387,6 +393,8 @@ describe("TelegramSignupService", () => {
       getBotUsername,
     );
     const { rawNonce } = await s.startSignup();
+    // Task #43: auto-provisioning ставит password сразу → finish-login
+    // больше не требует set-password.
     await s.handleBotStart({
       rawNonce,
       telegramUserId: 100,
@@ -399,7 +407,7 @@ describe("TelegramSignupService", () => {
     expect(r.kind).toBe("ok");
     if (r.kind === "ok") {
       expect(r.user.telegramId).toBe(100);
-      expect(r.needsPasswordSetup).toBe(true);
+      expect(r.needsPasswordSetup).toBe(false);
     }
   });
 
