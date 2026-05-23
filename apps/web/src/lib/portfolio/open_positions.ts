@@ -2490,6 +2490,38 @@ function buildOne(
     : isSingleAggregated
       ? positionLevelDeposit
       : Math.max(positionLevelDeposit, supplySumStartUsd);
+
+  // UCB C5 Phase G (Task #37, anti-recurrence #1, 2026-05-23):
+  // Когда position.startUsd берётся НЕ из Σ supplyTokens.startUsd (V3 LP
+  // case: v3.depositUsd из hist-prices; single-aggregated case: receipt
+  // walker), rescale supplyTokens пропорционально чтобы Σ === startUsd.
+  //
+  // Без этого rescale на V3 LP позициях с большим mark-to-market drift
+  // (e.g. POS-007 PAXG/USDC: walker = $642, hist = $1180.82 → diff $538)
+  // получался [provenance warn] divergence — Σ supplyTokens != position.startUsd.
+  // Это путало пользователя и UI (per-token PnL summing != position PnL).
+  //
+  // Если supplyTokens.startUsd суммируется к 0 (исходный walker pустой
+  // на orphan/new position) → распределяем equally, чтобы избежать
+  // деления на ноль.
+  if (supplyTokens.length > 0 && startUsd > 0) {
+    const supplyTokensSum = supplyTokens.reduce(
+      (s, t) => s + (t.startUsd ?? 0),
+      0,
+    );
+    if (Math.abs(supplyTokensSum - startUsd) / Math.max(startUsd, 1) > 0.005) {
+      // Diff > 0.5% → rescale.
+      const scale =
+        supplyTokensSum > 0 ? startUsd / supplyTokensSum : 0;
+      for (const t of supplyTokens) {
+        if (scale > 0) {
+          t.startUsd = (t.startUsd ?? 0) * scale;
+        } else {
+          t.startUsd = startUsd / supplyTokens.length;
+        }
+      }
+    }
+  }
   // `lp.assetUsd` DeBank даёт all-in: underlying liquidity + accrued
   // uncollected fees. Для всех протоколов кроме V3 LP это правильно
   // (fees rebase'ятся в supply amount → не дублируются). Для V3 LP
