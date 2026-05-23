@@ -136,6 +136,20 @@ export interface OpenPositionToken {
   /** Откуда взяли цену: 'cost_basis' (running avg) или 'fallback'. */
   priceSource: "cost_basis" | "fallback";
   /**
+   * UCB C5 Phase F (Task #19): сколько из `startUsd` пришло из silent
+   * m.usd fallback (DeBank current spot вместо реальных трат). > 0
+   * означает что LotTracker не имел данных для этого символа в момент
+   * supply, и hist-цена тоже была недоступна → cost basis имеет
+   * unknown provenance.
+   *
+   * UI может surface это badge'м "⚠ cost basis derived from spot price"
+   * для предупреждения пользователя что startUsd может быть искажён.
+   *
+   * Anti-recurrence pattern #1 (silent fallbacks): этот флаг — explicit
+   * signal вместо тихого fallback'а.
+   */
+  fallbackUsd?: number;
+  /**
    * Адрес underlying токена (без chain prefix). Нужен для on-chain
    * lookup'ов: Aave LT/LTV per asset, oracle price, и т.д.
    */
@@ -1079,10 +1093,17 @@ function computePositionConsumedCostFromLots(
    * `buildLotsAndPositions` и удаление build.ts полностью.
    */
   sharedLotTracker?: LotTracker,
-): { amount: number; usd: number } {
+): { amount: number; usd: number; fallbackUsd: number } {
   // Step-by-step walker: для каждого supply op в эту позицию ловим WAC
   // в момент supply (BEFORE consume removes lots). Это даёт TRUE historical
   // cost basis — устойчиво к full consume / pre-existing balance.
+  //
+  // UCB C5 Phase F (2026-05-23, Task #19): отслеживаем `fallbackUsd` —
+  // часть `usd`, которая пришла из silent m.usd fallback (НЕ из LotTracker).
+  // Если caller видит fallbackUsd > 0 — cost basis этой позиции содержит
+  // unknown provenance (DeBank current spot вместо реально потраченных
+  // долларов). Используется для UI badge и dev-warning'ов в
+  // anti-recurrence pattern #1.
   //
   // Стратегия:
   //   1. Sort ops chronologically.
@@ -1100,6 +1121,7 @@ function computePositionConsumedCostFromLots(
 
   let totalAmount = 0;
   let totalUsd = 0;
+  let totalFallbackUsd = 0;
 
   const incrementalOps: ClassifiedOp[] = [];
   for (const op of sorted) {
@@ -1178,6 +1200,18 @@ function computePositionConsumedCostFromLots(
           totalUsd += m.amount * wac;
         } else {
           // Fallback: no tracker data (wac=null) → historical price → m.usd.
+          //
+          // UCB C5 Phase F (Task #19): tracker возвратил null → cost basis
+          // от lots не найден. Historical price из DefiLlama — приемлемый
+          // proxy (часто accurate в пределах %). m.usd (DeBank current
+          // spot) — НЕ accurate для long-term позиций (например купил
+          // BTC год назад за $40k, current $90k — m.usd скажет $90k вместо
+          // $40k → inflated startUsd → wrong PnL).
+          //
+          // Считаем `m.usd`-derived USD как `fallbackUsd` (unknown provenance).
+          // Caller (buildSupplyToken) сможет mark позицию badge'м.
+          // В dev режиме warning'аем — это сигнал что классификатор/
+          // lots-tracker не покрыл какой-то протокол.
           const coin = defillamaCoinKey(op.chain, m.tokenId, m.symbol);
           let priceAtTx: number | null = null;
           if (coin) {
@@ -1185,9 +1219,28 @@ function computePositionConsumedCostFromLots(
             if (hp != null && hp > 0) priceAtTx = hp;
           }
           if (priceAtTx != null) {
+            // Historical price — НЕ silent fallback (это known unit price
+            // на момент tx, accurate для нашей цели).
             totalUsd += m.amount * priceAtTx;
           } else if (m.usd != null && m.usd > 0) {
+            // m.usd — DeBank current spot. UNKNOWN provenance для cost basis.
+            // Track как fallback и warning в dev.
             totalUsd += m.usd;
+            totalFallbackUsd += m.usd;
+            if (
+              typeof process !== "undefined" &&
+              process.env?.NODE_ENV !== "production" &&
+              process.env?.NODE_ENV !== "test"
+            ) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                `[open_positions] silent m.usd fallback (anti-recurrence #1): ` +
+                  `wallet=${walletId} protocol=${protocolId} chain=${chain} ` +
+                  `symbol=${symbol} time=${op.time} amount=${m.amount} fallbackUsd=${m.usd}. ` +
+                  `LotTracker не имеет lots для этого символа, и DefiLlama hist-цена недоступна → ` +
+                  `подменяем cost basis на current spot (m.usd). PnL может быть искажён.`,
+              );
+            }
           }
         }
       }
@@ -1196,7 +1249,7 @@ function computePositionConsumedCostFromLots(
     incrementalOps.push(op);
   }
 
-  return { amount: totalAmount, usd: totalUsd };
+  return { amount: totalAmount, usd: totalUsd, fallbackUsd: totalFallbackUsd };
 }
 
 /**
@@ -2245,20 +2298,21 @@ function buildOne(
     // на каждый supply event и гарантирует, что lot-by-lot popup и
     // position summary читают одинаковый WAC.
     const sharedLot = lotsByWallet?.get(wallet.id);
-    const lotConsumed = isStable
-      ? { amount: 0, usd: 0 }
-      : computePositionConsumedCostFromLots(
-          ops,
-          wallet.id,
-          lp.protocolId,
-          lp.chain,
-          s.symbol,
-          opened?.time ?? null,
-          filterLpTokenId,
-          histPrices,
-          overrideByHash,
-          sharedLot,
-        );
+    const lotConsumed: { amount: number; usd: number; fallbackUsd: number } =
+      isStable
+        ? { amount: 0, usd: 0, fallbackUsd: 0 }
+        : computePositionConsumedCostFromLots(
+            ops,
+            wallet.id,
+            lp.protocolId,
+            lp.chain,
+            s.symbol,
+            opened?.time ?? null,
+            filterLpTokenId,
+            histPrices,
+            overrideByHash,
+            sharedLot,
+          );
 
     if (
       // UCB C9: accept lotConsumed как valid даже если usd = 0
@@ -2326,6 +2380,10 @@ function buildOne(
       avgBuyPrice: isStable ? 1 : (avgAtOpen ?? null),
       startUsd,
       priceSource,
+      // UCB C5 Phase F (Task #19): explicit unknown provenance flag.
+      // > 0 → cost basis включает silent m.usd fallback (см. console.warn
+      // в computePositionConsumedCostFromLots).
+      ...(lotConsumed.fallbackUsd > 0 && { fallbackUsd: lotConsumed.fallbackUsd }),
       ...(cleanTid && { tokenId: cleanTid }),
     };
   });
