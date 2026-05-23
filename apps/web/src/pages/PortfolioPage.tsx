@@ -124,7 +124,7 @@ const REFRESH_INTERVAL_MS = 60_000;
 export function PortfolioPage(): JSX.Element {
   const t = useT();
   const { locale } = useI18n();
-  const { loadedById, busyId, loadAll } = useLoadedWallets();
+  const { loadedById, busyId, loadAll, newTrackers } = useLoadedWallets();
 
   const loadedList = useMemo(
     () =>
@@ -183,13 +183,16 @@ export function PortfolioPage(): JSX.Element {
   const { histPrices } = useWalletHistPrices(loadedList);
 
   const pnl = useMemo(() => {
+    // UCB C5: shared LotTracker от ucb_pipeline (cross_protocol.ts) — единый
+    // source of truth. Без `lotsByWallet` buildOpenPositions падал в legacy
+    // CostBasisTracker → divergence с OpenPositionsPage / HomePage.
     const positions = buildOpenPositions(
       loadedList.map((l) => ({
         wallet: l.wallet,
         ops: l.ops,
         ...(l.live !== undefined && { live: l.live }),
       })),
-      { histPrices },
+      { histPrices, lotsByWallet: newTrackers.lotsByWallet },
     );
     let startUsd = 0;
     let currentUsd = 0;
@@ -205,7 +208,7 @@ export function PortfolioPage(): JSX.Element {
     const pnlUsd = currentUsd - startUsd;
     const pnlPct = startUsd > 0 ? (pnlUsd / startUsd) * 100 : 0;
     return { startUsd, currentUsd, pnlUsd, pnlPct, counted, total: positions.length };
-  }, [loadedList, histPrices]);
+  }, [loadedList, histPrices, newTrackers.lotsByWallet]);
 
   const [walletFilter, setWalletFilter] = useState<string | "all">("all");
   const [hideUnknown, setHideUnknown] = useState(true);

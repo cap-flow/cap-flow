@@ -247,6 +247,12 @@ function WalletAnalyticsView({
   const { locale } = useI18n();
   const [annotations] = useOpAnnotations();
   const { rate: usdRub } = useUsdRub();
+  // UCB C5: shared `LotTracker` от ucb_pipeline (cross_protocol.ts) — единый
+  // source of truth для cost basis. Раньше эта страница строила свой inline
+  // CostBasisTracker через `buildCostBasisTracker` (legacy fallback в
+  // `buildOpenPositions`), что давало divergence с HomePage / OpenPositionsPage
+  // (которые читали `newTrackers.lotsByWallet`). Теперь все читают одно и то же.
+  const { newTrackers } = useLoadedWallets();
 
   const { histPrices } = useWalletHistPrices([loaded]);
   const positions = useMemo<OpenPosition[]>(
@@ -259,9 +265,9 @@ function WalletAnalyticsView({
             ...(loaded.live !== undefined && { live: loaded.live }),
           },
         ],
-        { histPrices },
+        { histPrices, lotsByWallet: newTrackers.lotsByWallet },
       ),
-    [loaded, histPrices],
+    [loaded, histPrices, newTrackers.lotsByWallet],
   );
 
   // Метрики с positions передаём — иначе computeDashboardMetrics строит
