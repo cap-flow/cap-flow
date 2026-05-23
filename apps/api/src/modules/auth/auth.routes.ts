@@ -219,6 +219,55 @@ export async function authRoutes(
     }
   );
 
+  // ─── POST /v1/auth/change-password (Task #44) ────────────────────────
+  // Авторизованный user меняет пароль (старый → новый).
+  route.post(
+    "/change-password",
+    {
+      preHandler: app.requireAuth,
+      schema: {
+        body: z.object({
+          oldPassword: z.string().min(1).max(200),
+          newPassword: z
+            .string()
+            .min(8, "Минимум 8 символов")
+            .max(200),
+        }),
+        response: {
+          200: z.object({ ok: z.literal(true) }),
+          400: z.object({ error: z.string(), reason: z.string() }),
+        },
+      },
+      config: { rateLimit: { max: 5, timeWindow: "5 minutes" } },
+    },
+    async (req, reply) => {
+      const u = req.user;
+      if (!u) throw new UnauthorizedError();
+      // Impersonated session НЕ может менять чужой password — это
+      // классический admin-takeover вектор. Admin может только просмотреть
+      // settings, не менять.
+      if (u.impersonation) {
+        throw new ForbiddenError(
+          "Нельзя менять пароль в impersonation-сессии. Завершите импersonation.",
+        );
+      }
+      const r = await app.auth.changePassword(
+        u.id,
+        req.body.oldPassword,
+        req.body.newPassword,
+      );
+      if (!r.ok) {
+        reply.code(400);
+        const msg =
+          r.reason === "wrong_password"
+            ? "Старый пароль неверный."
+            : "Пароль не установлен. Используйте «Восстановить через Telegram».";
+        return { error: msg, reason: r.reason };
+      }
+      return { ok: true as const };
+    },
+  );
+
   /**
    * Stop the current impersonation session and return to the admin
    * identity. Lives under /auth (not /admin/users/.../impersonate)

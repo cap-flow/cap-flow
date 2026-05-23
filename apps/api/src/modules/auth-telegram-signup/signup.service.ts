@@ -102,6 +102,28 @@ export class TelegramSignupService {
   }
 
   /**
+   * Task #47: same as startSignup, но с `r_<nonce>` payload → бот видит
+   * сигнатуру reset-flow → перезаписывает password (или регистрирует, если
+   * новый user). Endpoint защищён rate-limit, чтобы избежать abuse.
+   */
+  async startReset(): Promise<StartSignupResult> {
+    const raw = randomBytes(24).toString("base64url");
+    const nonceHash = sha256Hex(raw);
+    const expiresAt = new Date(
+      Date.now() + this.cfg.nonceTtlMinutes * 60 * 1000,
+    );
+    await this.repo.createNonce({ nonceHash, expiresAt });
+    const botUsername = this.getBotUsername()?.trim();
+    if (!botUsername) {
+      throw new Error(
+        "TELEGRAM_BOT_USERNAME не задан — нельзя выпустить reset-link.",
+      );
+    }
+    const botDeepLink = `https://t.me/${botUsername}?start=r_${raw}`;
+    return { rawNonce: raw, botDeepLink };
+  }
+
+  /**
    * Шаг 2: бот получил /start с code `s_<raw>`.
    *
    * Распознаём в `processTelegramUpdate` через `parseSignupStartCode`
@@ -269,6 +291,191 @@ export class TelegramSignupService {
   }
 
   /**
+   * Task #45: bare `/start` (no payload) handler. User жмёт START в боте
+   * напрямую (не через website signup-flow). Поведение:
+   *   - new user → register + auto-provision creds + fresh finish-link
+   *   - existing user → fresh finish-link (без creds) для one-click login
+   *
+   * Внутри: создаёт fresh nonce и сразу binds его к user'у (skipping
+   * website's start-signup step). User получает же финиш-link, что и
+   * через обычный signup-flow.
+   */
+  async handleBareBotStart(payload: {
+    telegramUserId: number;
+    telegramChatId: number;
+    telegramUsername: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  }): Promise<BotStartHandleResult> {
+    const raw = randomBytes(24).toString("base64url");
+    const nonceHash = sha256Hex(raw);
+    const expiresAt = new Date(
+      Date.now() + this.cfg.nonceTtlMinutes * 60 * 1000,
+    );
+    await this.repo.createNonce({ nonceHash, expiresAt });
+
+    const existing = await this.repo.findUserByTelegramId(payload.telegramUserId);
+    let user: UserRow;
+    let createdNewUser: boolean;
+    if (existing) {
+      user = existing;
+      createdNewUser = false;
+    } else {
+      user = await this.repo.createTelegramUser({
+        telegramUserId: payload.telegramUserId,
+        telegramUsername: payload.telegramUsername,
+        firstName: payload.firstName,
+        lastName: payload.lastName,
+        telegramChatId: payload.telegramChatId,
+      });
+      createdNewUser = true;
+      await this.audit.log({
+        actorUserId: user.id,
+        action: "auth.telegram_bare_start_created",
+        payload: {
+          telegramUserId: payload.telegramUserId,
+          telegramUsername: payload.telegramUsername,
+        },
+      });
+    }
+
+    await this.repo.ensureUserDefaults({
+      userId: user.id,
+      telegramChatId: payload.telegramChatId,
+      telegramUsername: payload.telegramUsername,
+    });
+    await this.repo.bindNonceToUser({
+      nonceHash,
+      userId: user.id,
+      telegramUserId: payload.telegramUserId,
+      telegramChatId: payload.telegramChatId,
+      telegramUsername: payload.telegramUsername,
+    });
+
+    let initialCredentials: { username: string; password: string } | null = null;
+    if (createdNewUser && !user.passwordHash) {
+      try {
+        initialCredentials = await this.provisionInitialCredentials({
+          userId: user.id,
+          telegramUsername: payload.telegramUsername,
+          telegramUserId: payload.telegramUserId,
+        });
+      } catch (err) {
+        this.log.warn(
+          { err, userId: user.id },
+          "[telegram-signup] bare-start auto-provision creds failed",
+        );
+      }
+    }
+
+    return {
+      finishUrl: this.buildFinishUrl(raw),
+      createdNewUser,
+      initialCredentials,
+    };
+  }
+
+  /**
+   * Task #47: password-reset через Telegram. User жмёт «Восстановить через TG»
+   * на /login → website генерит `r_<nonce>` → бот видит сигнатуру → этот
+   * метод вызывается. Поведение:
+   *   - new user (не было ранее с этим TG-id) → register как обычный signup
+   *   - existing user → **новый password** генерится, hash перезаписывается,
+   *     plaintext возвращается для DM. Username остаётся прежним.
+   */
+  async handleBotReset(payload: BotStartHandlePayload): Promise<{
+    finishUrl: string;
+    createdNewUser: boolean;
+    credentials: { username: string; password: string } | null;
+  }> {
+    const nonceHash = sha256Hex(payload.rawNonce);
+    const row = await this.repo.findNonce(nonceHash);
+    if (!row) throw new SignupNonceError("not_found");
+    if (row.consumedAt) throw new SignupNonceError("already_consumed");
+    if (row.expiresAt.getTime() < Date.now()) throw new SignupNonceError("expired");
+
+    const existing = await this.repo.findUserByTelegramId(payload.telegramUserId);
+    let user: UserRow;
+    let createdNewUser: boolean;
+    if (existing) {
+      user = existing;
+      createdNewUser = false;
+    } else {
+      user = await this.repo.createTelegramUser({
+        telegramUserId: payload.telegramUserId,
+        telegramUsername: payload.telegramUsername,
+        firstName: payload.firstName,
+        lastName: payload.lastName,
+        telegramChatId: payload.telegramChatId,
+      });
+      createdNewUser = true;
+      await this.audit.log({
+        actorUserId: user.id,
+        action: "auth.telegram_reset_created",
+        payload: { telegramUserId: payload.telegramUserId },
+      });
+    }
+    await this.repo.ensureUserDefaults({
+      userId: user.id,
+      telegramChatId: payload.telegramChatId,
+      telegramUsername: payload.telegramUsername,
+    });
+    await this.repo.bindNonceToUser({
+      nonceHash,
+      userId: user.id,
+      telegramUserId: payload.telegramUserId,
+      telegramChatId: payload.telegramChatId,
+      telegramUsername: payload.telegramUsername,
+    });
+
+    // Генерим новый password для reset OR initial для new user.
+    const newPassword = randomBytes(12).toString("base64url");
+    const newPasswordHash = await hashPassword(newPassword);
+    let username = user.username ?? null;
+    if (!username) {
+      // New user или existing без username — provision через тот же helper
+      // (он handlит UNIQUE conflict).
+      try {
+        const provisioned = await this.provisionInitialCredentials({
+          userId: user.id,
+          telegramUsername: payload.telegramUsername,
+          telegramUserId: payload.telegramUserId,
+        });
+        // ВАЖНО: provisionInitialCredentials уже set'нул password. Возвращаем
+        // его (а не наш newPassword выше — теряем consistency но не критично).
+        return {
+          finishUrl: this.buildFinishUrl(payload.rawNonce),
+          createdNewUser,
+          credentials: provisioned,
+        };
+      } catch (err) {
+        this.log.warn(
+          { err, userId: user.id },
+          "[telegram-signup] reset provision creds failed",
+        );
+        return {
+          finishUrl: this.buildFinishUrl(payload.rawNonce),
+          createdNewUser,
+          credentials: null,
+        };
+      }
+    }
+    // Existing user with username: просто перезаписываем password (без
+    // username change).
+    await this.repo.updatePasswordHash(user.id, newPasswordHash);
+    await this.audit.log({
+      actorUserId: user.id,
+      action: "auth.telegram_password_reset",
+      payload: { telegramUserId: payload.telegramUserId },
+    });
+    return {
+      finishUrl: this.buildFinishUrl(payload.rawNonce),
+      createdNewUser,
+      credentials: { username, password: newPassword },
+    };
+  }
+
+  /**
    * Шаг 3: user открыл finishUrl в браузере.
    *
    * Атомарно consume nonce. Возвращает либо ok + user (для caller'а,
@@ -363,6 +570,16 @@ export function parseSignupStartCode(rawCode: string): string | null {
   return m && m[1] ? m[1] : null;
 }
 
+/**
+ * Task #47: распознать reset-flow code (`r_<nonce>`). Используется
+ * password-reset через Telegram: пользователь жмёт «Восстановить через
+ * Telegram» на /login → website генерит nonce → бот видит payload.
+ */
+export function parseResetStartCode(rawCode: string): string | null {
+  const m = rawCode.match(/^r_(.+)$/);
+  return m && m[1] ? m[1] : null;
+}
+
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
@@ -376,6 +593,16 @@ export interface SignupBotMessages {
   ): string;
   /** Сообщение когда nonce expired / not found / уже consumed. */
   error(reason: SignupNonceError["reason"]): string;
+  /**
+   * Task #47: сообщение для password-reset flow.
+   * createdNewUser=true → registered + sent creds (тот же welcome).
+   * createdNewUser=false → existing user, sent NEW password.
+   */
+  passwordReset(
+    finishUrl: string,
+    createdNewUser: boolean,
+    credentials: { username: string; password: string } | null,
+  ): string;
 }
 
 export const defaultSignupBotMessages: SignupBotMessages = {
@@ -402,13 +629,41 @@ export const defaultSignupBotMessages: SignupBotMessages = {
         `и Capflow начнёт трекать ваши DeFi-позиции, PnL, fees и доходность ` +
         `автоматически.\n\n` +
         `⚠️ Пароль показывается ТОЛЬКО один раз — сохраните его в менеджере паролей. ` +
-        `Сменить пароль можно в /preferences после входа.`
+        `Сменить пароль можно в *Настройки → Мой профиль* после входа.`
       );
     }
     return (
       `${greeting}\n\n` +
-      `Чтобы войти на сайт, перейдите по ссылке:\n${finishUrl}\n\n` +
+      `Чтобы войти на сайт, нажмите кнопку ниже (или откройте ссылку):\n${finishUrl}\n\n` +
       `Ссылка одноразовая и действует 10 минут.`
+    );
+  },
+  passwordReset(finishUrl, createdNewUser, credentials) {
+    if (createdNewUser && credentials) {
+      // Reset для нового user'а = просто signup. Используем тот же welcome.
+      return defaultSignupBotMessages.ok(finishUrl, true, credentials);
+    }
+    const siteOrigin =
+      finishUrl.match(/^(https?:\/\/[^/]+)/)?.[1] ?? "https://cap-flow.ru";
+    if (credentials) {
+      return (
+        `🔐 *Сброс пароля Capflow*\n\n` +
+        `Мы сгенерировали новый пароль для вашего аккаунта:\n\n` +
+        `🔑 *Логин:* \`${credentials.username}\`\n` +
+        `🔒 *Новый пароль:* \`${credentials.password}\`\n\n` +
+        `🌐 *Сайт:* ${siteOrigin}\n\n` +
+        `Войдите на сайт с новым паролем (кнопка ниже / ссылка / вручную). ` +
+        `Старый пароль больше не работает.\n\n` +
+        `⚠️ Сохраните новый пароль в менеджере паролей. ` +
+        `Сменить его можно в *Настройки → Мой профиль* после входа.`
+      );
+    }
+    // Edge case: reset не смог сгенерить creds.
+    return (
+      `✅ Подтверждён вход через Telegram.\n\n` +
+      `Перейдите по ссылке для входа: ${finishUrl}\n\n` +
+      `Если у вас был пароль — он остался прежним. ` +
+      `Если нет — нажмите «Сменить пароль» в *Настройки → Мой профиль* после входа.`
     );
   },
   error(reason) {

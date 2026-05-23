@@ -97,6 +97,28 @@ export async function telegramSignupRoutes(
     },
   );
 
+  // ─── POST /v1/auth/telegram/start-reset ──────────────────────────────
+  // Task #47: anonymous endpoint для password-reset через Telegram.
+  // Same idea как start-signup, но bot deep link с `r_<nonce>` payload.
+  route.post(
+    "/start-reset",
+    {
+      schema: {
+        response: {
+          200: z.object({ botDeepLink: z.string() }),
+        },
+      },
+      config: {
+        skipCsrf: true,
+        rateLimit: { max: 10, timeWindow: "1 minute" },
+      },
+    },
+    async () => {
+      const r = await signup.startReset();
+      return { botDeepLink: r.botDeepLink };
+    },
+  );
+
   // ─── GET /v1/auth/telegram/finish?nonce=… ────────────────────────────
   // Anonymous. Атомарно consume nonce, выпускает cookies, 302 на /.
   // Если nonce невалиден → 302 на /login?error=expired_link (UI покажет

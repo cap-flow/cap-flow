@@ -94,4 +94,27 @@ export const authApi = {
       input,
       z.object({ ok: z.literal(true) }),
     ),
+
+  /**
+   * Task #47: POST /api/v1/auth/telegram/start-reset — генерит
+   * one-shot nonce + возвращает t.me deep-link с `r_` префиксом.
+   * Бот видит сигнатуру → reset-flow → новый password в DM.
+   */
+  startTelegramReset: () =>
+    api.postPublic(
+      "/v1/auth/telegram/start-reset",
+      undefined as unknown,
+      z.object({ botDeepLink: z.string() }),
+    ),
+
+  /**
+   * Task #44: POST /api/v1/auth/change-password — авторизованный user
+   * меняет свой пароль (старый → новый).
+   */
+  changePassword: (input: { oldPassword: string; newPassword: string }) =>
+    api.post(
+      "/v1/auth/change-password",
+      input,
+      z.object({ ok: z.literal(true) }),
+    ),
 };
