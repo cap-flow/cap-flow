@@ -324,5 +324,19 @@ export function useComputedPositions(): ComputedPositions {
     v3PositionMap: v3.data,
     lotMethodology,
     setLotMethodology,
+    /**
+     * V3 cost basis fetch state. `true` пока useV3LiquidityEvents
+     * фетчит Etherscan IncreaseLiquidity events для всех V3 NFT'ов.
+     *
+     * Когда `true`: ещё не известно, какие V3 позиции — orphan
+     * (mint не найден в chain-ops) vs нет. UI должен показывать
+     * spinner/«Загрузка…» вместо confident ⚠ badge, чтобы не
+     * пугать нового пользователя fake'овым «cost basis incomplete»
+     * который через 2-3s исчезнет сам.
+     *
+     * На subsequent visits (cached в localStorage) `loading=false`
+     * сразу с первого render'а.
+     */
+    v3CostBasisLoading: v3CostBasisHook.loading,
   };
 }
