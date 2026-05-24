@@ -60,6 +60,10 @@ export interface KrystalV3Summary {
   protocolKey: string;
   pair: [string, string];
   status: KrystalPosition["status"];
+  /** Lowercased EVM owner address — нужен для wallet-scoped fallback match. */
+  ownerAddress: string;
+  /** Lowercased V3 pool address — uniq идентификатор для disambiguation. */
+  poolAddress: string;
   /** Live position value (USD), authoritative. */
   currentUsd: number;
   currentTokens: TokenBreakdown[];
@@ -118,6 +122,8 @@ export function krystalToV3Summary(p: KrystalPosition): KrystalV3Summary {
     protocolKey: p.pool.protocol.key,
     pair: [sym0, sym1],
     status: p.status,
+    ownerAddress: (p.ownerAddress ?? "").toLowerCase(),
+    poolAddress: (p.pool.poolAddress ?? "").toLowerCase(),
     currentUsd: p.currentPositionValue ?? 0,
     currentTokens,
     pendingFeeUsd: sumUsd(p.tradingFee?.pending),
