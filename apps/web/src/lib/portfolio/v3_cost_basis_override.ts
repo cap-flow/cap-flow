@@ -84,6 +84,70 @@ function backfillOrphanMeta(
   };
 }
 
+/**
+ * UCB Phase J (Task #51, 2026-05-24): on-chain truth для current state V3 NFT.
+ *
+ * DeBank `lp.supply.amount` для V3 LP может СВОПНУТЬ amounts между
+ * portfolio_items'ами одного пула (если у юзера 2+ NFT в same pool).
+ * Например lex POS-001/003 (Uniswap V3 ETH/USDC arb): DeBank
+ * приписал amounts NFT 5404456 к POS-001 (которая по openHash маппится
+ * на NFT 5469945 с другим cost basis). Результат: «купил за \$15.7k,
+ * сейчас \$1.9k» (loss 87%) — physically невозможный IL.
+ *
+ * Источник истины — on-chain `useV3Positions` (`v3PositionMap`) с
+ * `amount0Current` / `amount1Current` per NFT. Когда matchedV3TokenId
+ * set → overrride `currentUsd` + `supplyTokens.amount` из NFT'а.
+ *
+ * Цены берём из supplyTokens (live prices из DeBank). Если symbol
+ * не найден → fallback на supply.usd / supply.amount как proxy.
+ */
+function overrideCurrentFromOnChain(
+  base: OpenPosition,
+  nft: V3Position,
+): OpenPosition {
+  // Build per-symbol price map from current supply (DeBank live prices).
+  const priceBySymbol = new Map<string, number>();
+  for (const t of base.supplyTokens) {
+    if (t.amount > 0 && t.currentUsd > 0) {
+      priceBySymbol.set(
+        t.symbol.toUpperCase(),
+        t.currentUsd / t.amount,
+      );
+    }
+  }
+  // On-chain amounts.
+  const onChain = [
+    { symbol: nft.token0.symbol, amount: nft.amount0Current },
+    { symbol: nft.token1.symbol, amount: nft.amount1Current },
+  ];
+  // New supplyTokens — preserve startUsd/avgBuyPrice (cost-basis side), но
+  // override amount/currentUsd (current-state side).
+  const newSupply = base.supplyTokens.map((t) => {
+    const oc = onChain.find(
+      (x) => x.symbol.toUpperCase() === t.symbol.toUpperCase(),
+    );
+    if (!oc) return t;
+    const px = priceBySymbol.get(t.symbol.toUpperCase()) ?? 0;
+    return {
+      ...t,
+      amount: oc.amount,
+      currentUsd: oc.amount * px,
+    };
+  });
+  const newCurrentUsd = newSupply.reduce((s, t) => s + t.currentUsd, 0);
+  // PnL recompute (collateral-side only, H6 invariant).
+  const newPnlUsd = newCurrentUsd - base.startUsd;
+  const newPnlPct =
+    base.startUsd > 0 ? (newPnlUsd / base.startUsd) * 100 : 0;
+  return {
+    ...base,
+    supplyTokens: newSupply,
+    currentUsd: newCurrentUsd,
+    netPnlUsd: newPnlUsd,
+    netPnlPct: newPnlPct,
+  };
+}
+
 interface OverrideResult {
   positions: OpenPosition[];
   /** Diagnostic: сколько positions было переопределено. */
@@ -185,7 +249,11 @@ export function applyV3CostBasisOverride(
             ...x.p,
             matchedV3TokenId: cb.tokenId.toString(),
           };
-          if (nftForCb) next = backfillOrphanMeta(next, cb, nftForCb);
+          if (nftForCb) {
+            next = backfillOrphanMeta(next, cb, nftForCb);
+            // Phase J (Task #51): on-chain truth для current state.
+            next = overrideCurrentFromOnChain(next, nftForCb);
+          }
           result[x.idx] = next;
           matchedTotalAuth.push(newStartUsd);
           continue;
@@ -199,7 +267,11 @@ export function applyV3CostBasisOverride(
             startUsd: (t.startUsd / oldStartUsd) * newStartUsd,
           }));
         }
-        if (nftForCb) next = backfillOrphanMeta(next, cb, nftForCb);
+        if (nftForCb) {
+          next = backfillOrphanMeta(next, cb, nftForCb);
+          // Phase J (Task #51): on-chain truth для current state.
+          next = overrideCurrentFromOnChain(next, nftForCb);
+        }
         // H6: do NOT subtract currentDebtUsd. PnL is the change in
         // collateral value only; debt is a separate liability tracked
         // via `currentDebtUsd`. Subtracting it here double-counts the
@@ -316,6 +388,8 @@ export function applyV3CostBasisOverride(
             matchedV3TokenId: nft.tokenId.toString(),
           };
           next = backfillOrphanMeta(next, cb, nft);
+          // Phase J (Task #51): on-chain truth для current state.
+          next = overrideCurrentFromOnChain(next, nft);
           result[item.idx] = next;
           continue;
         }
@@ -329,6 +403,8 @@ export function applyV3CostBasisOverride(
           }));
         }
         next = backfillOrphanMeta(next, cb, nft);
+        // Phase J (Task #51): on-chain truth для current state.
+        next = overrideCurrentFromOnChain(next, nft);
         // H6: do NOT subtract currentDebtUsd. PnL is the change in
         // collateral value only; debt is a separate liability tracked
         // via `currentDebtUsd`. Subtracting it here double-counts the
