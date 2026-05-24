@@ -163,6 +163,17 @@ export class AdminIntegrationsService {
         usageProvider: "coinstats",
       },
       {
+        key: "krystal",
+        name: "Krystal Cloud",
+        purpose:
+          "V3 LP authoritative source: pool-level Collect events, real-time feeGrowth (Uniswap §6.3), cross-chain aggregation. 10 credits/wallet/call (24h client cache). Включается через feature flag capflow.feature.krystalV3Primary.",
+        envVar: "KRYSTAL_API_KEY",
+        envValue: e.KRYSTAL_API_KEY,
+        isPublic: false,
+        perUserQuotaPerDay: null,
+        usageProvider: "krystal",
+      },
+      {
         key: "defillama_prices",
         name: "DefiLlama Coins",
         purpose: "Historical token prices (free, no auth). Fallback when CoinGecko miss/quota.",
