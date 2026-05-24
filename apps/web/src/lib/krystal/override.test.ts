@@ -42,6 +42,7 @@ function basePos(args: {
   feesClaimedUsd?: number;
   feesByToken?: { symbol: string; amount: number; usd: number; nativeApr: number | null }[];
   feesSource?: "v3_rewards" | "supply_yield" | null;
+  feesClaimedHistory?: { time: number; hash: string; usd: number; positionUsdAtClaim?: number; daysSincePrev?: number; aprPeriod?: number; tokensReceived?: { symbol: string; amount: number; usd: number }[] }[];
 }): OpenPosition {
   return {
     id: args.id,
@@ -74,7 +75,7 @@ function basePos(args: {
     feesLifetimeUsd: (args.feesUsd ?? 0) + (args.feesClaimedUsd ?? 0),
     feeApr: null,
     feeAprLifetime: null,
-    feesClaimedHistory: [],
+    feesClaimedHistory: (args.feesClaimedHistory ?? []) as OpenPosition["feesClaimedHistory"],
     feesByToken: (args.feesByToken ?? []) as OpenPosition["feesByToken"],
     creditFundedUsd: 0,
     coverageIncomplete: false,
@@ -268,6 +269,116 @@ describe("applyKrystalV3Override", () => {
 
     const out = applyKrystalV3Override([pos], new Map());
     expect(out[0]!.currentUsd).toBe(1000);
+  });
+
+  it("Bug B (2026-05-25): feesClaimedHistory scaled pro-rata когда Krystal claimed < UCB inflated", () => {
+    // lex@ POS-007 scenario: UCB history имеет 3 entries (Σ $778.76,
+    // inflated из-за collect+decrease misclassification). Krystal claimed
+    // = $32.80 (real pool Collect events). Override должен scale entries
+    // чтобы popup "Хронология снятий" не показывал $778.76 entries при
+    // table claimed $32.80.
+    const pos = basePos({
+      id: "POS-007",
+      matchedV3TokenId: "1197028",
+      startUsd: 979.57,
+      currentUsd: 984.32,
+      ageDays: 118,
+      supply: [
+        { symbol: "WETH", amount: 0.367, currentUsd: 779.15, startUsd: 227.26 },
+      ],
+      feesUsd: 9.14,
+      feesClaimedUsd: 778.76,
+      feesClaimedHistory: [
+        {
+          time: 1770543155,
+          hash: "0xclaim1",
+          usd: 701.18, // inflated principal portion
+          positionUsdAtClaim: 910.57,
+          daysSincePrev: 13.46,
+          aprPeriod: 2088,
+          tokensReceived: [{ symbol: "ETH", amount: 0.329, usd: 696.22 }],
+        },
+        {
+          time: 1773839135,
+          hash: "0xclaim2",
+          usd: 44.72,
+          positionUsdAtClaim: 910.57,
+          daysSincePrev: 38.15,
+          aprPeriod: 46.99,
+          tokensReceived: [{ symbol: "USDT", amount: 22.46, usd: 22.46 }],
+        },
+        {
+          time: 1777648799,
+          hash: "0xclaim3",
+          usd: 32.86,
+          positionUsdAtClaim: 910.57,
+          daysSincePrev: 44.09,
+          aprPeriod: 29.87,
+          tokensReceived: [{ symbol: "USDT", amount: 16.81, usd: 16.81 }],
+        },
+      ],
+    });
+    const krystal = new Map<string, KrystalV3Summary>([
+      [
+        "1197028",
+        summary({
+          tokenId: "1197028",
+          currentUsd: 985.10,
+          current: [{ symbol: "WETH", amount: 0.368, usd: 780.0 }],
+          pendingUsd: 9.15,
+          claimedUsd: 32.80, // 23× меньше UCB
+        }),
+      ],
+    ]);
+
+    const out = applyKrystalV3Override([pos], krystal);
+    const p = out[0]!;
+
+    // Table-level fields overridden
+    expect(p.feesClaimedUsd).toBeCloseTo(32.80, 2);
+    // History scaled: Σ entries должна = newFeesClaimedUsd
+    expect(p.feesClaimedHistory).toHaveLength(3);
+    const sumHistory = p.feesClaimedHistory.reduce((s, h) => s + (h.usd ?? 0), 0);
+    expect(sumHistory).toBeCloseTo(32.80, 1);
+    // aprPeriod recomputed с правильным scaled usd (был 2088%, теперь ~98%)
+    const firstEntry = p.feesClaimedHistory[0]!;
+    expect(firstEntry.aprPeriod).toBeLessThan(200);
+    expect(firstEntry.aprPeriod).toBeGreaterThan(50);
+    // tokensReceived amounts тоже scaled
+    expect(firstEntry.tokensReceived?.[0]?.amount).toBeLessThan(0.329);
+  });
+
+  it("Bug B: history NOT touched когда UCB Σ ≈ Krystal claimed (within $1)", () => {
+    // Edge case: UCB history Σ совпадает с Krystal — нет смысла rescale.
+    const pos = basePos({
+      id: "POS-X",
+      matchedV3TokenId: "777",
+      startUsd: 1000,
+      currentUsd: 1000,
+      supply: [{ symbol: "WETH", amount: 0.5, currentUsd: 1000, startUsd: 1000 }],
+      feesUsd: 5,
+      feesClaimedUsd: 50,
+      feesClaimedHistory: [
+        { time: 1, hash: "0xa", usd: 25 },
+        { time: 2, hash: "0xb", usd: 25 },
+      ],
+    });
+    const krystal = new Map<string, KrystalV3Summary>([
+      [
+        "777",
+        summary({
+          tokenId: "777", currentUsd: 1000,
+          current: [{ symbol: "WETH", amount: 0.5, usd: 1000 }],
+          pendingUsd: 5, claimedUsd: 50.3, // diff 30 cents — within $1 tolerance
+        }),
+      ],
+    ]);
+
+    const out = applyKrystalV3Override([pos], krystal);
+    const p = out[0]!;
+    // History un-scaled (diff < $1)
+    expect(p.feesClaimedHistory[0]!.usd).toBe(25);
+    expect(p.feesClaimedHistory[1]!.usd).toBe(25);
   });
 
   it("recomputes netPnlUsd и netPnlPct из нового currentUsd", () => {

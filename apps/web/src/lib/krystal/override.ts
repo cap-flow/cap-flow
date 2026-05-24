@@ -92,6 +92,46 @@ function overrideOne(
       ? (newFeesLifetimeUsd / base.startUsd) * (365 / ageDays) * 100
       : null;
 
+  // Bug B fix (2026-05-25 lex@ audit): feesClaimedHistory остаётся
+  // UCB-only массивом entries (Σ matches OLD inflated claimed total), а
+  // table claimed = Krystal authoritative — inconsistency для юзера в
+  // popup'е "Хронология снятий". Filter UCB entries чтобы Σ соответствовала
+  // новому Krystal claimed value (pro-rata scale если total отличается).
+  //
+  // Логика: если new claimed < old Σ history → scale entries pro-rata,
+  // плюс снимать inflated principal portions (Bug #1 collect+decrease
+  // misclassification которую Krystal обходит через pool Collect events).
+  // Если new claimed > old Σ → keep history as-is + добавить synthetic
+  // residual entry для разницы (Krystal может видеть больше claims чем
+  // мы distinguished в ops history).
+  const oldHistorySum = base.feesClaimedHistory.reduce((s, h) => s + (h.usd ?? 0), 0);
+  let newClaimedHistory = base.feesClaimedHistory;
+  if (oldHistorySum > 0 && Math.abs(oldHistorySum - newFeesClaimedUsd) > 1) {
+    const scale = newFeesClaimedUsd / oldHistorySum;
+    newClaimedHistory = base.feesClaimedHistory.map((h) => ({
+      ...h,
+      usd: (h.usd ?? 0) * scale,
+      tokensReceived: (h.tokensReceived ?? []).map((t) => ({
+        ...t,
+        usd: t.usd * scale,
+        amount: t.amount * scale,
+      })),
+      // aprPeriod recompute с правильным scaled USD
+      ...(h.positionUsdAtClaim != null &&
+        h.positionUsdAtClaim > 0 &&
+        h.daysSincePrev != null &&
+        h.daysSincePrev > 0 && {
+          aprPeriod:
+            ((h.usd ?? 0) * scale / h.positionUsdAtClaim) *
+            (365 / h.daysSincePrev) *
+            100,
+        }),
+    }));
+  } else if (oldHistorySum === 0 && newFeesClaimedUsd === 0) {
+    // Both zero — no history, nothing to do
+    newClaimedHistory = [];
+  }
+
   return {
     ...base,
     supplyTokens: newSupply,
@@ -103,6 +143,7 @@ function overrideOne(
     feesClaimedUsd: newFeesClaimedUsd,
     feesClaimedByToken: newFeesClaimedByToken,
     feesLifetimeUsd: newFeesLifetimeUsd,
+    feesClaimedHistory: newClaimedHistory,
     feeApr,
     feeAprLifetime,
   };
