@@ -506,6 +506,8 @@ export function useV3LiquidityEvents(
         let totalDepositUsd = 0;
         let totalWithdrawUsd = 0;
         let hasHistPrices = false;
+        // PR-2: per-tx withdrawal amounts for collect-vs-decrease split.
+        const withdrawalsByTxHash = new Map<string, { amount0: number; amount1: number }>();
 
         function pricesForEvent(e: V3LiquidityEvent): { p0: number; p1: number } | null {
           const k = `${target.position.chain}|${target.position.poolAddress.toLowerCase()}|${e.txHash.toLowerCase()}`;
@@ -548,6 +550,19 @@ export function useV3LiquidityEvents(
           const a1 = Number(e.amount1Raw) / 10 ** dec1;
           totalWithdrawn0 += a0;
           totalWithdrawn1 += a1;
+          // PR-2: per-tx aggregation (несколько decrease events в одном
+          // multicall tx складываем). Lowercase txHash для consistent match
+          // против op.hash (DeBank часто mixed-case).
+          const key = e.txHash.toLowerCase();
+          const prev = withdrawalsByTxHash.get(key);
+          if (prev) {
+            withdrawalsByTxHash.set(key, {
+              amount0: prev.amount0 + a0,
+              amount1: prev.amount1 + a1,
+            });
+          } else {
+            withdrawalsByTxHash.set(key, { amount0: a0, amount1: a1 });
+          }
           const px = pricesForEvent(e);
           if (px) {
             totalWithdrawUsd += a0 * px.p0 + a1 * px.p1;
@@ -602,6 +617,7 @@ export function useV3LiquidityEvents(
           hasHistPrices,
           ...(mintTxHash && { mintTxHash }),
           ...(mintBlockTime !== undefined && { mintBlockTime }),
+          ...(withdrawalsByTxHash.size > 0 && { withdrawalsByTxHash }),
         };
         const cacheKey = `${target.position.chain}|${target.tokenId.toString()}`;
         // НЕ кэшируем "empty" результаты (0 increase events) — это значит
