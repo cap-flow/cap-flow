@@ -57,6 +57,7 @@ import { buildCostBasisTracker, CostBasisTracker } from "./cost_basis_tracker";
 import { buildLotTrackerFromOps } from "./lots/build";
 import { PerWalletLotTrackerView } from "./lots/compat";
 import type { LotTracker } from "./lots/lot_tracker";
+import { getPositionLotCostBasis } from "./position_lot_cost_basis";
 
 /**
  * UCB C5: union type для tracker'ов — legacy `CostBasisTracker` (cumulative
@@ -2293,26 +2294,50 @@ function buildOne(
     // **ПРИОРИТЕТ 3**: avgAtOpen × s.amount — last-resort если ни один
     // tracker не has data.
     const overrideByHash = costBasisOverrideByHash;
-    // UCB C5 Phase C: используем shared LotTracker если доступен (от
-    // ucb_pipeline через lotsByWallet). Это устраняет inline ребилд
-    // на каждый supply event и гарантирует, что lot-by-lot popup и
-    // position summary читают одинаковый WAC.
-    const sharedLot = lotsByWallet?.get(wallet.id);
+    // UCB C5 Phase H (Task #48, 2026-05-24, anti-recurrence #3):
+    // Раньше тут был walker `computePositionConsumedCostFromLots` который
+    // итерировал supply ops и читал `tracker.wacAt(time)` для каждого. Это
+    // создавало **4-й** параллельный pipeline cost-basis: lots tracker → walker
+    // → display. Walker мог fail на сложных leverage loop сценариях
+    // (Aave→Morpho→Fluid + self-loop borrow), давая например $21,613 при
+    // honest spending $30,000 (artur POS-005 production case).
+    //
+    // Popup всегда давал правильный ответ через `getPositionLotCostBasis`
+    // (purchase-only tracker + FIFO/WAC consume для currentAmount). Теперь
+    // и display layer использует тот же движок → 100% consistency между
+    // popup и /performance list.
+    //
+    // `useNetSuppliedAmount: true` — для lending позиций consume по
+    // (Σ lend_supply.out - Σ lend_withdraw.in), а НЕ live amount. Это
+    // исключает yield (rebase-style) из cost basis (UCB C4 invariant).
+    const lotCb = isStable
+      ? null
+      : getPositionLotCostBasis({
+          ops,
+          walletId: wallet.id,
+          protocolId: lp.protocolId,
+          chain: lp.chain,
+          symbol: s.symbol,
+          currentAmount: s.amount,
+          methodology: "WAC",
+          useNetSuppliedAmount: true,
+          ...(overrideByHash && { costBasisOverrideByHash: overrideByHash }),
+          histPrices,
+        });
     const lotConsumed: { amount: number; usd: number; fallbackUsd: number } =
-      isStable
+      isStable || !lotCb
         ? { amount: 0, usd: 0, fallbackUsd: 0 }
-        : computePositionConsumedCostFromLots(
-            ops,
-            wallet.id,
-            lp.protocolId,
-            lp.chain,
-            s.symbol,
-            opened?.time ?? null,
-            filterLpTokenId,
-            histPrices,
-            overrideByHash,
-            sharedLot,
-          );
+        : {
+            amount: lotCb.totalAmountSupplied,
+            usd: lotCb.totalCostUsd,
+            // No m.usd silent fallback — getPositionLotCostBasis honest от
+            // purchase events. `uncoveredAmount` exposed но не считаем
+            // fallback (он покрывается отдельно через UI badge для orphan).
+            fallbackUsd: 0,
+          };
+    // Note: `sharedLot` / `lotsByWallet` всё ещё нужны для других места
+    // в этом файле (например, V3 details builder), но не для startUsd.
+    void lotsByWallet;
 
     if (
       // UCB C9: accept lotConsumed как valid даже если usd = 0
