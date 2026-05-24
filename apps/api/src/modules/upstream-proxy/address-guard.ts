@@ -314,6 +314,23 @@ function walkParamElement(
   }
 }
 
+function extractKrystal(
+  req: ProxyRequestForGuard,
+  out: ExtractedAddress[],
+  invalid: string[]
+): void {
+  // Krystal Cloud REST API: address-семантика зависит от пути:
+  //   - /v1/positions?wallet=<addr> → wallet — user-owned → enforce IDOR
+  //   - /v1/balances?wallet=<addr>  → wallet — user-owned → enforce IDOR
+  //   - /v1/pools, /v1/chains, /v1/protocols, /v1/strategies → public data,
+  //     не имеют wallet/address param → skip ownership (allow)
+  const path = req.path.toLowerCase();
+  const isWalletScoped = /^v1\/(positions|balances)\b/.test(path);
+  if (!isWalletScoped) return;
+  const v = req.query.wallet;
+  if (v !== undefined) pushFromAny(out, invalid, v, "query.wallet");
+}
+
 /* ------------------------- public extractor API --------------------------- */
 
 export function extractAddresses(
@@ -333,6 +350,9 @@ export function extractAddresses(
       break;
     case "alchemy":
       extractAlchemy(req, out, invalid);
+      break;
+    case "krystal":
+      extractKrystal(req, out, invalid);
       break;
     default:
       // Unknown providers are blocked one layer up in
