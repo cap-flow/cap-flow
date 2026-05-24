@@ -1,33 +1,35 @@
 /**
- * PR-K3: Krystal V3 → OpenPosition override (current state authoritative,
- * cost basis остаётся UCB).
+ * PR-K3: Krystal V3 → OpenPosition override.
  *
- * Применяется в `useComputedPositions` после `applyV3CostBasisOverride` /
- * Phase J `overrideCurrentFromOnChain`. Если Krystal Map имеет summary для
- * `position.matchedV3TokenId` — current-state поля overrride'ятся:
+ * Krystal authoritative ТОЛЬКО для real-time current state V3 NFT.
+ * Claimed fees / history ОСТАЮТСЯ UCB + PR-2 split — потому что Krystal
+ * `tradingFee.claimed` оказался ненадёжным (lex@ audit 2026-05-25:
+ * POS-006/007 Krystal showed $107/$32, реальные Etherscan totals $271/$80).
  *
  *  | OpenPosition field         | Source                              |
  *  |----------------------------|-------------------------------------|
  *  | supplyTokens[].amount      | krystal.currentTokens[].amount      |
  *  | supplyTokens[].currentUsd  | krystal.currentTokens[].usd         |
  *  | currentUsd                 | krystal.currentUsd                  |
- *  | feesUsd                    | krystal.pendingFeeUsd               |
- *  | feesByToken                | krystal.pendingFeeTokens            |
- *  | feesClaimedUsd             | krystal.claimedFeeUsd               |
- *  | feesClaimedByToken         | krystal.claimedFeeTokens            |
- *  | feesLifetimeUsd            | pending + claimed                   |
- *  | feeApr / feeAprLifetime    | recompute from new fees + startUsd  |
- *  | netPnlUsd / netPnlPct      | currentUsd − startUsd               |
+ *  | feesUsd (pending)          | krystal.pendingFeeUsd               |
+ *  | feesByToken (pending)      | krystal.pendingFeeTokens            |
+ *  | feesClaimedUsd             | **UCB+PR-2 (НЕ Krystal)**           |
+ *  | feesClaimedByToken         | **UCB (НЕ Krystal)**                |
+ *  | feesClaimedHistory         | **UCB+PR-2 (НЕ Krystal)**           |
+ *  | feesLifetimeUsd            | new pending + UCB claimed           |
+ *  | feeApr / feeAprLifetime    | recompute with new pending + UCB    |
+ *  | netPnlUsd / netPnlPct      | currentUsd_krystal − startUsd_UCB   |
  *
- * Cost-basis fields НЕ трогаются (UCB authoritative для cross-protocol):
+ * Cost-basis side (UCB authoritative для cross-protocol):
  *   startUsd, netStartUsd, openedAt, openHash, ageDays,
  *   supplyTokens[].startUsd, openedInTokens.
  *
- * **Что решает на проде** (lex@mail.ru audit 2026-05-24):
- *  - POS-007 claimed $778.76 → ~$32.80 (баг #1 collect-vs-decrease bypass)
- *  - POS-006 claimed $261.69 → ~$108.04 (same)
- *  - Все 6 NFT pending fees от Krystal real-time feeGrowth math (matches
- *    Uniswap UI ровно как наш PR-1b, но БЕЗ нашего multicall complexity)
+ * **Pre-PR-K7 (revert)**: claimed override + Bug B history scaling сломали
+ * корректные UCB entries (lex POS-007 real $80 → отображалось $32, POS-006
+ * real $271 → $107). Krystal divisor оказался unreliable, и pro-rata scale
+ * с ним амплифицировал ошибку. PR-2 split уже фиксит inflated UCB entries
+ * через DecreaseLiquidity events — Krystal претендует на эту же роль но
+ * хуже, поэтому полностью отказываемся.
  */
 
 import type { OpenPosition } from "../portfolio/open_positions";
@@ -69,11 +71,17 @@ function overrideOne(
   // которых нет в нашем supply list).
   const newCurrentUsd = k.currentUsd;
 
-  // Fees: pending + claimed from Krystal.
+  // Pending fees — Krystal authoritative (real-time feeGrowth math
+  // server-side, matches Uniswap UI). См. lex POS-001: UCB stale $13.84 →
+  // Krystal real-time $251.61.
   const newFeesUsd = k.pendingFeeUsd;
   const newFeesByToken = k.pendingFeeTokens.map(toFeeByTokenEntry);
-  const newFeesClaimedUsd = k.claimedFeeUsd;
-  const newFeesClaimedByToken = k.claimedFeeTokens.map(toFeeByTokenEntry);
+
+  // Claimed fees + history — KEEP UCB+PR-2 значения. Krystal оказался
+  // unreliable для claimed total (lex POS-007 real $80 vs Krystal $32,
+  // POS-006 real $271 vs Krystal $107). PR-2 split через DecreaseLiquidity
+  // events уже фиксит inflated UCB entries.
+  const newFeesClaimedUsd = base.feesClaimedUsd;
   const newFeesLifetimeUsd = newFeesUsd + newFeesClaimedUsd;
 
   // PnL recompute (collateral-side, H6 invariant — debt не вычитаем).
@@ -92,46 +100,6 @@ function overrideOne(
       ? (newFeesLifetimeUsd / base.startUsd) * (365 / ageDays) * 100
       : null;
 
-  // Bug B fix (2026-05-25 lex@ audit): feesClaimedHistory остаётся
-  // UCB-only массивом entries (Σ matches OLD inflated claimed total), а
-  // table claimed = Krystal authoritative — inconsistency для юзера в
-  // popup'е "Хронология снятий". Filter UCB entries чтобы Σ соответствовала
-  // новому Krystal claimed value (pro-rata scale если total отличается).
-  //
-  // Логика: если new claimed < old Σ history → scale entries pro-rata,
-  // плюс снимать inflated principal portions (Bug #1 collect+decrease
-  // misclassification которую Krystal обходит через pool Collect events).
-  // Если new claimed > old Σ → keep history as-is + добавить synthetic
-  // residual entry для разницы (Krystal может видеть больше claims чем
-  // мы distinguished в ops history).
-  const oldHistorySum = base.feesClaimedHistory.reduce((s, h) => s + (h.usd ?? 0), 0);
-  let newClaimedHistory = base.feesClaimedHistory;
-  if (oldHistorySum > 0 && Math.abs(oldHistorySum - newFeesClaimedUsd) > 1) {
-    const scale = newFeesClaimedUsd / oldHistorySum;
-    newClaimedHistory = base.feesClaimedHistory.map((h) => ({
-      ...h,
-      usd: (h.usd ?? 0) * scale,
-      tokensReceived: (h.tokensReceived ?? []).map((t) => ({
-        ...t,
-        usd: t.usd * scale,
-        amount: t.amount * scale,
-      })),
-      // aprPeriod recompute с правильным scaled USD
-      ...(h.positionUsdAtClaim != null &&
-        h.positionUsdAtClaim > 0 &&
-        h.daysSincePrev != null &&
-        h.daysSincePrev > 0 && {
-          aprPeriod:
-            ((h.usd ?? 0) * scale / h.positionUsdAtClaim) *
-            (365 / h.daysSincePrev) *
-            100,
-        }),
-    }));
-  } else if (oldHistorySum === 0 && newFeesClaimedUsd === 0) {
-    // Both zero — no history, nothing to do
-    newClaimedHistory = [];
-  }
-
   return {
     ...base,
     supplyTokens: newSupply,
@@ -140,10 +108,9 @@ function overrideOne(
     netPnlPct: newPnlPct,
     feesUsd: newFeesUsd,
     feesByToken: newFeesByToken,
-    feesClaimedUsd: newFeesClaimedUsd,
-    feesClaimedByToken: newFeesClaimedByToken,
+    // feesClaimedUsd / feesClaimedByToken / feesClaimedHistory — НЕ trump
+    // UCB. Оставляем base.* как есть.
     feesLifetimeUsd: newFeesLifetimeUsd,
-    feesClaimedHistory: newClaimedHistory,
     feeApr,
     feeAprLifetime,
   };
