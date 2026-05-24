@@ -415,6 +415,60 @@ describe("dual-pipeline equivalence: lots.build.ts ≡ positions/cross_protocol.
     assertWacEquivalent(ops, "WBTC", 4000, "WBTC partial self-loop");
   });
 
+  // ─── Сценарий 14c: artur POS-005 regression — withdraw НЕ inflates ──
+  // **2026-05-24 regression guard**: Phase 3 v2 ввёл `totalInUsd` fallback
+  // в withdraw_collateral что создавало WBTC lot @ market $95k вместо
+  // $0. Следующий supply консьюмил inflated WAC → POS-005 startUsd
+  // показывал \$21,613 вместо \$3,000.
+  //
+  // Invariant: withdraw из protocol где не было tracked supply (или
+  // attributedCost = 0 по другой причине) → underlying lot должен
+  // получить cost = 0, НЕ market price. Подмена на market = silent
+  // m.usd fallback = anti-recurrence pattern #1.
+  it("artur POS-005: lend_withdraw БЕЗ tracked receipt НЕ inflates WBTC WAC", () => {
+    const MORPHO = { id: "arb_morpho", name: "Morpho", category: "lending" as const };
+    const FLUID = { id: "arb_fluid", name: "Fluid", category: "lending" as const };
+    const ops: ClassifiedOp[] = [
+      // 1. Buy 0.226 WBTC for \$3,000 USDC (real spending)
+      op({
+        hash: "0xbuy", type: "swap", time: 1000,
+        movements: [
+          { direction: "out", symbol: "USDC", amount: 3000, usd: 3000, isStable: true },
+          { direction: "in", symbol: "WBTC", amount: 0.226, usd: 3000 },
+        ],
+      }),
+      // 2. Morpho supply WBTC → receipt-less, consume 0.226 → pool empty
+      op({
+        hash: "0xsup_morpho", type: "lend_supply", time: 2000,
+        protocol: MORPHO,
+        movements: [{ direction: "out", symbol: "WBTC", amount: 0.226, usd: 17648 /* market */ }],
+      }),
+      // 3. Morpho borrow same WBTC (self-loop) → C10 inherits \$3000 → lot @ ~\$13k/BTC
+      op({
+        hash: "0xborrow", type: "borrow", time: 3000,
+        protocol: MORPHO,
+        movements: [{ direction: "in", symbol: "WBTC", amount: 0.226, usd: 17648 }],
+      }),
+      // 4. Fluid supply (receipt-less, no aToken) — consume 0.226 → cost should be \$3,000
+      op({
+        hash: "0xsup_fluid", type: "lend_supply", time: 4000,
+        protocol: FLUID,
+        movements: [{ direction: "out", symbol: "WBTC", amount: 0.226, usd: 17648 /* market */ }],
+      }),
+      // 5. Later: Fluid withdraw → WBTC returns BUT no receipt tracked
+      //    → attributedCost = 0 → lot должен быть cost = 0 (NOT market \$21k!)
+      op({
+        hash: "0xwd_fluid", type: "lend_withdraw", time: 5000,
+        protocol: FLUID,
+        movements: [{ direction: "in", symbol: "WBTC", amount: 0.226, usd: 21613 /* current market */ }],
+      }),
+    ];
+    // Поскольку pool consumed в step 4 → after step 5 (withdraw) WBTC снова в pool.
+    // KEY ASSERTION: WAC после withdraw == 0 (lot из withdraw имеет cost=0),
+    // НЕ market \$95k/BTC что дало бы \$21,613 если бы был m.usd fallback.
+    assertWacEquivalent(ops, "WBTC", 6000, "WBTC after withdraw — NO m.usd fallback");
+  });
+
   // ─── Сценарий 14: multi-source consume (BTC + ETH → SOL) ───────────
   it("multi-source swap: pays consumed cost across 2 input lots", () => {
     const ops = [

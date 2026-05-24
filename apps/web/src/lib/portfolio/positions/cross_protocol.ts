@@ -595,30 +595,30 @@ function emitPositionEvent(
   // Withdraw_collateral: возвращаем cost basis в lots (in-side underlying
   // получает recovered cost пропорционально amount).
   //
-  // UCB C5 Phase 3 v2 (Task #18): legacy `build.ts:handleWithdraw` создаёт
-  // lot для in-side underlying даже когда attributedCost = 0 (receipt-token
-  // не было tracked'а до withdraw). Используем market m.usd как fallback
-  // cost для underlying lot. Это match'ит legacy semantics для C12 tests
-  // (lend_withdraw с пустым tokenId receipt'а — fUSDC → WBTC lot создаётся).
+  // **UCB Phase I (2026-05-24, regression артур POS-005)**: cost для
+  // underlying lot — ИСКЛЮЧИТЕЛЬНО `attributedCost` (из receipt lots).
+  // Если attributedCost = 0 → создаём lot с cost = 0 (strict UCB), НЕ
+  // подменяем на market m.usd. Подмена на market = anti-recurrence
+  // pattern #1 (silent fallback): WBTC withdraw @ market $95k → next
+  // supply consume @ $95k × 0.226 = $21,613 при реальной trate $3,000.
+  //
+  // Pre-Phase-I: Phase 3 v2 (PR #12) ввёл `totalInUsd` fallback чтобы
+  // build.self_loop.test.ts UCB C12 test проходил (он ожидал что lot
+  // существует). Но C12 НЕ проверяет cost — только что лот существует.
+  // Cost=0 satisfies test и НЕ inflates downstream consume.
+  //
+  // **Создаём lot всегда** (даже когда attributedCost=0): инвариант
+  // amount-баланса требует чтобы выведенные underlying появились
+  // в lots (иначе следующий swap/supply этого underlying не найдёт
+  // их и упадёт в walker silent fallback). Просто cost=0.
   if (
     eventType === "withdraw_collateral" &&
     (attributedCost > 0 || inTokens.length > 0)
   ) {
     const totalInUsd = inTokens.reduce((s, t) => s + t.usd, 0);
-    // Если attributedCost = 0 → используем market value in-side как cost
-    // (fallback для receipt-less или receipt не tracked).
-    const effectiveAttributedCost =
-      attributedCost > 0 ? attributedCost : totalInUsd;
-    // UCB anti-recurrence #1: position delta для withdraw_collateral
-    // должен снимать ИМЕННО attributedCost (фактический cost basis,
-    // возвращённый из receipt lots), а не market spot. Иначе positions
-    // currentCostBasisUsd дрейфует при partial supply/withdraw сериях
-    // (нашёл deterministic fuzz). Перезаписываем inTokens[i].usd чтобы
-    // PositionTracker.deltaCostBasis получил корректное значение
-    // (= -attributedCost суммарно).
     for (const t of inTokens) {
       const share = totalInUsd > 0 ? t.usd / totalInUsd : 1 / inTokens.length;
-      const costForLot = effectiveAttributedCost * share;
+      const costForLot = attributedCost * share; // 0 if attributedCost=0
       lots.acquire({
         symbol: t.symbol,
         tokenId: "",
