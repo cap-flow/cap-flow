@@ -27,6 +27,7 @@ import { useLendingAudit } from "@/lib/lending/use_lending_audit";
 import { useResolvedFeatureFlag } from "@/features/feature-flags/hooks";
 import {
   isKrystalV3CrossValidationEnabled,
+  isKrystalV3PrimaryEnabled,
   isLendingAuditEnabled,
 } from "@/lib/portfolio/feature_flags";
 import { useKrystalV3Positions } from "@/lib/krystal/hook";
@@ -34,6 +35,7 @@ import {
   findKrystalDivergences,
   logKrystalDivergences,
 } from "@/lib/krystal/validate";
+import { applyKrystalV3Override } from "@/lib/krystal/override";
 import { useLotMethodology } from "@/lib/lot_methodology";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
 import { defillamaCoinKey, fetchHistoricalPrices } from "@/lib/defillama";
@@ -130,8 +132,16 @@ export function useComputedPositions(): ComputedPositions {
   const krystalFlag = useResolvedFeatureFlag(
     "capflow.feature.krystalV3CrossValidation",
   );
-  const krystalEnabled =
+  const krystalPrimaryFlag = useResolvedFeatureFlag(
+    "capflow.feature.krystalV3Primary",
+  );
+  const krystalCrossValidate =
     krystalFlag.enabled || isKrystalV3CrossValidationEnabled();
+  const krystalPrimary =
+    krystalPrimaryFlag.enabled || isKrystalV3PrimaryEnabled();
+  // Hook fetches если ЛЮБОЙ из двух режимов on (primary автоматически
+  // включает fetching — он построен поверх).
+  const krystalEnabled = krystalCrossValidate || krystalPrimary;
   const krystalV3 = useKrystalV3Positions(loadedList, krystalEnabled);
 
   const walletHistPrices = useWalletHistPrices(loadedList);
@@ -322,10 +332,16 @@ export function useComputedPositions(): ComputedPositions {
       }
       working = cexResult.positions;
     }
-    // PR-K2: после всех overrides сравниваем V3 LP с Krystal (если включён).
-    // Только console.warn — не мутирует данные. Помогает увидеть где наш
-    // движок врёт (POS-001 pending, POS-007 claimed misclassification).
-    if (krystalEnabled && krystalV3.data.size > 0) {
+    // PR-K3: Krystal primary mode → override V3 current state + fees
+    // ПЕРЕД cross-validation (иначе divergences будут zero — мы сами
+    // только что синхронизировали). Cost-basis side НЕ трогается.
+    if (krystalPrimary && krystalV3.data.size > 0) {
+      working = applyKrystalV3Override(working, krystalV3.data);
+    }
+    // PR-K2: cross-validation log. В primary режиме diff'ы должны быть
+    // ~0 (мы только что overrride'нули). В CV-only режиме покажет где
+    // наш движок врёт.
+    if (krystalCrossValidate && krystalV3.data.size > 0) {
       const divergences = findKrystalDivergences(working, krystalV3.data);
       logKrystalDivergences(divergences);
     }
@@ -339,7 +355,8 @@ export function useComputedPositions(): ComputedPositions {
     lotMethodology,
     costBasisOverrideByHash,
     cexCostBasisByHash,
-    krystalEnabled,
+    krystalCrossValidate,
+    krystalPrimary,
     krystalV3.data,
   ]);
 

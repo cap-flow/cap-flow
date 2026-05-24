@@ -52,6 +52,22 @@ export const CLIENT_FEATURE_FLAGS: readonly ClientFeatureFlag[] = [
     defaultValue: false,
     category: "analytics",
   },
+  {
+    key: "capflow.feature.krystalV3CrossValidation",
+    label: "Krystal V3 — cross-validation logs (dev)",
+    description:
+      "Fetch Krystal Cloud /v1/positions для каждого V3 LP wallet'а и сравнить с нашим OpenPosition (currentUsd / feesUsd / feesClaimedUsd). Diff > 5% → `console.warn` с разбивкой. Помогает увидеть где наши overrides врут. ⚠ Стоит 10 Krystal credits / wallet / fetch — следи за квотой.",
+    defaultValue: false,
+    category: "debug",
+  },
+  {
+    key: "capflow.feature.krystalV3Primary",
+    label: "Krystal V3 — primary source (override current state)",
+    description:
+      "Krystal становится authoritative для V3 LP current state: supplyTokens.amount/currentUsd, currentUsd, feesUsd/byToken, feesClaimedUsd/byToken, feesLifetimeUsd, PnL. Cost-basis side (startUsd, openedAt) остаётся UCB authoritative. Лечит POS-007 claimed $778 → $32.80, POS-006 $261 → $108 (баг #1 collect-vs-decrease). ⚠ Стоит Krystal credits, требует backend env KRYSTAL_API_KEY.",
+    defaultValue: false,
+    category: "experimental",
+  },
 ];
 
 function readFlagLocalStorage(key: string, defaultValue: boolean): boolean {
@@ -129,4 +145,32 @@ export function isLendingAuditEnabled(): boolean {
  */
 export function isKrystalV3CrossValidationEnabled(): boolean {
   return getClientFlag("capflow.feature.krystalV3CrossValidation", false);
+}
+
+/**
+ * PR-K3: Krystal V3 как PRIMARY source для current state V3 LP позиций.
+ *
+ * При ON — после всех существующих override'ов (`applyV3CostBasisOverride`,
+ * Phase J, lending, CEX inheritance) запускается `applyKrystalV3Override`,
+ * который переписывает current-state поля (supplyTokens.amount/currentUsd,
+ * currentUsd, feesUsd/byToken, feesClaimedUsd/byToken, feesLifetimeUsd, PnL,
+ * feeApr). Cost-basis side (startUsd, openedAt, ageDays, etc.) НЕ трогается
+ * — UCB lots остаются authoritative для cross-protocol attribution.
+ *
+ * Это фиксит:
+ *  - POS-007 claimed inflated $778 → $32.80 (real Collect events)
+ *  - POS-006 claimed inflated $261 → $108
+ *  - Все pending fees через Krystal server-side feeGrowth (matches Uniswap UI
+ *    точно, без нашего multicall complexity)
+ *
+ * **Default: OFF** — экономим Krystal credits (10/wallet/call). Включаем
+ * через localStorage когда committed к Krystal-first архитектуре.
+ *
+ * Требует:
+ *   1. `capflow.feature.krystalV3CrossValidation = true` (Krystal hook fetches)
+ *   2. `KRYSTAL_API_KEY` env на сервере (upstream-proxy)
+ *   3. Положительный баланс credits на Krystal account
+ */
+export function isKrystalV3PrimaryEnabled(): boolean {
+  return getClientFlag("capflow.feature.krystalV3Primary", false);
 }
