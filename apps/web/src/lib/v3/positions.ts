@@ -67,6 +67,26 @@ export interface V3Position {
   /** Amounts при выходе вверх (price = Pb): всё в token1. */
   amount0AtPb: number;
   amount1AtPb: number;
+  /**
+   * PR-1 (Bug #3, 2026-05-24): on-chain pending fees.
+   *
+   * `tokensOwed0/1` — последний snapshot fee'ев из `positions(tokenId)`.
+   * Обновляется ТОЛЬКО при `decreaseLiquidity` или `collect()` юзером —
+   * между ними не растёт, даже если позиция накопила новые fees.
+   *
+   * `pendingFee0/1` — real-time accrual = `tokensOwed + (feeGrowthInside_now -
+   * feeGrowthInside_last) × liquidity / 2^128`. В PR-1a (текущий) равен
+   * `tokensOwed` (точно после claim'а, но устаревает). В PR-1b добавляем
+   * feeGrowth math через `pool.feeGrowthGlobal` + `pool.ticks()`.
+   *
+   * Используется в `v3_cost_basis_override.overrideCurrentFromOnChain`
+   * для override DeBank stale `lp.rewards` (см. lex POS-003 audit:
+   * DeBank показал $236.58 vs real $14.60 на 19 дней stale).
+   */
+  tokensOwed0: number;
+  tokensOwed1: number;
+  pendingFee0: number;
+  pendingFee1: number;
 }
 
 function makeClient(dep: V3Deployment, apiKey: string): PublicClient {
@@ -145,6 +165,9 @@ export async function fetchV3PositionsForDeployment(
     tickLower: number;
     tickUpper: number;
     liquidity: bigint;
+    /** PR-1 Bug #3: raw uncollected fees from NPM positions(). */
+    tokensOwed0Raw: bigint;
+    tokensOwed1Raw: bigint;
   }
 
   const active: Active[] = [];
@@ -161,6 +184,8 @@ export async function fetchV3PositionsForDeployment(
       tickLower: p[5],
       tickUpper: p[6],
       liquidity: p[7],
+      tokensOwed0Raw: p[10],
+      tokensOwed1Raw: p[11],
     });
   }
   if (active.length === 0) return [];
@@ -250,6 +275,11 @@ export async function fetchV3PositionsForDeployment(
     const atPa = v3RawAmountsAt({ liquidityRaw: L, sqrtPa, sqrtPb, sqrtP: sqrtPa });
     const atPb = v3RawAmountsAt({ liquidityRaw: L, sqrtPa, sqrtPb, sqrtP: sqrtPb });
 
+    // PR-1 Bug #3: convert raw tokensOwed → human units. pendingFee in
+    // PR-1a equals tokensOwed (point-in-time after last claim/interaction).
+    // PR-1b will add real-time accrual via feeGrowth math.
+    const tokensOwed0 = Number(a.tokensOwed0Raw) / 10 ** dec0;
+    const tokensOwed1 = Number(a.tokensOwed1Raw) / 10 ** dec1;
     out.push({
       deploymentId: dep.id,
       protocolLabel: dep.label,
@@ -273,6 +303,10 @@ export async function fetchV3PositionsForDeployment(
       amount1AtPa: rawToHuman(atPa.amount1, dec1),
       amount0AtPb: rawToHuman(atPb.amount0, dec0),
       amount1AtPb: rawToHuman(atPb.amount1, dec1),
+      tokensOwed0,
+      tokensOwed1,
+      pendingFee0: tokensOwed0,
+      pendingFee1: tokensOwed1,
     });
   }
   return out;
