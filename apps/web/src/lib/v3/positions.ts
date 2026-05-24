@@ -20,7 +20,6 @@ import {
 
 import { ERC20_ABI, FACTORY_ABI, NPM_ABI, POOL_ABI } from "./abis";
 import { alchemyRpcUrl, type V3Deployment } from "./chains";
-import { computeFeeGrowthInside, computeRealTimePendingFee } from "./fee_growth";
 import {
   isInRange,
   rawToHuman,
@@ -69,20 +68,26 @@ export interface V3Position {
   amount0AtPb: number;
   amount1AtPb: number;
   /**
-   * PR-1 (Bug #3, 2026-05-24): on-chain pending fees.
+   * On-chain pending fees snapshot из NPM `positions(tokenId)`.
    *
-   * `tokensOwed0/1` — последний snapshot fee'ев из `positions(tokenId)`.
-   * Обновляется ТОЛЬКО при `decreaseLiquidity` или `collect()` юзером —
-   * между ними не растёт, даже если позиция накопила новые fees.
+   * `tokensOwed0/1` — последний snapshot. Обновляется ТОЛЬКО при
+   * `decreaseLiquidity()` или `collect()` юзером. Между ними не растёт
+   * (накопление через `feeGrowthInside` дельту, но `tokensOwed` остаётся).
    *
-   * `pendingFee0/1` — real-time accrual = `tokensOwed + (feeGrowthInside_now -
-   * feeGrowthInside_last) × liquidity / 2^128`. В PR-1a (текущий) равен
-   * `tokensOwed` (точно после claim'а, но устаревает). В PR-1b добавляем
-   * feeGrowth math через `pool.feeGrowthGlobal` + `pool.ticks()`.
+   * `pendingFee0/1` — на текущем code path EQUAL tokensOwed (snapshot).
    *
-   * Используется в `v3_cost_basis_override.overrideCurrentFromOnChain`
-   * для override DeBank stale `lp.rewards` (см. lex POS-003 audit:
-   * DeBank показал $236.58 vs real $14.60 на 19 дней stale).
+   * Для **real-time** pending fees система использует **Krystal Cloud**
+   * (PR-K3, default global ON) — server-side вычисляет accrual через
+   * Uniswap §6.3 fee growth math. См. `lib/krystal/override.ts`.
+   *
+   * Pre-PR-K3 у нас был свой PR-1b feeGrowth multicall (`fee_growth.ts`,
+   * 316 LOC), убран в PR-CLEANUP (refactor/v3-remove-feegrowth-multicall):
+   *   - duplicate Krystal'у работа
+   *   - +1 multicall round-trip per page load (Alchemy credits)
+   *   - сложный uint256 unchecked math с регрессиями (см. PR #30 fix)
+   *
+   * Если Krystal API недоступен / credits исчерпаны → fallback на
+   * `pendingFee = tokensOwed` (post-claim accurate, между claims устаревает).
    */
   tokensOwed0: number;
   tokensOwed1: number;
@@ -166,12 +171,9 @@ export async function fetchV3PositionsForDeployment(
     tickLower: number;
     tickUpper: number;
     liquidity: bigint;
-    /** PR-1 Bug #3: raw uncollected fees from NPM positions(). */
+    /** Raw uncollected fees snapshot from NPM positions() last 2 fields. */
     tokensOwed0Raw: bigint;
     tokensOwed1Raw: bigint;
-    /** PR-1b: feeGrowthInside_last (Q128.128) для real-time accrual. */
-    feeGrowthInside0LastX128: bigint;
-    feeGrowthInside1LastX128: bigint;
   }
 
   const active: Active[] = [];
@@ -188,8 +190,8 @@ export async function fetchV3PositionsForDeployment(
       tickLower: p[5],
       tickUpper: p[6],
       liquidity: p[7],
-      feeGrowthInside0LastX128: p[8],
-      feeGrowthInside1LastX128: p[9],
+      // p[8] = feeGrowthInside0LastX128, p[9] = feeGrowthInside1LastX128 —
+      // больше не нужны (Krystal делает real-time accrual server-side).
       tokensOwed0Raw: p[10],
       tokensOwed1Raw: p[11],
     });
@@ -239,11 +241,13 @@ export async function fetchV3PositionsForDeployment(
     if (s.status === "success") symByToken.set(tokenList[i], s.result as string);
   }
 
-  // 5) pool.slot0() + PR-1b real-time fee data для всех уникальных пулов.
-  //    Дополнительно фетчим:
-  //    - pool.feeGrowthGlobal0X128 / pool.feeGrowthGlobal1X128 (1 + 1 calls per pool)
-  //    - pool.ticks(tickLower) + pool.ticks(tickUpper) per NFT (2 calls per NFT)
-  //    Все одним multicall round-trip'ом.
+  // 5) pool.slot0() для всех уникальных пулов — нужен только sqrtPriceX96 + tick.
+  //
+  // Pre-PR-CLEANUP: дополнительно фетчили pool.feeGrowthGlobal0/1X128 +
+  // pool.ticks(tickLower/Upper) для real-time fee accrual (Uniswap §6.3 math).
+  // Убрано: Krystal Cloud делает это server-side (default global ON через
+  // capflow.feature.krystalV3Primary). Экономит +1 multicall round-trip
+  // per page load + ~316 LOC math/tests (fee_growth.ts).
   const uniquePools = Array.from(
     new Set(
       poolByIdx.filter((p): p is Address => p != null && p !== "0x0000000000000000000000000000000000000000"),
@@ -254,77 +258,16 @@ export async function fetchV3PositionsForDeployment(
     abi: POOL_ABI,
     functionName: "slot0" as const,
   }));
-  const fgGlobal0Calls = uniquePools.map((addr) => ({
-    address: addr,
-    abi: POOL_ABI,
-    functionName: "feeGrowthGlobal0X128" as const,
-  }));
-  const fgGlobal1Calls = uniquePools.map((addr) => ({
-    address: addr,
-    abi: POOL_ABI,
-    functionName: "feeGrowthGlobal1X128" as const,
-  }));
-  // Unique (pool, tick) pairs across all active NFTs.
-  type PoolTickKey = `${Address}|${number}`;
-  const ptKey = (pool: Address, tick: number): PoolTickKey => `${pool}|${tick}`;
-  const poolTickPairs = new Map<PoolTickKey, { pool: Address; tick: number }>();
-  for (let i = 0; i < active.length; i++) {
-    const pool = poolByIdx[i];
-    if (!pool) continue;
-    poolTickPairs.set(ptKey(pool, active[i].tickLower), { pool, tick: active[i].tickLower });
-    poolTickPairs.set(ptKey(pool, active[i].tickUpper), { pool, tick: active[i].tickUpper });
-  }
-  const poolTickList = Array.from(poolTickPairs.values());
-  const ticksCalls = poolTickList.map((pt) => ({
-    address: pt.pool,
-    abi: POOL_ABI,
-    functionName: "ticks" as const,
-    args: [pt.tick] as const,
-  }));
 
-  const [slotRes, fg0Res, fg1Res, ticksRes] = await Promise.all([
-    client.multicall({ contracts: slotCalls, allowFailure: true }),
-    client.multicall({ contracts: fgGlobal0Calls, allowFailure: true }),
-    client.multicall({ contracts: fgGlobal1Calls, allowFailure: true }),
-    client.multicall({ contracts: ticksCalls, allowFailure: true }),
-  ]);
+  const slotRes = await client.multicall({ contracts: slotCalls, allowFailure: true });
 
   const slotByPool = new Map<Address, { sqrtPriceX96: bigint; tick: number }>();
-  const fgGlobalByPool = new Map<Address, { g0: bigint; g1: bigint }>();
   for (let i = 0; i < uniquePools.length; i++) {
     const r = slotRes[i];
     if (r.status === "success") {
       const s = r.result as readonly [bigint, number, number, number, number, number, boolean];
       slotByPool.set(uniquePools[i], { sqrtPriceX96: s[0], tick: s[1] });
     }
-    const g0r = fg0Res[i];
-    const g1r = fg1Res[i];
-    if (g0r.status === "success" && g1r.status === "success") {
-      fgGlobalByPool.set(uniquePools[i], {
-        g0: g0r.result as bigint,
-        g1: g1r.result as bigint,
-      });
-    }
-  }
-  // ticks(tick) → feeGrowthOutside0/1X128 (fields 2 and 3 of tuple).
-  const ticksByKey = new Map<PoolTickKey, { fgOut0: bigint; fgOut1: bigint }>();
-  for (let i = 0; i < poolTickList.length; i++) {
-    const r = ticksRes[i];
-    if (r.status !== "success") continue;
-    const t = r.result as readonly [
-      bigint,
-      bigint,
-      bigint,
-      bigint,
-      bigint,
-      bigint,
-      number,
-      boolean,
-    ];
-    ticksByKey.set(ptKey(poolTickList[i].pool, poolTickList[i].tick), {
-      fgOut0: t[2],
-      fgOut1: t[3],
-    });
   }
 
   // Сборка
@@ -349,50 +292,13 @@ export async function fetchV3PositionsForDeployment(
     const atPa = v3RawAmountsAt({ liquidityRaw: L, sqrtPa, sqrtPb, sqrtP: sqrtPa });
     const atPb = v3RawAmountsAt({ liquidityRaw: L, sqrtPa, sqrtPb, sqrtP: sqrtPb });
 
-    // PR-1 Bug #3 (snapshot): tokensOwed = последний snapshot после
-    // collect/decrease. Между ними не растёт.
+    // tokensOwed snapshot from NPM positions() — обновляется только при
+    // collect/decreaseLiquidity. Real-time accrual идёт через Krystal Cloud
+    // (PR-K3, server-side §6.3 math). Без Krystal pendingFee = snapshot.
     const tokensOwed0 = Number(a.tokensOwed0Raw) / 10 ** dec0;
     const tokensOwed1 = Number(a.tokensOwed1Raw) / 10 ** dec1;
-
-    // PR-1b: real-time pendingFee = tokensOwed + accruedSinceLastSnapshot.
-    // accrued computed via Uniswap V3 §6.3 fee growth math.
-    const fgGlobal = fgGlobalByPool.get(pool);
-    const tickLowerData = ticksByKey.get(ptKey(pool, a.tickLower));
-    const tickUpperData = ticksByKey.get(ptKey(pool, a.tickUpper));
-    let pendingFee0 = tokensOwed0;
-    let pendingFee1 = tokensOwed1;
-    if (fgGlobal && tickLowerData && tickUpperData) {
-      const fgInside0Now = computeFeeGrowthInside({
-        tickLower: a.tickLower,
-        tickUpper: a.tickUpper,
-        currentTick: slot.tick,
-        feeGrowthGlobalX128: fgGlobal.g0,
-        feeGrowthOutsideLowerX128: tickLowerData.fgOut0,
-        feeGrowthOutsideUpperX128: tickUpperData.fgOut0,
-      });
-      const fgInside1Now = computeFeeGrowthInside({
-        tickLower: a.tickLower,
-        tickUpper: a.tickUpper,
-        currentTick: slot.tick,
-        feeGrowthGlobalX128: fgGlobal.g1,
-        feeGrowthOutsideLowerX128: tickLowerData.fgOut1,
-        feeGrowthOutsideUpperX128: tickUpperData.fgOut1,
-      });
-      pendingFee0 = computeRealTimePendingFee({
-        tokensOwedRaw: a.tokensOwed0Raw,
-        decimals: dec0,
-        liquidity: a.liquidity,
-        feeGrowthInsideLastX128: a.feeGrowthInside0LastX128,
-        feeGrowthInsideNowX128: fgInside0Now,
-      });
-      pendingFee1 = computeRealTimePendingFee({
-        tokensOwedRaw: a.tokensOwed1Raw,
-        decimals: dec1,
-        liquidity: a.liquidity,
-        feeGrowthInsideLastX128: a.feeGrowthInside1LastX128,
-        feeGrowthInsideNowX128: fgInside1Now,
-      });
-    }
+    const pendingFee0 = tokensOwed0;
+    const pendingFee1 = tokensOwed1;
     out.push({
       deploymentId: dep.id,
       protocolLabel: dep.label,
