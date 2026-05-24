@@ -20,6 +20,7 @@ import {
 
 import { ERC20_ABI, FACTORY_ABI, NPM_ABI, POOL_ABI } from "./abis";
 import { alchemyRpcUrl, type V3Deployment } from "./chains";
+import { computeFeeGrowthInside, computeRealTimePendingFee } from "./fee_growth";
 import {
   isInRange,
   rawToHuman,
@@ -168,6 +169,9 @@ export async function fetchV3PositionsForDeployment(
     /** PR-1 Bug #3: raw uncollected fees from NPM positions(). */
     tokensOwed0Raw: bigint;
     tokensOwed1Raw: bigint;
+    /** PR-1b: feeGrowthInside_last (Q128.128) для real-time accrual. */
+    feeGrowthInside0LastX128: bigint;
+    feeGrowthInside1LastX128: bigint;
   }
 
   const active: Active[] = [];
@@ -184,6 +188,8 @@ export async function fetchV3PositionsForDeployment(
       tickLower: p[5],
       tickUpper: p[6],
       liquidity: p[7],
+      feeGrowthInside0LastX128: p[8],
+      feeGrowthInside1LastX128: p[9],
       tokensOwed0Raw: p[10],
       tokensOwed1Raw: p[11],
     });
@@ -233,7 +239,11 @@ export async function fetchV3PositionsForDeployment(
     if (s.status === "success") symByToken.set(tokenList[i], s.result as string);
   }
 
-  // 5) pool.slot0() для всех уникальных пулов
+  // 5) pool.slot0() + PR-1b real-time fee data для всех уникальных пулов.
+  //    Дополнительно фетчим:
+  //    - pool.feeGrowthGlobal0X128 / pool.feeGrowthGlobal1X128 (1 + 1 calls per pool)
+  //    - pool.ticks(tickLower) + pool.ticks(tickUpper) per NFT (2 calls per NFT)
+  //    Все одним multicall round-trip'ом.
   const uniquePools = Array.from(
     new Set(
       poolByIdx.filter((p): p is Address => p != null && p !== "0x0000000000000000000000000000000000000000"),
@@ -244,13 +254,77 @@ export async function fetchV3PositionsForDeployment(
     abi: POOL_ABI,
     functionName: "slot0" as const,
   }));
-  const slotRes = await client.multicall({ contracts: slotCalls, allowFailure: true });
+  const fgGlobal0Calls = uniquePools.map((addr) => ({
+    address: addr,
+    abi: POOL_ABI,
+    functionName: "feeGrowthGlobal0X128" as const,
+  }));
+  const fgGlobal1Calls = uniquePools.map((addr) => ({
+    address: addr,
+    abi: POOL_ABI,
+    functionName: "feeGrowthGlobal1X128" as const,
+  }));
+  // Unique (pool, tick) pairs across all active NFTs.
+  type PoolTickKey = `${Address}|${number}`;
+  const ptKey = (pool: Address, tick: number): PoolTickKey => `${pool}|${tick}`;
+  const poolTickPairs = new Map<PoolTickKey, { pool: Address; tick: number }>();
+  for (let i = 0; i < active.length; i++) {
+    const pool = poolByIdx[i];
+    if (!pool) continue;
+    poolTickPairs.set(ptKey(pool, active[i].tickLower), { pool, tick: active[i].tickLower });
+    poolTickPairs.set(ptKey(pool, active[i].tickUpper), { pool, tick: active[i].tickUpper });
+  }
+  const poolTickList = Array.from(poolTickPairs.values());
+  const ticksCalls = poolTickList.map((pt) => ({
+    address: pt.pool,
+    abi: POOL_ABI,
+    functionName: "ticks" as const,
+    args: [pt.tick] as const,
+  }));
+
+  const [slotRes, fg0Res, fg1Res, ticksRes] = await Promise.all([
+    client.multicall({ contracts: slotCalls, allowFailure: true }),
+    client.multicall({ contracts: fgGlobal0Calls, allowFailure: true }),
+    client.multicall({ contracts: fgGlobal1Calls, allowFailure: true }),
+    client.multicall({ contracts: ticksCalls, allowFailure: true }),
+  ]);
+
   const slotByPool = new Map<Address, { sqrtPriceX96: bigint; tick: number }>();
+  const fgGlobalByPool = new Map<Address, { g0: bigint; g1: bigint }>();
   for (let i = 0; i < uniquePools.length; i++) {
     const r = slotRes[i];
+    if (r.status === "success") {
+      const s = r.result as readonly [bigint, number, number, number, number, number, boolean];
+      slotByPool.set(uniquePools[i], { sqrtPriceX96: s[0], tick: s[1] });
+    }
+    const g0r = fg0Res[i];
+    const g1r = fg1Res[i];
+    if (g0r.status === "success" && g1r.status === "success") {
+      fgGlobalByPool.set(uniquePools[i], {
+        g0: g0r.result as bigint,
+        g1: g1r.result as bigint,
+      });
+    }
+  }
+  // ticks(tick) → feeGrowthOutside0/1X128 (fields 2 and 3 of tuple).
+  const ticksByKey = new Map<PoolTickKey, { fgOut0: bigint; fgOut1: bigint }>();
+  for (let i = 0; i < poolTickList.length; i++) {
+    const r = ticksRes[i];
     if (r.status !== "success") continue;
-    const s = r.result as readonly [bigint, number, number, number, number, number, boolean];
-    slotByPool.set(uniquePools[i], { sqrtPriceX96: s[0], tick: s[1] });
+    const t = r.result as readonly [
+      bigint,
+      bigint,
+      bigint,
+      bigint,
+      bigint,
+      bigint,
+      number,
+      boolean,
+    ];
+    ticksByKey.set(ptKey(poolTickList[i].pool, poolTickList[i].tick), {
+      fgOut0: t[2],
+      fgOut1: t[3],
+    });
   }
 
   // Сборка
@@ -275,11 +349,50 @@ export async function fetchV3PositionsForDeployment(
     const atPa = v3RawAmountsAt({ liquidityRaw: L, sqrtPa, sqrtPb, sqrtP: sqrtPa });
     const atPb = v3RawAmountsAt({ liquidityRaw: L, sqrtPa, sqrtPb, sqrtP: sqrtPb });
 
-    // PR-1 Bug #3: convert raw tokensOwed → human units. pendingFee in
-    // PR-1a equals tokensOwed (point-in-time after last claim/interaction).
-    // PR-1b will add real-time accrual via feeGrowth math.
+    // PR-1 Bug #3 (snapshot): tokensOwed = последний snapshot после
+    // collect/decrease. Между ними не растёт.
     const tokensOwed0 = Number(a.tokensOwed0Raw) / 10 ** dec0;
     const tokensOwed1 = Number(a.tokensOwed1Raw) / 10 ** dec1;
+
+    // PR-1b: real-time pendingFee = tokensOwed + accruedSinceLastSnapshot.
+    // accrued computed via Uniswap V3 §6.3 fee growth math.
+    const fgGlobal = fgGlobalByPool.get(pool);
+    const tickLowerData = ticksByKey.get(ptKey(pool, a.tickLower));
+    const tickUpperData = ticksByKey.get(ptKey(pool, a.tickUpper));
+    let pendingFee0 = tokensOwed0;
+    let pendingFee1 = tokensOwed1;
+    if (fgGlobal && tickLowerData && tickUpperData) {
+      const fgInside0Now = computeFeeGrowthInside({
+        tickLower: a.tickLower,
+        tickUpper: a.tickUpper,
+        currentTick: slot.tick,
+        feeGrowthGlobalX128: fgGlobal.g0,
+        feeGrowthOutsideLowerX128: tickLowerData.fgOut0,
+        feeGrowthOutsideUpperX128: tickUpperData.fgOut0,
+      });
+      const fgInside1Now = computeFeeGrowthInside({
+        tickLower: a.tickLower,
+        tickUpper: a.tickUpper,
+        currentTick: slot.tick,
+        feeGrowthGlobalX128: fgGlobal.g1,
+        feeGrowthOutsideLowerX128: tickLowerData.fgOut1,
+        feeGrowthOutsideUpperX128: tickUpperData.fgOut1,
+      });
+      pendingFee0 = computeRealTimePendingFee({
+        tokensOwedRaw: a.tokensOwed0Raw,
+        decimals: dec0,
+        liquidity: a.liquidity,
+        feeGrowthInsideLastX128: a.feeGrowthInside0LastX128,
+        feeGrowthInsideNowX128: fgInside0Now,
+      });
+      pendingFee1 = computeRealTimePendingFee({
+        tokensOwedRaw: a.tokensOwed1Raw,
+        decimals: dec1,
+        liquidity: a.liquidity,
+        feeGrowthInsideLastX128: a.feeGrowthInside1LastX128,
+        feeGrowthInsideNowX128: fgInside1Now,
+      });
+    }
     out.push({
       deploymentId: dep.id,
       protocolLabel: dep.label,
