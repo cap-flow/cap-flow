@@ -289,6 +289,25 @@ export async function fetchV3PositionsForDeployment(
     client.multicall({ contracts: ticksCalls, allowFailure: true }),
   ]);
 
+  // PR-1b diagnostic: count failures для каждого набора multicall'ов.
+  if (typeof window !== "undefined") {
+    const fg0Fails = fg0Res.filter((r) => r.status !== "success").length;
+    const fg1Fails = fg1Res.filter((r) => r.status !== "success").length;
+    const ticksFails = ticksRes.filter((r) => r.status !== "success").length;
+    if (fg0Fails > 0 || fg1Fails > 0 || ticksFails > 0) {
+      const firstFail =
+        fg0Res.find((r) => r.status !== "success") ??
+        ticksRes.find((r) => r.status !== "success");
+      console.warn(
+        `[V3 multicall PR-1b] ${dep.chainCode}/${dep.id}: ` +
+          `fg0Fails=${fg0Fails}/${fgGlobal0Calls.length}, ` +
+          `fg1Fails=${fg1Fails}/${fgGlobal1Calls.length}, ` +
+          `ticksFails=${ticksFails}/${ticksCalls.length}. ` +
+          `First error: ${(firstFail as { error?: { message?: string } } | undefined)?.error?.message ?? "?"}`,
+      );
+    }
+  }
+
   const slotByPool = new Map<Address, { sqrtPriceX96: bigint; tick: number }>();
   const fgGlobalByPool = new Map<Address, { g0: bigint; g1: bigint }>();
   for (let i = 0; i < uniquePools.length; i++) {
