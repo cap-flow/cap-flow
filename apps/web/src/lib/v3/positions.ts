@@ -380,6 +380,20 @@ export async function fetchV3PositionsForDeployment(
     const tickUpperData = ticksByKey.get(ptKey(pool, a.tickUpper));
     let pendingFee0 = tokensOwed0;
     let pendingFee1 = tokensOwed1;
+    // PR-1b VERBOSE diagnostic (temporary):
+    if (typeof window !== "undefined") {
+      console.log(
+        `[V3 pendingFee] tokenId=${a.tokenId} pool=${pool} ` +
+          `liq=${a.liquidity} tickL=${a.tickLower} tickU=${a.tickUpper} ` +
+          `currentTick=${slot.tick} ` +
+          `fgGlobal=${fgGlobal ? "✓" : "✗"} ` +
+          `tickL=${tickLowerData ? "✓" : "✗"} ` +
+          `tickU=${tickUpperData ? "✓" : "✗"} ` +
+          `tokensOwed=[${a.tokensOwed0Raw},${a.tokensOwed1Raw}] ` +
+          `fgInsideLast=[${a.feeGrowthInside0LastX128.toString().slice(0, 12)}...,` +
+          `${a.feeGrowthInside1LastX128.toString().slice(0, 12)}...]`,
+      );
+    }
     if (fgGlobal && tickLowerData && tickUpperData) {
       const fgInside0Now = computeFeeGrowthInside({
         tickLower: a.tickLower,
@@ -411,6 +425,19 @@ export async function fetchV3PositionsForDeployment(
         feeGrowthInsideLastX128: a.feeGrowthInside1LastX128,
         feeGrowthInsideNowX128: fgInside1Now,
       });
+      if (typeof window !== "undefined") {
+        console.log(
+          `[V3 pendingFee] tokenId=${a.tokenId} computed pendingFee0=${pendingFee0} ` +
+            `pendingFee1=${pendingFee1} ` +
+            `fgInside0Now=${fgInside0Now.toString().slice(0, 12)}... ` +
+            `delta0=${(fgInside0Now - a.feeGrowthInside0LastX128).toString().slice(0, 14)}`,
+        );
+      }
+    } else if (typeof window !== "undefined") {
+      console.warn(
+        `[V3 pendingFee FALLBACK] tokenId=${a.tokenId} → tokensOwed only ` +
+          `(${pendingFee0} / ${pendingFee1})`,
+      );
     }
     out.push({
       deploymentId: dep.id,
