@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Archive, Eye, EyeOff, History, Info, Landmark, Pencil, RefreshCw, Settings2, SlidersHorizontal, Wallet, X } from "lucide-react";
+import { AlertTriangle, Archive, Eye, EyeOff, History, Info, Landmark, Loader2, Pencil, RefreshCw, Settings2, SlidersHorizontal, Wallet, X } from "lucide-react";
 
 import {
   Card,
@@ -881,6 +881,7 @@ function OpenPositionsPageInner(): JSX.Element {
                         onOpenPurchaseHistory={() =>
                           setActivePurchasePositionId(p.id)
                         }
+                        v3CostBasisLoading={computed.v3CostBasisLoading}
                       />
                     );
                   })}
@@ -992,6 +993,14 @@ function PositionRow({
   onToggleHidden: () => void;
   /** Открыть popup истории покупок underlying для этой позиции. */
   onOpenPurchaseHistory: () => void;
+  /**
+   * Task #50: useV3LiquidityEvents всё ещё фетчит Etherscan
+   * IncreaseLiquidity events. Пока loading=true:
+   *  - НЕ показывать страшный ⚠ «Cost basis incomplete» для orphan-кандидатов
+   *  - Показывать subtle spinner вместо ⚠ (юзер понимает «грузится», не «error»)
+   * После loading=false: если NFT всё ещё orphan → real ⚠.
+   */
+  v3CostBasisLoading: boolean;
 }) {
   const valueOverridden = valueOverride != null;
   const feesOverridden = feesOverride != null;
@@ -1069,12 +1078,29 @@ function PositionRow({
             {p.id}
           </Link>
           {/* Warning-slot: фиксированная ширина для всех строк, чтобы eye-button
-              не «прыгал» при появлении ⚠ badge на orphan-позициях. */}
+              не «прыгал» при появлении ⚠ badge на orphan-позициях.
+              Task #50: при v3CostBasisLoading=true — показываем subtle spinner
+              вместо ⚠ для V3 LP orphan-кандидатов (mint history ещё фетчится
+              из Etherscan; через 2-3s данные приедут и orphan flag clear'ится).
+              Это предотвращает scary первое впечатление для нового user'а. */}
           <span
             className="inline-flex h-4 w-4 shrink-0 items-center justify-center"
             aria-hidden={!p.coverageIncomplete && !hasFallbackCostBasis}
           >
-            {p.coverageIncomplete ? (
+            {p.coverageIncomplete && v3CostBasisLoading ? (
+              <span
+                className="inline-flex h-4 w-4 cursor-help items-center justify-center text-muted-foreground/60 animate-pulse"
+                title={
+                  "Загружаем историю mint'а из Etherscan…\n\n" +
+                  "Для V3 NFT позиций даты и cost basis подтягиваются из on-chain " +
+                  "истории. Это занимает 2-5 секунд при первом заходе. " +
+                  "После загрузки даты появятся автоматически."
+                }
+                aria-label="Loading V3 mint history"
+              >
+                <Loader2 className="h-3 w-3" />
+              </span>
+            ) : p.coverageIncomplete ? (
               <span
                 className="inline-flex h-4 w-4 cursor-help items-center justify-center text-amber-500"
                 title={
