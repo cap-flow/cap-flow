@@ -1213,20 +1213,26 @@ function PositionRow({
             </span>
           )}
         </div>
-        <div className="text-[10px] text-muted-foreground leading-tight">{p.itemName}</div>
+        {/* itemName переехал в столбец «Тип» — здесь оставляем только
+            healthRate badge для lending позиций. */}
         {p.healthRate != null && <HfBadge hf={p.healthRate} />}
       </td>
     ),
     kind: () => (
+      // Тип-столбец: показываем `p.itemName` (Yield / Deposit / Lending /
+      // Liquidity Pool — раздел внутри протокола из DeBank `item.name`),
+      // а цветом-badge остаётся kind (LP/Лендинг/Стейкинг/Perp) для
+      // быстрой визуальной категоризации. Подсветка через цвета KIND_BADGE.
       <td key="kind" className={cn(cellPad, "text-center")}>
         <div className="inline-flex items-center gap-1.5">
           <span
             className={cn(
-              "inline-block rounded border px-1.5 py-0.5 text-[10px]",
+              "inline-block rounded border px-1.5 py-0.5 text-[10px] capitalize",
               KIND_BADGE[p.kind],
             )}
+            title={`Категория: ${KIND_LABEL[p.kind]}`}
           >
-            {KIND_LABEL[p.kind]}
+            {p.itemName || KIND_LABEL[p.kind]}
           </span>
           {p.v3 && <V3InfoButton p={p} onChain={v3OnChain} />}
         </div>
