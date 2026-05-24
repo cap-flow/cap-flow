@@ -325,4 +325,16 @@ export interface V3CostBasisResult {
   /** Block timestamp earliest IncreaseLiquidity = mint time. Используется для
    *  fill'а OpenPosition.openedAt у orphan NFT'ов (где mint не в registry). */
   mintBlockTime?: number;
+  /**
+   * PR-2 (2026-05-25): per-tx DecreaseLiquidity амounts. Используется в
+   * `computeClaimedFeesUsd` / `buildClaimedFeesHistory` чтобы отделить
+   * principal portion (= DecreaseLiquidity.amount0/1) от collect fees,
+   * когда `multicall(decreaseLiquidity, collect)` mis-classify'ятся как
+   * claim_rewards с inflated amount (lex POS-007: $701 principal listed
+   * as fee, real fee ~\$15).
+   *
+   * Key: txHash (lowercased). Value: per-token raw amounts (decimals
+   * applied при consumption).
+   */
+  withdrawalsByTxHash?: Map<string, { amount0: number; amount1: number }>;
 }

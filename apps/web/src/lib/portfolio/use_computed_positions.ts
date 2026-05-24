@@ -45,6 +45,7 @@ import {
   type OpenPosition,
 } from "@/lib/portfolio/open_positions";
 import { applyV3CostBasisOverride } from "@/lib/portfolio/v3_cost_basis_override";
+import { applyV3ClaimedFeesSplit } from "@/lib/portfolio/v3_claimed_fees_split";
 import { applyLendingCostBasisOverride } from "@/lib/portfolio/lending_cost_basis_override";
 import { applyCexInheritanceCostBasisOverride } from "@/lib/portfolio/cex_inheritance_cost_basis_override";
 import { warnOnProvenanceIssues } from "@/lib/portfolio/position_provenance";
@@ -332,6 +333,16 @@ export function useComputedPositions(): ComputedPositions {
       }
       working = cexResult.positions;
     }
+    // PR-2 (2026-05-25): split inflated claim_rewards для V3 LP через
+    // DecreaseLiquidity events. Решает баг #1 classifier'а где
+    // multicall(decreaseLiquidity, collect) метится как claim целиком —
+    // principal portion inflated claimed (lex POS-007 \$701 principal listed
+    // как fee). Если Krystal primary ON и data есть → step 5 ниже перепишет.
+    // Если Krystal OFF / token нет в Krystal → этот fix остаётся authoritative.
+    if (v3CostBasisHook.data.size > 0 && v3.data.size > 0) {
+      working = applyV3ClaimedFeesSplit(working, v3.data, v3CostBasisHook.data);
+    }
+
     // PR-K3: Krystal primary mode → override V3 current state + fees
     // ПЕРЕД cross-validation (иначе divergences будут zero — мы сами
     // только что синхронизировали). Cost-basis side НЕ трогается.
