@@ -33,7 +33,26 @@
  */
 
 import type { OpenPosition } from "../portfolio/open_positions";
+import { isV3LpProtocol } from "../portfolio/open_positions";
 import type { KrystalV3Summary, TokenBreakdown } from "./adapter";
+
+/**
+ * WETH/ETH, WBTC/BTC canonicalization для pair-match fallback.
+ * Krystal NFT хранит wrapped (WETH), Capflow supplyTokens иногда native (ETH).
+ */
+function canonicalSymbol(s: string): string {
+  const u = s.toUpperCase();
+  if (u === "WETH") return "ETH";
+  if (u === "WBTC" || u === "TBTC" || u === "CBBTC") return "BTC";
+  if (u === "WSOL") return "SOL";
+  return u;
+}
+
+function sortedCanonPair(a: string, b: string): string {
+  const ca = canonicalSymbol(a);
+  const cb = canonicalSymbol(b);
+  return ca < cb ? `${ca}|${cb}` : `${cb}|${ca}`;
+}
 
 function toFeeByTokenEntry(
   t: TokenBreakdown,
@@ -113,23 +132,75 @@ function overrideOne(
     feesLifetimeUsd: newFeesLifetimeUsd,
     feeApr,
     feeAprLifetime,
+    // Fallback path: если matchedV3TokenId не был установлен (Base chain
+    // где Etherscan v2 unsupported / Alchemy 403) — проставляем его сейчас,
+    // чтобы downstream UI / overrides работали как обычно.
+    ...(base.matchedV3TokenId
+      ? {}
+      : { matchedV3TokenId: k.tokenId }),
   };
 }
 
 /**
- * Apply Krystal override на все V3 LP positions с matchedV3TokenId.
+ * Pair-match fallback: для V3 LP позиций без matchedV3TokenId (Base chain,
+ * где Etherscan v2 не поддерживает chain и Alchemy V3 cost-basis path
+ * 403'ит) пытаемся найти Krystal-запись по (ownerAddress, chainCode,
+ * sortedCanonPair). Применяем override только если match уникальный.
+ *
+ * Без owner address (legacy callers без map'а) фоллбэк выключается —
+ * pair alone слишком ambiguous (несколько wallet'ов могут держать тот же
+ * пул на той же цепи).
+ */
+function tryFallbackMatch(
+  p: OpenPosition,
+  walletAddress: string | undefined,
+  krystalEntries: readonly KrystalV3Summary[],
+): KrystalV3Summary | null {
+  if (!walletAddress) return null;
+  if (!isV3LpProtocol(p.protocol.name)) return null;
+  if (p.supplyTokens.length !== 2) return null;
+  const owner = walletAddress.toLowerCase();
+  const wantChain = p.chain.toLowerCase();
+  const wantPair = sortedCanonPair(
+    p.supplyTokens[0]!.symbol,
+    p.supplyTokens[1]!.symbol,
+  );
+  const matches = krystalEntries.filter((k) => {
+    if (k.ownerAddress !== owner) return false;
+    if (k.chainCode.toLowerCase() !== wantChain) return false;
+    if (k.status === "CLOSED") return false;
+    return sortedCanonPair(k.pair[0], k.pair[1]) === wantPair;
+  });
+  if (matches.length !== 1) return null;
+  return matches[0]!;
+}
+
+/**
+ * Apply Krystal override на все V3 LP positions.
+ * Primary path: match по `matchedV3TokenId`.
+ * Fallback path: для positions без matchedV3TokenId — match по
+ * (walletAddress, chain, pair) если walletAddressById предоставлен и
+ * Krystal вернул ровно одну подходящую запись (см. tryFallbackMatch).
+ *
  * Pure function — возвращает новый массив, не мутирует input.
  */
 export function applyKrystalV3Override(
   positions: readonly OpenPosition[],
   krystalByTokenId: ReadonlyMap<string, KrystalV3Summary>,
+  walletAddressById?: ReadonlyMap<string, string>,
 ): OpenPosition[] {
   if (krystalByTokenId.size === 0) {
     return positions.slice();
   }
+  const allEntries = Array.from(krystalByTokenId.values());
   return positions.map((p) => {
-    if (!p.matchedV3TokenId) return p;
-    const k = krystalByTokenId.get(p.matchedV3TokenId);
+    if (p.matchedV3TokenId) {
+      const k = krystalByTokenId.get(p.matchedV3TokenId);
+      if (!k) return p;
+      return overrideOne(p, k);
+    }
+    const wallet = walletAddressById?.get(p.walletId);
+    const k = tryFallbackMatch(p, wallet, allEntries);
     if (!k) return p;
     return overrideOne(p, k);
   });

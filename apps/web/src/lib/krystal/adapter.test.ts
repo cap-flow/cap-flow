@@ -128,6 +128,8 @@ describe("summary type contract", () => {
       protocolKey: "uniswapv3",
       pair: ["WETH", "USDC"],
       status: "IN_RANGE",
+      ownerAddress: "0xowner",
+      poolAddress: "0xpool",
       currentUsd: 1000,
       currentTokens: [{ symbol: "WETH", amount: 0.5, usd: 1000, address: "0x0" }],
       pendingFeeUsd: 0,

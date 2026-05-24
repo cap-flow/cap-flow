@@ -347,7 +347,20 @@ export function useComputedPositions(): ComputedPositions {
     // ПЕРЕД cross-validation (иначе divergences будут zero — мы сами
     // только что синхронизировали). Cost-basis side НЕ трогается.
     if (krystalPrimary && krystalV3.data.size > 0) {
-      working = applyKrystalV3Override(working, krystalV3.data);
+      // walletAddressById нужен для pair-match fallback (Base chain где
+      // Etherscan v2 unsupported / Alchemy 403 — matchedV3TokenId не
+      // выставляется обычным путём, но Krystal данные есть).
+      const walletAddressById = new Map<string, string>();
+      for (const l of loadedList) {
+        if (l.wallet.chain === "evm") {
+          walletAddressById.set(l.wallet.id, l.wallet.address);
+        }
+      }
+      working = applyKrystalV3Override(
+        working,
+        krystalV3.data,
+        walletAddressById,
+      );
     }
     // PR-K2: cross-validation log. В primary режиме diff'ы должны быть
     // ~0 (мы только что overrride'нули). В CV-only режиме покажет где
@@ -369,6 +382,7 @@ export function useComputedPositions(): ComputedPositions {
     krystalCrossValidate,
     krystalPrimary,
     krystalV3.data,
+    loadedList,
   ]);
 
   return {

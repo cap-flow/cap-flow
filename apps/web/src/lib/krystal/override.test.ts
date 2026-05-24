@@ -91,13 +91,19 @@ function summary(args: {
   pending?: { symbol: string; amount: number; usd: number }[];
   claimedUsd: number;
   claimed?: { symbol: string; amount: number; usd: number }[];
+  chainCode?: string;
+  pair?: [string, string];
+  ownerAddress?: string;
+  status?: KrystalV3Summary["status"];
 }): KrystalV3Summary {
   return {
     tokenId: args.tokenId,
-    chainCode: "arb",
+    chainCode: args.chainCode ?? "arb",
     protocolKey: "uniswapv3",
-    pair: ["WETH", "USDC"],
-    status: "IN_RANGE",
+    pair: args.pair ?? ["WETH", "USDC"],
+    status: args.status ?? "IN_RANGE",
+    ownerAddress: (args.ownerAddress ?? "0xowner").toLowerCase(),
+    poolAddress: "0xpool",
     currentUsd: args.currentUsd,
     currentTokens: args.current.map((t) => ({ ...t, address: "0x" })),
     pendingFeeUsd: args.pendingUsd,
@@ -340,6 +346,202 @@ describe("applyKrystalV3Override", () => {
     expect(p.currentUsd).toBeCloseTo(985.10, 1);
     expect(p.feesUsd).toBeCloseTo(9.15, 2);
     expect(p.feesLifetimeUsd).toBeCloseTo(9.15 + 80.38, 2);
+  });
+
+  describe("PR-K9 fallback: pair-match для positions без matchedV3TokenId", () => {
+    // Base chain: Etherscan v2 unified API не поддерживает Base + Alchemy
+    // 403'ит V3 cost-basis path, поэтому applyV3CostBasisOverride не ставит
+    // matchedV3TokenId. Krystal по-прежнему отдаёт позицию — fallback
+    // матчит по (ownerAddress, chainCode, sortedCanonPair).
+    it("Base chain: ставит matchedV3TokenId + apply override через pair match", () => {
+      const pos = basePos({
+        id: "POS-004",
+        // matchedV3TokenId намеренно НЕ задан
+        startUsd: 2000,
+        currentUsd: 1900,
+        ageDays: 90,
+        supply: [
+          { symbol: "WETH", amount: 0.5, currentUsd: 1000, startUsd: 1000 },
+          { symbol: "USDC", amount: 900, currentUsd: 900, startUsd: 1000 },
+        ],
+        feesUsd: 0,
+        feesClaimedUsd: 50,
+      });
+      // OpenPosition на Base chain.
+      const posBase: OpenPosition = { ...pos, chain: "base" };
+
+      const krystal = new Map<string, KrystalV3Summary>([
+        [
+          "4911255",
+          summary({
+            tokenId: "4911255",
+            currentUsd: 2064.92,
+            current: [
+              { symbol: "WETH", amount: 0.515, usd: 1080.0 },
+              { symbol: "USDC", amount: 984.92, usd: 984.92 },
+            ],
+            pendingUsd: 23.57,
+            pending: [{ symbol: "USDC", amount: 23.57, usd: 23.57 }],
+            claimedUsd: 55.4,
+            chainCode: "base",
+            ownerAddress: "0xLEXWALLET",
+          }),
+        ],
+      ]);
+      const walletAddressById = new Map([
+        ["wallet-1", "0xLEXWALLET"],
+      ]);
+
+      const out = applyKrystalV3Override([posBase], krystal, walletAddressById);
+      const p = out[0]!;
+
+      // Krystal applied
+      expect(p.currentUsd).toBeCloseTo(2064.92, 1);
+      expect(p.feesUsd).toBeCloseTo(23.57, 1);
+      // matchedV3TokenId backfilled (для downstream UI / overrides)
+      expect(p.matchedV3TokenId).toBe("4911255");
+      // claimed остаётся UCB
+      expect(p.feesClaimedUsd).toBe(50);
+    });
+
+    it("canonical WETH↔ETH match: position.supplyTokens=[ETH,USDC], Krystal pair=[WETH,USDC]", () => {
+      const pos = basePos({
+        id: "POS-X",
+        startUsd: 1000,
+        currentUsd: 1000,
+        supply: [
+          { symbol: "ETH", amount: 0.5, currentUsd: 500, startUsd: 500 },
+          { symbol: "USDC", amount: 500, currentUsd: 500, startUsd: 500 },
+        ],
+      });
+      const posBase: OpenPosition = { ...pos, chain: "base" };
+      const krystal = new Map<string, KrystalV3Summary>([
+        [
+          "999",
+          summary({
+            tokenId: "999",
+            currentUsd: 1200,
+            current: [{ symbol: "WETH", amount: 0.6, usd: 1200 }],
+            pendingUsd: 5, claimedUsd: 0,
+            chainCode: "base", ownerAddress: "0xw",
+          }),
+        ],
+      ]);
+      const out = applyKrystalV3Override(
+        [posBase],
+        krystal,
+        new Map([["wallet-1", "0xw"]]),
+      );
+      expect(out[0]!.matchedV3TokenId).toBe("999");
+      expect(out[0]!.currentUsd).toBe(1200);
+    });
+
+    it("ambiguous (2 Krystal entries same pair/chain/wallet) — bail, no match", () => {
+      const pos = basePos({
+        id: "POS-AMB",
+        startUsd: 1000, currentUsd: 1000,
+        supply: [
+          { symbol: "WETH", amount: 0.5, currentUsd: 500, startUsd: 500 },
+          { symbol: "USDC", amount: 500, currentUsd: 500, startUsd: 500 },
+        ],
+        feesUsd: 9,
+      });
+      const posBase: OpenPosition = { ...pos, chain: "base" };
+      // 2 Krystal positions same wallet/chain/pair (different fee tiers).
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["1", summary({
+          tokenId: "1", currentUsd: 2000,
+          current: [{ symbol: "WETH", amount: 1, usd: 2000 }],
+          pendingUsd: 50, claimedUsd: 0,
+          chainCode: "base", ownerAddress: "0xw",
+        })],
+        ["2", summary({
+          tokenId: "2", currentUsd: 3000,
+          current: [{ symbol: "WETH", amount: 1.5, usd: 3000 }],
+          pendingUsd: 25, claimedUsd: 0,
+          chainCode: "base", ownerAddress: "0xw",
+        })],
+      ]);
+      const out = applyKrystalV3Override(
+        [posBase], krystal, new Map([["wallet-1", "0xw"]]),
+      );
+      // Никакой override не применён.
+      expect(out[0]!.currentUsd).toBe(1000);
+      expect(out[0]!.matchedV3TokenId).toBeUndefined();
+    });
+
+    it("walletAddressById не передан — fallback выключен (legacy callers)", () => {
+      const pos = basePos({
+        id: "POS-LEG",
+        startUsd: 1000, currentUsd: 1000,
+        supply: [
+          { symbol: "WETH", amount: 0.5, currentUsd: 500, startUsd: 500 },
+          { symbol: "USDC", amount: 500, currentUsd: 500, startUsd: 500 },
+        ],
+      });
+      const posBase: OpenPosition = { ...pos, chain: "base" };
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["999", summary({
+          tokenId: "999", currentUsd: 2000,
+          current: [{ symbol: "WETH", amount: 1, usd: 2000 }],
+          pendingUsd: 5, claimedUsd: 0,
+          chainCode: "base", ownerAddress: "0xw",
+        })],
+      ]);
+      const out = applyKrystalV3Override([posBase], krystal);
+      // Без map'а — no-op.
+      expect(out[0]!.currentUsd).toBe(1000);
+      expect(out[0]!.matchedV3TokenId).toBeUndefined();
+    });
+
+    it("CLOSED Krystal position не используется как match", () => {
+      const pos = basePos({
+        id: "POS-CL",
+        startUsd: 1000, currentUsd: 1000,
+        supply: [
+          { symbol: "WETH", amount: 0.5, currentUsd: 500, startUsd: 500 },
+          { symbol: "USDC", amount: 500, currentUsd: 500, startUsd: 500 },
+        ],
+      });
+      const posBase: OpenPosition = { ...pos, chain: "base" };
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["999", summary({
+          tokenId: "999", currentUsd: 0,
+          current: [], pendingUsd: 0, claimedUsd: 100,
+          chainCode: "base", ownerAddress: "0xw",
+          status: "CLOSED",
+        })],
+      ]);
+      const out = applyKrystalV3Override(
+        [posBase], krystal, new Map([["wallet-1", "0xw"]]),
+      );
+      expect(out[0]!.matchedV3TokenId).toBeUndefined();
+      expect(out[0]!.currentUsd).toBe(1000);
+    });
+
+    it("wrong wallet — не матчит", () => {
+      const pos = basePos({
+        id: "POS-W",
+        startUsd: 1000, currentUsd: 1000,
+        supply: [
+          { symbol: "WETH", amount: 0.5, currentUsd: 500, startUsd: 500 },
+          { symbol: "USDC", amount: 500, currentUsd: 500, startUsd: 500 },
+        ],
+      });
+      const posBase: OpenPosition = { ...pos, chain: "base" };
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["999", summary({
+          tokenId: "999", currentUsd: 2000,
+          current: [{ symbol: "WETH", amount: 1, usd: 2000 }],
+          pendingUsd: 5, claimedUsd: 0,
+          chainCode: "base", ownerAddress: "0xotherwallet",
+        })],
+      ]);
+      const out = applyKrystalV3Override(
+        [posBase], krystal, new Map([["wallet-1", "0xMINE"]]),
+      );
+      expect(out[0]!.currentUsd).toBe(1000);
+    });
   });
 
   it("recomputes netPnlUsd и netPnlPct из нового currentUsd", () => {
