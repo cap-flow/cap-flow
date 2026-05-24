@@ -41,6 +41,13 @@ interface NavItem {
   labelKey: TranslationKey;
   icon: typeof LayoutDashboard;
   end: boolean;
+  /**
+   * Admin-only sections — скрыты для regular `user` role.
+   * Admin в impersonation-режиме (debug чужого аккаунта) ВИДИТ их
+   * (потому что использует admin-tools для аудита, не как сам user).
+   * Гейт: `isAdmin || isImpersonating`.
+   */
+  adminOnly?: boolean;
 }
 
 // Беспорядка нет: Реестр уже умеет подключить кошелёк и тянуть историю,
@@ -52,10 +59,12 @@ const NAV: NavItem[] = [
   { to: "/performance", labelKey: "nav.performance", icon: LineChart, end: false },
   { to: "/insights", labelKey: "nav.insights", icon: PieChart, end: false },
   { to: "/registry", labelKey: "nav.registry", icon: Receipt, end: false },
-  { to: "/assets", labelKey: "nav.assets", icon: Coins, end: false },
-  { to: "/timeline", labelKey: "nav.timeline", icon: Activity, end: false },
-  { to: "/tax", labelKey: "nav.tax", icon: FileText, end: false },
-  { to: "/coverage", labelKey: "nav.coverage", icon: Database, end: false },
+  // Admin-only: regular users этих разделов не видят (визуальный шум).
+  // Admin в impersonation видит — для дебага чужого аккаунта.
+  { to: "/assets", labelKey: "nav.assets", icon: Coins, end: false, adminOnly: true },
+  { to: "/timeline", labelKey: "nav.timeline", icon: Activity, end: false, adminOnly: true },
+  { to: "/tax", labelKey: "nav.tax", icon: FileText, end: false, adminOnly: true },
+  { to: "/coverage", labelKey: "nav.coverage", icon: Database, end: false, adminOnly: true },
 ];
 
 const SIDEBAR_W_OPEN = "w-64";
@@ -94,7 +103,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 function Sidebar() {
   const { collapsed, toggle, mobileOpen, setMobileOpen } = useSidebar();
   const t = useT();
-  const { isAdmin } = useAuth();
+  const { isAdmin, isImpersonating } = useAuth();
+  // Admin-only nav items видны: (1) самому admin'у, (2) admin'у в
+  // impersonation-сессии (он debug'ит чужой аккаунт через admin tools).
+  // Regular `user` role их не видит — visual clutter без use case.
+  const showAdminNav = isAdmin || isImpersonating;
 
   return (
     <aside
@@ -114,7 +127,7 @@ function Sidebar() {
       </div>
 
       <nav className={cn("flex-1 space-y-1", collapsed ? "px-2" : "px-3 py-2")}>
-        {NAV.map(({ to, labelKey, icon: Icon, end }) => {
+        {NAV.filter((item) => !item.adminOnly || showAdminNav).map(({ to, labelKey, icon: Icon, end }) => {
           const label = t(labelKey);
           return (
             <NavLink
