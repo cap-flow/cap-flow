@@ -1034,6 +1034,16 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
 
   const loadAll = useCallback(
     async (options?: { full?: boolean }) => {
+      // PR-K4: «Обновить» инвалидирует ВСЕ external-source кеши, не только
+      // DeBank wallet snapshots. Krystal V3 positions cache (24h TTL) — иначе
+      // юзер ткнул refresh, ожидает свежее, но Krystal данные остаются stale
+      // до истечения 24h.
+      try {
+        const { clearAllKrystalCache } = await import("@/lib/krystal/cache");
+        clearAllKrystalCache();
+      } catch {
+        /* cache module optional, ignore */
+      }
       for (const w of wallets.list) {
         // Не пропускаем уже загруженные — для них сделаем incremental.
         if (!keyFor(w.chain)) continue;
