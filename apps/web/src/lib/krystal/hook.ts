@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { Loaded } from "@/components/data/LoadedWalletsProvider";
 import { buildKrystalSummaryMap, type KrystalV3Summary } from "./adapter";
+import { readKrystalCache, writeKrystalCache } from "./cache";
 import { fetchKrystalUniswapV3Positions } from "./client";
 import type { KrystalPosition } from "./types";
 
@@ -69,13 +70,24 @@ export function useKrystalV3Positions(
       const all: KrystalPosition[] = [];
       const errors: string[] = [];
       let creditsLeft: number | null = null;
+      let cacheHits = 0;
+      let fetched = 0;
       for (const w of wallets) {
         if (cancelled) return;
+        // PR-K4: try 24h localStorage cache first.
+        const cached = readKrystalCache(w);
+        if (cached !== null) {
+          all.push(...cached);
+          cacheHits++;
+          continue;
+        }
         try {
           const { data, credits } = await fetchKrystalUniswapV3Positions(w, {
             signal: controller.signal,
           });
           all.push(...data);
+          writeKrystalCache(w, data);
+          fetched++;
           if (credits?.left != null) creditsLeft = credits.left;
         } catch (e) {
           if ((e as Error).name === "AbortError") return;
@@ -91,7 +103,9 @@ export function useKrystalV3Positions(
       });
       if (typeof window !== "undefined") {
         console.log(
-          `[Krystal V3] fetched ${all.length} positions from ${wallets.length} wallets` +
+          `[Krystal V3] ${all.length} positions ` +
+            `(${cacheHits} cache hits, ${fetched} fresh fetches) ` +
+            `from ${wallets.length} wallets` +
             (creditsLeft != null ? ` (credits left: ${creditsLeft})` : "") +
             (errors.length > 0 ? ` — errors: ${errors.join("; ")}` : ""),
         );
