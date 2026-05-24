@@ -21,7 +21,19 @@
  */
 
 const Q128 = 1n << 128n;
-const U256_MASK = (1n << 256n) - 1n;
+const U128_MASK = (1n << 128n) - 1n;
+const U256 = 1n << 256n;
+const U256_MASK = U256 - 1n;
+
+/**
+ * Unchecked uint256 modular arithmetic — повторяет поведение Solidity 0.8+
+ * `unchecked { ... }` блоков. Все вычитания / сложения с feeGrowth значениями
+ * должны идти через эту функцию, иначе JS signed bigint даёт неверный результат
+ * (Solidity wraps mod 2^256; mы должны делать то же).
+ */
+function modU256(x: bigint): bigint {
+  return ((x % U256) + U256) % U256;
+}
 
 export interface FeeGrowthInsideInput {
   tickLower: number;
@@ -59,12 +71,14 @@ export function computeFeeGrowthInside(input: FeeGrowthInsideInput): bigint {
   const outsideLower = input.feeGrowthOutsideLowerX128;
   const outsideUpper = input.feeGrowthOutsideUpperX128;
 
+  // All subtractions — unchecked uint256 (Solidity semantics). JS signed
+  // bigint sub gives wrong result when terms wrap.
   const feeGrowthBelow =
-    currentTick >= tickLower ? outsideLower : global - outsideLower;
+    currentTick >= tickLower ? outsideLower : modU256(global - outsideLower);
   const feeGrowthAbove =
-    currentTick < tickUpper ? outsideUpper : global - outsideUpper;
+    currentTick < tickUpper ? outsideUpper : modU256(global - outsideUpper);
 
-  return global - feeGrowthBelow - feeGrowthAbove;
+  return modU256(global - feeGrowthBelow - feeGrowthAbove);
 }
 
 export interface RealTimePendingFeeInput {
@@ -83,25 +97,33 @@ export interface RealTimePendingFeeInput {
 /**
  * Real-time pending fee в human-units = `(tokensOwed + accruedRaw) / 10^decimals`.
  *
- * `accruedRaw = liquidity × (now − last) / 2^128`.
+ * **КРИТИЧНО — repeat Solidity unchecked uint256 math**:
  *
- * Solidity делает unchecked sub: если `now < last` (теоретически, после
- * reset'а), wraps mod 2^256. В JS bigint signed → если результат
- * negative, считаем 0 (defensive — не показываем negative pending).
+ *   delta_uint256 = (now − last) mod 2^256
+ *   accrued_uint256 = (liquidity × delta) / 2^128
+ *   accrued_uint128 = accrued_uint256 mod 2^128   (Solidity uint128 cast = truncate low 128 bits)
+ *
+ * Это идентично NPM contract:
+ * ```solidity
+ * position.tokensOwed0 += uint128(
+ *   FullMath.mulDiv(
+ *     feeGrowthInside0X128 - position.feeGrowthInside0LastX128,  // unchecked uint256
+ *     position.liquidity,
+ *     FixedPoint128.Q128
+ *   )
+ * );
+ * ```
+ *
+ * Pre-fix bug (PR-1b first iteration, 2026-05-24): JS signed bigint sub
+ * давал `delta < 0` для in-range NFT'ов с ненулевыми feeGrowth (когда
+ * computed inside в signed math wraps), мы клампили в 0 → POS-001 lex@
+ * показывал $0 pending вместо $250. Fix: ALWAYS use `modU256`.
  */
 export function computeRealTimePendingFee(input: RealTimePendingFeeInput): number {
-  let delta = input.feeGrowthInsideNowX128 - input.feeGrowthInsideLastX128;
-  // Defensive: если delta negative (теоретический wrap или reset), используем
-  // 2-complement wrap mod 2^256 (как Solidity). Если после wrap всё ещё
-  // выглядит как «огромный positive», clamp на 0.
-  if (delta < 0n) {
-    const wrapped = (delta + (1n << 256n)) & U256_MASK;
-    // 50% порог: если wrapped > 2^255, это был "real negative" → 0
-    delta = wrapped > 1n << 255n ? 0n : wrapped;
-  }
-  const accruedRaw = (input.liquidity * delta) / Q128;
+  const delta = modU256(input.feeGrowthInsideNowX128 - input.feeGrowthInsideLastX128);
+  // Solidity: uint128(FullMath.mulDiv(delta_uint256, liquidity, Q128))
+  // mulDiv = floor(a × b / c) within uint256, затем cast в uint128 = truncate.
+  const accruedRaw = ((input.liquidity * delta) / Q128) & U128_MASK;
   const totalRaw = input.tokensOwedRaw + accruedRaw;
-  // Convert to human units (Number). For typical V3 fees this stays well
-  // within Number precision (max ~1e18 / 1e6 = 1e12, far from 2^53).
   return Number(totalRaw) / 10 ** input.decimals;
 }
