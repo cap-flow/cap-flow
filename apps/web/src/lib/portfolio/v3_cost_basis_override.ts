@@ -37,6 +37,20 @@ import { v3PositionKey, type V3PositionMap } from "@/lib/v3/hook";
 import type { V3CostBasisResult } from "@/lib/v3/liquidity_events";
 import type { V3Position } from "@/lib/v3/positions";
 import type { OpenPosition } from "./open_positions";
+import { isStableSymbol } from "./protocols";
+
+/**
+ * Local normalize: WETH→ETH alias (canonical wrapped). Дубль с
+ * `open_positions.ts:normalizeSymbol` (которая private). Используется
+ * для cross-position price lookup'а — чтобы цена ETH из одной позиции
+ * матчилась с WETH из другой.
+ */
+function normalizeSymbol(s: string): string {
+  const u = s.toUpperCase();
+  if (u === "WETH") return "ETH";
+  if (u === "WBTC" || u === "TBTC" || u === "CBBTC") return "BTC";
+  return u;
+}
 
 /**
  * Orphan-NFT recovery helper: применяется к любой OpenPosition с
@@ -101,9 +115,49 @@ function backfillOrphanMeta(
  * Цены берём из supplyTokens (live prices из DeBank). Если symbol
  * не найден → fallback на supply.usd / supply.amount как proxy.
  */
+/**
+ * PR-1 Bug #2 (2026-05-24): price resolution с fallback'ами.
+ *
+ * Цепочка приоритетов (первый положительный wins):
+ *   1. `priceBySymbol` — цена из исходных supplyTokens этой позиции
+ *      (DeBank live prices для токенов с amount>0 && currentUsd>0)
+ *   2. **Stable** ($1) — для USDC/USDT/DAI/USD₮0/EUR-stables/etc.
+ *   3. `currentPrices` — cross-position lookup, цена этого токена из
+ *      ДРУГИХ позиций портфеля где DeBank вернул валидные данные
+ *   4. 0 (последний resort — будет null USD, но хотя бы amount правильный)
+ *
+ * lex POS-003: DeBank вернул USDC amount=0/currentUsd=0 (Phase J swap bug)
+ * → priceBySymbol не содержит USDC → fallback на step 2 → USDC=$1 →
+ * currentUsd корректно $376.85 (а не $0).
+ */
+function resolvePrice(
+  symbol: string,
+  priceBySymbol: ReadonlyMap<string, number>,
+  currentPrices?: ReadonlyMap<string, number>,
+): number {
+  const upper = symbol.toUpperCase();
+  const fromSupply = priceBySymbol.get(upper);
+  if (fromSupply && fromSupply > 0) return fromSupply;
+  if (isStableSymbol(symbol)) return 1;
+  if (currentPrices) {
+    const fromCross = currentPrices.get(normalizeSymbol(symbol));
+    if (fromCross && fromCross > 0) return fromCross;
+    const fromUpper = currentPrices.get(upper);
+    if (fromUpper && fromUpper > 0) return fromUpper;
+  }
+  return 0;
+}
+
 function overrideCurrentFromOnChain(
   base: OpenPosition,
   nft: V3Position,
+  /**
+   * PR-1 Bug #2: cross-position price lookup для тех же symbol'ов в других
+   * positions портфеля. Используется когда DeBank в исходной позиции вернул
+   * нулевой amount/currentUsd → priceBySymbol пустой → берём цену из других
+   * позиций где она есть. Ключи: normalized uppercase symbol.
+   */
+  currentPrices?: ReadonlyMap<string, number>,
 ): OpenPosition {
   // Build per-symbol price map from current supply (DeBank live prices).
   const priceBySymbol = new Map<string, number>();
@@ -122,19 +176,66 @@ function overrideCurrentFromOnChain(
   ];
   // New supplyTokens — preserve startUsd/avgBuyPrice (cost-basis side), но
   // override amount/currentUsd (current-state side).
-  const newSupply = base.supplyTokens.map((t) => {
+  const newSupplyPreStart = base.supplyTokens.map((t) => {
     const oc = onChain.find(
       (x) => x.symbol.toUpperCase() === t.symbol.toUpperCase(),
     );
     if (!oc) return t;
-    const px = priceBySymbol.get(t.symbol.toUpperCase()) ?? 0;
+    const px = resolvePrice(t.symbol, priceBySymbol, currentPrices);
     return {
       ...t,
       amount: oc.amount,
       currentUsd: oc.amount * px,
     };
   });
-  const newCurrentUsd = newSupply.reduce((s, t) => s + t.currentUsd, 0);
+  const newCurrentUsd = newSupplyPreStart.reduce((s, t) => s + t.currentUsd, 0);
+
+  // PR-1 Bug #6: redistribute supplyTokens[].startUsd pro-rata по новому
+  // currentUsd-распределению. Без этого Σ supplyTokens.startUsd
+  // расходится с position.startUsd (POS-006 lex@: $46 drift), потому что
+  // Phase J менял amounts но оставлял старый per-token startUsd.
+  //
+  // Логика: position-level startUsd authoritative. Per-token split — это
+  // attribution «сколько из общего cost basis приходится на каждый side».
+  // После того как amounts изменились с on-chain, разумный split — pro-rata
+  // по новому currentUsd (если в-диапазоне, отражает реальное распределение).
+  // Если все newCurrentUsd = 0 — fallback на ровный split.
+  const newSupply = (() => {
+    if (newCurrentUsd <= 0 || base.startUsd <= 0) return newSupplyPreStart;
+    return newSupplyPreStart.map((t) => ({
+      ...t,
+      startUsd: (t.currentUsd / newCurrentUsd) * base.startUsd,
+    }));
+  })();
+
+  // PR-1 Bug #3: pending fees — override с on-chain pendingFee0/1.
+  // DeBank `lp.rewards` кешируется и часто stale (lex POS-003: $236.58 vs
+  // real $14.60 на 19 дней stale после claim). On-chain truth wins.
+  //
+  // Используется ТОЛЬКО для v3_rewards (V3 LP). supply_yield (Aave/Compound)
+  // не трогаем — там feesUsd derived иначе.
+  let newFeesUsd: number | null = base.feesUsd;
+  let newFeesByToken: OpenPosition["feesByToken"] = base.feesByToken;
+  if (base.feesSource === "v3_rewards") {
+    const feeAmounts = [
+      { symbol: nft.token0.symbol, amount: nft.pendingFee0 },
+      { symbol: nft.token1.symbol, amount: nft.pendingFee1 },
+    ];
+    const newFees = feeAmounts
+      .filter((f) => f.amount > 0)
+      .map((f) => {
+        const px = resolvePrice(f.symbol, priceBySymbol, currentPrices);
+        return {
+          symbol: f.symbol,
+          amount: f.amount,
+          usd: f.amount * px,
+          nativeApr: null,
+        };
+      });
+    newFeesUsd = newFees.reduce((s, f) => s + f.usd, 0);
+    newFeesByToken = newFees;
+  }
+
   // PnL recompute (collateral-side only, H6 invariant).
   const newPnlUsd = newCurrentUsd - base.startUsd;
   const newPnlPct =
@@ -145,6 +246,8 @@ function overrideCurrentFromOnChain(
     currentUsd: newCurrentUsd,
     netPnlUsd: newPnlUsd,
     netPnlPct: newPnlPct,
+    feesUsd: newFeesUsd,
+    feesByToken: newFeesByToken,
   };
 }
 
@@ -164,6 +267,29 @@ export function applyV3CostBasisOverride(
   const result: OpenPosition[] = positions.map((p) => p);
   const warnings: string[] = [];
   let overriddenCount = 0;
+
+  // PR-1 Bug #2: cross-position price lookup. Собираем по всем positions
+  // карту symbol → price (USD/unit) из supplyTokens где DeBank вернул
+  // валидные значения. Когда override обнаруживает symbol с нулевой ценой
+  // в исходной позиции — fallback на эту карту.
+  //
+  // Также включаем debtTokens (для borrow positions live price оракул там
+  // тоже валиден). Берём ПЕРВЫЙ валидный price per symbol — все DEX'ы
+  // одного chain'а должны давать почти-identical цены.
+  const currentPrices = new Map<string, number>();
+  const noteIfFresh = (symbol: string, amount: number, usd: number): void => {
+    if (amount <= 0 || usd <= 0) return;
+    const px = usd / amount;
+    if (px <= 0 || !Number.isFinite(px)) return;
+    const upper = symbol.toUpperCase();
+    if (!currentPrices.has(upper)) currentPrices.set(upper, px);
+    const norm = normalizeSymbol(symbol);
+    if (!currentPrices.has(norm)) currentPrices.set(norm, px);
+  };
+  for (const p of positions) {
+    for (const t of p.supplyTokens) noteIfFresh(t.symbol, t.amount, t.currentUsd);
+    for (const t of p.debtTokens) noteIfFresh(t.symbol, t.amount, t.currentUsd);
+  }
 
   if (v3PositionMap.size === 0 || v3CostBasis.size === 0) {
     return { positions: result, overriddenCount: 0, warnings: [] };
@@ -252,7 +378,7 @@ export function applyV3CostBasisOverride(
           if (nftForCb) {
             next = backfillOrphanMeta(next, cb, nftForCb);
             // Phase J (Task #51): on-chain truth для current state.
-            next = overrideCurrentFromOnChain(next, nftForCb);
+            next = overrideCurrentFromOnChain(next, nftForCb, currentPrices);
           }
           result[x.idx] = next;
           matchedTotalAuth.push(newStartUsd);
@@ -270,7 +396,7 @@ export function applyV3CostBasisOverride(
         if (nftForCb) {
           next = backfillOrphanMeta(next, cb, nftForCb);
           // Phase J (Task #51): on-chain truth для current state.
-          next = overrideCurrentFromOnChain(next, nftForCb);
+          next = overrideCurrentFromOnChain(next, nftForCb, currentPrices);
         }
         // H6: do NOT subtract currentDebtUsd. PnL is the change in
         // collateral value only; debt is a separate liability tracked
@@ -389,7 +515,7 @@ export function applyV3CostBasisOverride(
           };
           next = backfillOrphanMeta(next, cb, nft);
           // Phase J (Task #51): on-chain truth для current state.
-          next = overrideCurrentFromOnChain(next, nft);
+          next = overrideCurrentFromOnChain(next, nft, currentPrices);
           result[item.idx] = next;
           continue;
         }
@@ -404,7 +530,7 @@ export function applyV3CostBasisOverride(
         }
         next = backfillOrphanMeta(next, cb, nft);
         // Phase J (Task #51): on-chain truth для current state.
-        next = overrideCurrentFromOnChain(next, nft);
+        next = overrideCurrentFromOnChain(next, nft, currentPrices);
         // H6: do NOT subtract currentDebtUsd. PnL is the change in
         // collateral value only; debt is a separate liability tracked
         // via `currentDebtUsd`. Subtracting it here double-counts the
