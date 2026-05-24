@@ -968,6 +968,7 @@ function PositionRow({
   hidden,
   onToggleHidden,
   onOpenPurchaseHistory,
+  v3CostBasisLoading,
 }: {
   p: OpenPosition;
   v3Map: V3PositionMap;
