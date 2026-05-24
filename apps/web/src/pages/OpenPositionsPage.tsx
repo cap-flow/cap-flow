@@ -382,9 +382,40 @@ function OpenPositionsPageInner(): JSX.Element {
     });
   };
 
-  const [walletFilter, setWalletFilter] = useState<string | "all">("all");
-  const [kindFilter, setKindFilter] = useState<PositionKind | "all">("all");
+  // PR #5 multi-select filters. Empty Set = «все» (no filter applied).
+  // Toggle-on-click chip behavior. groupFilter остался single — это broad
+  // dimension (evm/sol/coinstats), не имеет смысла мульти-выбора с walletFilter.
+  const [walletFilter, setWalletFilter] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [kindFilter, setKindFilter] = useState<ReadonlySet<PositionKind>>(
+    () => new Set(),
+  );
+  const [chainFilter, setChainFilter] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [protocolFilter, setProtocolFilter] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [groupFilter, setGroupFilter] = useState<ChainGroup | "all">("all");
+
+  // PR #5 status toggles (boolean filters). Each independent.
+  const [filterPnL, setFilterPnL] = useState<"all" | "profit" | "loss">("all");
+  const [filterRange, setFilterRange] = useState<"all" | "in" | "out">("all");
+  const [filterHasFee, setFilterHasFee] = useState(false);
+  const [filterHasDebt, setFilterHasDebt] = useState(false);
+
+  // Helper toggles for multi-select sets.
+  function toggleInSet<T>(
+    set: ReadonlySet<T>,
+    item: T,
+    setter: (s: ReadonlySet<T>) => void,
+  ): void {
+    const next = new Set(set);
+    if (next.has(item)) next.delete(item);
+    else next.add(item);
+    setter(next);
+  }
 
   // Кол-во загруженных кошельков по chain-группам — для бейджей в чипах.
   const groupCounts = useMemo(() => {
@@ -468,8 +499,18 @@ function OpenPositionsPageInner(): JSX.Element {
       const wallet = loadedList.find((l) => l.wallet.id === p.walletId)?.wallet;
       if (!wallet || chainGroupOfWallet(wallet) !== groupFilter) return false;
     }
-    if (walletFilter !== "all" && p.walletId !== walletFilter) return false;
-    if (kindFilter !== "all" && p.kind !== kindFilter) return false;
+    // Multi-select filters: empty Set = all (no constraint).
+    if (walletFilter.size > 0 && !walletFilter.has(p.walletId)) return false;
+    if (kindFilter.size > 0 && !kindFilter.has(p.kind)) return false;
+    if (chainFilter.size > 0 && !chainFilter.has(p.chain)) return false;
+    if (protocolFilter.size > 0 && !protocolFilter.has(p.protocol.id)) return false;
+    // Status toggles (independent).
+    if (filterPnL === "profit" && p.netPnlUsd <= 0) return false;
+    if (filterPnL === "loss" && p.netPnlUsd >= 0) return false;
+    if (filterRange === "in" && p.v3?.inRange === false) return false;
+    if (filterRange === "out" && p.v3?.inRange !== false) return false;
+    if (filterHasFee && (p.feesUsd ?? 0) <= 0) return false;
+    if (filterHasDebt && p.currentDebtUsd <= 0) return false;
     return true;
   });
 
@@ -744,11 +785,28 @@ function OpenPositionsPageInner(): JSX.Element {
           groupFilter={groupFilter}
           setGroupFilter={setGroupFilter}
           walletFilter={walletFilter}
-          setWalletFilter={setWalletFilter}
+          toggleWallet={(id) => toggleInSet(walletFilter, id, setWalletFilter)}
+          clearWallets={() => setWalletFilter(new Set())}
           kindFilter={kindFilter}
-          setKindFilter={setKindFilter}
+          toggleKind={(k) => toggleInSet(kindFilter, k, setKindFilter)}
+          clearKinds={() => setKindFilter(new Set())}
+          chainFilter={chainFilter}
+          toggleChain={(c) => toggleInSet(chainFilter, c, setChainFilter)}
+          clearChains={() => setChainFilter(new Set())}
+          protocolFilter={protocolFilter}
+          toggleProtocol={(id) => toggleInSet(protocolFilter, id, setProtocolFilter)}
+          clearProtocols={() => setProtocolFilter(new Set())}
+          filterPnL={filterPnL}
+          setFilterPnL={setFilterPnL}
+          filterRange={filterRange}
+          setFilterRange={setFilterRange}
+          filterHasFee={filterHasFee}
+          setFilterHasFee={setFilterHasFee}
+          filterHasDebt={filterHasDebt}
+          setFilterHasDebt={setFilterHasDebt}
           groupCounts={groupCounts}
           loadedList={loadedList}
+          allPositions={positionsWithAlchemyOverride}
         />
         <div className="ml-auto">
           <ColumnSettings
@@ -3564,28 +3622,74 @@ function Stat({
 /* ----------------------- Сводный фильтр-дропдаун --------------------------- */
 
 /**
- * Свёрнутая в один popover панель фильтров: Источник + Кошелёк + Тип.
- * Кнопка показывает кол-во активных не-default фильтров. Клик открывает
- * popover с тремя секциями чипов и кнопкой «Сбросить».
+ * Multi-select filter panel (PR #5).
+ *
+ * Filters покрывают все измерения отображаемые в Open Positions list:
+ *   - Источник (single, broad): EVM / Solana / CoinStats
+ *   - Кошелёк (multi): любая комбинация из загруженных
+ *   - Тип позиции (multi): LP / Lending / Staking / Perp / Other
+ *   - Chain (multi): eth / arb / op / base / matic / sol / etc.
+ *   - Протокол (multi): Uniswap V3 / Aave V3 / GMX / Pendle / etc.
+ *   - PnL знак (radio): прибыль / убыток / все
+ *   - V3 range (radio): in-range / out-of-range / все
+ *   - Только с pending fee (toggle)
+ *   - Только с долгом (toggle)
+ *
+ * Empty Set = «все» (no filter). Chip toggle adds/removes from Set.
+ * Кнопка показывает Σ активных не-default фильтров для badge'а.
  */
 function FiltersDropdown({
   groupFilter,
   setGroupFilter,
   walletFilter,
-  setWalletFilter,
+  toggleWallet,
+  clearWallets,
   kindFilter,
-  setKindFilter,
+  toggleKind,
+  clearKinds,
+  chainFilter,
+  toggleChain,
+  clearChains,
+  protocolFilter,
+  toggleProtocol,
+  clearProtocols,
+  filterPnL,
+  setFilterPnL,
+  filterRange,
+  setFilterRange,
+  filterHasFee,
+  setFilterHasFee,
+  filterHasDebt,
+  setFilterHasDebt,
   groupCounts,
   loadedList,
+  allPositions,
 }: {
   groupFilter: ChainGroup | "all";
   setGroupFilter: (v: ChainGroup | "all") => void;
-  walletFilter: string | "all";
-  setWalletFilter: (v: string | "all") => void;
-  kindFilter: PositionKind | "all";
-  setKindFilter: (v: PositionKind | "all") => void;
+  walletFilter: ReadonlySet<string>;
+  toggleWallet: (id: string) => void;
+  clearWallets: () => void;
+  kindFilter: ReadonlySet<PositionKind>;
+  toggleKind: (k: PositionKind) => void;
+  clearKinds: () => void;
+  chainFilter: ReadonlySet<string>;
+  toggleChain: (c: string) => void;
+  clearChains: () => void;
+  protocolFilter: ReadonlySet<string>;
+  toggleProtocol: (id: string) => void;
+  clearProtocols: () => void;
+  filterPnL: "all" | "profit" | "loss";
+  setFilterPnL: (v: "all" | "profit" | "loss") => void;
+  filterRange: "all" | "in" | "out";
+  setFilterRange: (v: "all" | "in" | "out") => void;
+  filterHasFee: boolean;
+  setFilterHasFee: (v: boolean) => void;
+  filterHasDebt: boolean;
+  setFilterHasDebt: (v: boolean) => void;
   groupCounts: Record<ChainGroup, number>;
   loadedList: { wallet: SavedWallet }[];
+  allPositions: OpenPosition[];
 }) {
   const visibleGroups = (["evm", "sol", "coinstats"] as const).filter(
     (g) => groupCounts[g] > 0,
@@ -3599,29 +3703,77 @@ function FiltersDropdown({
       groupFilter === "all" || chainGroupOfWallet(l.wallet) === groupFilter,
   );
 
+  // Уникальные chains/protocols выводим из текущих positions (только то
+  // что реально есть в портфеле, нет смысла показывать chain без позиций).
+  const chainsInUse = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of allPositions) m.set(p.chain, (m.get(p.chain) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  }, [allPositions]);
+  const protocolsInUse = useMemo(() => {
+    const m = new Map<string, { name: string; count: number }>();
+    for (const p of allPositions) {
+      const cur = m.get(p.protocol.id) ?? { name: p.protocol.name, count: 0 };
+      cur.count += 1;
+      m.set(p.protocol.id, cur);
+    }
+    return [...m.entries()]
+      .map(([id, v]) => ({ id, name: v.name, count: v.count }))
+      .sort((a, b) => b.count - a.count);
+  }, [allPositions]);
+
   // Кол-во активных не-default фильтров — для бейджа на кнопке.
   let activeCount = 0;
   if (groupFilter !== "all") activeCount++;
-  if (walletFilter !== "all") activeCount++;
-  if (kindFilter !== "all") activeCount++;
+  if (walletFilter.size > 0) activeCount++;
+  if (kindFilter.size > 0) activeCount++;
+  if (chainFilter.size > 0) activeCount++;
+  if (protocolFilter.size > 0) activeCount++;
+  if (filterPnL !== "all") activeCount++;
+  if (filterRange !== "all") activeCount++;
+  if (filterHasFee) activeCount++;
+  if (filterHasDebt) activeCount++;
 
-  // Подпись кнопки: «Фильтр» если ничего не выбрано, иначе summary активных.
+  // Подпись кнопки: «Фильтр» если ничего не выбрано, иначе короткая
+  // сводка количеств активных секций.
   const buttonSummary = (() => {
     if (activeCount === 0) return "Фильтр";
     const parts: string[] = [];
     if (groupFilter !== "all") parts.push(CHAIN_GROUP_LABEL[groupFilter]);
-    if (walletFilter !== "all") {
-      const w = loadedList.find((l) => l.wallet.id === walletFilter);
+    if (walletFilter.size === 1) {
+      const w = loadedList.find((l) => walletFilter.has(l.wallet.id));
       if (w) parts.push(w.wallet.name);
+    } else if (walletFilter.size > 1) {
+      parts.push(`${walletFilter.size} кошельков`);
     }
-    if (kindFilter !== "all") parts.push(KIND_LABEL[kindFilter]);
-    return parts.join(" · ");
+    if (kindFilter.size === 1) {
+      const k = [...kindFilter][0]!;
+      parts.push(KIND_LABEL[k]);
+    } else if (kindFilter.size > 1) {
+      parts.push(`${kindFilter.size} типов`);
+    }
+    if (chainFilter.size > 0) parts.push(`${chainFilter.size} chain`);
+    if (protocolFilter.size > 0) parts.push(`${protocolFilter.size} проток.`);
+    if (filterPnL === "profit") parts.push("прибыль");
+    if (filterPnL === "loss") parts.push("убыток");
+    if (filterRange === "in") parts.push("в диап.");
+    if (filterRange === "out") parts.push("вне диап.");
+    if (filterHasFee) parts.push("с fee");
+    if (filterHasDebt) parts.push("с долгом");
+    // Truncate to keep button reasonable.
+    return parts.slice(0, 3).join(" · ") + (parts.length > 3 ? " …" : "");
   })();
 
   const resetAll = () => {
     setGroupFilter("all");
-    setWalletFilter("all");
-    setKindFilter("all");
+    clearWallets();
+    clearKinds();
+    clearChains();
+    clearProtocols();
+    setFilterPnL("all");
+    setFilterRange("all");
+    setFilterHasFee(false);
+    setFilterHasDebt(false);
   };
 
   const trigger = (
@@ -3644,9 +3796,9 @@ function FiltersDropdown({
   return (
     <div className="flex items-center gap-2">
       <DetailsPopover label={trigger}>
-        <div className="space-y-3 p-1 text-xs">
+        <div className="max-h-[70vh] w-[420px] space-y-3 overflow-y-auto p-1 text-xs">
           {showGroupRow && (
-            <FilterSection title="Источник">
+            <FilterSection title="Источник (single)">
               <Chip
                 active={groupFilter === "all"}
                 onClick={() => setGroupFilter("all")}
@@ -3656,15 +3808,7 @@ function FiltersDropdown({
                 <Chip
                   key={g}
                   active={groupFilter === g}
-                  onClick={() => {
-                    setGroupFilter(g);
-                    // Если текущий per-wallet фильтр выпадает из новой группы
-                    // — сбрасываем его, иначе пользователь увидит «нет данных».
-                    if (walletFilter !== "all") {
-                      const w = loadedList.find((l) => l.wallet.id === walletFilter);
-                      if (w && chainGroupOfWallet(w.wallet) !== g) setWalletFilter("all");
-                    }
-                  }}
+                  onClick={() => setGroupFilter(g)}
                   label={CHAIN_GROUP_LABEL[g]}
                   count={groupCounts[g]}
                 />
@@ -3672,48 +3816,97 @@ function FiltersDropdown({
             </FilterSection>
           )}
           {showWalletRow && visibleWallets.length > 0 && (
-            <FilterSection title="Кошелёк">
-              <Chip
-                active={walletFilter === "all"}
-                onClick={() => setWalletFilter("all")}
-                label="Все"
-                count={visibleWallets.length}
-              />
+            <FilterSection
+              title={`Кошелёк${walletFilter.size > 0 ? ` (${walletFilter.size})` : ""}`}
+              onClear={walletFilter.size > 0 ? clearWallets : undefined}
+            >
               {visibleWallets.map((l) => (
                 <Chip
                   key={l.wallet.id}
-                  active={walletFilter === l.wallet.id}
-                  onClick={() => setWalletFilter(l.wallet.id)}
+                  active={walletFilter.has(l.wallet.id)}
+                  onClick={() => toggleWallet(l.wallet.id)}
                   label={l.wallet.name}
                   chain={l.wallet.chain}
                 />
               ))}
             </FilterSection>
           )}
-          <FilterSection title="Тип позиции">
-            <Chip
-              active={kindFilter === "all"}
-              onClick={() => setKindFilter("all")}
-              label="Все"
-            />
-            {(["lending", "lp", "staking", "perp"] as const).map((k) => (
+          <FilterSection
+            title={`Тип позиции${kindFilter.size > 0 ? ` (${kindFilter.size})` : ""}`}
+            onClear={kindFilter.size > 0 ? clearKinds : undefined}
+          >
+            {(["lending", "lp", "staking", "perp", "other"] as const).map((k) => (
               <Chip
                 key={k}
-                active={kindFilter === k}
-                onClick={() => setKindFilter(k)}
+                active={kindFilter.has(k)}
+                onClick={() => toggleKind(k)}
                 label={KIND_LABEL[k]}
               />
             ))}
           </FilterSection>
+          {chainsInUse.length > 1 && (
+            <FilterSection
+              title={`Сеть${chainFilter.size > 0 ? ` (${chainFilter.size})` : ""}`}
+              onClear={chainFilter.size > 0 ? clearChains : undefined}
+            >
+              {chainsInUse.map(([chain, count]) => (
+                <Chip
+                  key={chain}
+                  active={chainFilter.has(chain)}
+                  onClick={() => toggleChain(chain)}
+                  label={chain}
+                  count={count}
+                />
+              ))}
+            </FilterSection>
+          )}
+          {protocolsInUse.length > 1 && (
+            <FilterSection
+              title={`Протокол${protocolFilter.size > 0 ? ` (${protocolFilter.size})` : ""}`}
+              onClear={protocolFilter.size > 0 ? clearProtocols : undefined}
+            >
+              {protocolsInUse.map((p) => (
+                <Chip
+                  key={p.id}
+                  active={protocolFilter.has(p.id)}
+                  onClick={() => toggleProtocol(p.id)}
+                  label={p.name}
+                  count={p.count}
+                />
+              ))}
+            </FilterSection>
+          )}
+          <FilterSection title="PnL">
+            <Chip active={filterPnL === "all"} onClick={() => setFilterPnL("all")} label="Все" />
+            <Chip active={filterPnL === "profit"} onClick={() => setFilterPnL("profit")} label="Только прибыль" />
+            <Chip active={filterPnL === "loss"} onClick={() => setFilterPnL("loss")} label="Только убыток" />
+          </FilterSection>
+          <FilterSection title="V3 диапазон">
+            <Chip active={filterRange === "all"} onClick={() => setFilterRange("all")} label="Все" />
+            <Chip active={filterRange === "in"} onClick={() => setFilterRange("in")} label="В диапазоне" />
+            <Chip active={filterRange === "out"} onClick={() => setFilterRange("out")} label="Вне диапазона" />
+          </FilterSection>
+          <FilterSection title="Статусы">
+            <Chip
+              active={filterHasFee}
+              onClick={() => setFilterHasFee(!filterHasFee)}
+              label="С pending fee"
+            />
+            <Chip
+              active={filterHasDebt}
+              onClick={() => setFilterHasDebt(!filterHasDebt)}
+              label="С долгом"
+            />
+          </FilterSection>
           {activeCount > 0 && (
-            <div className="flex justify-end border-t border-border pt-2">
+            <div className="sticky bottom-0 flex justify-end border-t border-border bg-card pt-2">
               <button
                 type="button"
                 onClick={resetAll}
                 className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
               >
                 <X className="h-3 w-3" />
-                Сбросить
+                Сбросить все ({activeCount})
               </button>
             </div>
           )}
@@ -3726,14 +3919,29 @@ function FiltersDropdown({
 function FilterSection({
   title,
   children,
+  onClear,
 }: {
   title: string;
   children: React.ReactNode;
+  /** PR #5: per-section clear button (multi-select Sets). */
+  onClear?: () => void;
 }) {
   return (
     <div>
-      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-        {title}
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          {title}
+        </span>
+        {onClear && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="rounded px-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Очистить эту секцию"
+          >
+            ✕
+          </button>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-1.5">{children}</div>
     </div>
