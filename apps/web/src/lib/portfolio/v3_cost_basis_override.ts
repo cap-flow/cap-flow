@@ -240,6 +240,24 @@ function overrideCurrentFromOnChain(
   const newPnlUsd = newCurrentUsd - base.startUsd;
   const newPnlPct =
     base.startUsd > 0 ? (newPnlUsd / base.startUsd) * 100 : 0;
+
+  // Bug A fix (2026-05-25 lex@ audit): после override pending fees
+  // (feesUsd) нужно пересчитать `feesLifetimeUsd = pending + claimed`,
+  // иначе lifetime остаётся stale с OLD pending. Проявлялось так:
+  //   POS-006: feesUsd → $0 (Phase J), feesClaimedUsd $261.69 (UCB),
+  //   но feesLifetimeUsd $294.49 = $32.80 (OLD pending) + $261.69.
+  // Также recompute `feeAprLifetime` с правильным lifetime.
+  const newFeesLifetimeUsd = (newFeesUsd ?? 0) + base.feesClaimedUsd;
+  const ageDays = base.ageDays;
+  const newFeeAprLifetime =
+    ageDays && ageDays > 0 && base.startUsd > 0 && newFeesLifetimeUsd > 0
+      ? (newFeesLifetimeUsd / base.startUsd) * (365 / ageDays) * 100
+      : base.feeAprLifetime;
+  const newFeeApr =
+    ageDays && ageDays > 0 && base.startUsd > 0 && newFeesUsd != null
+      ? (newFeesUsd / base.startUsd) * (365 / ageDays) * 100
+      : base.feeApr;
+
   return {
     ...base,
     supplyTokens: newSupply,
@@ -248,6 +266,9 @@ function overrideCurrentFromOnChain(
     netPnlPct: newPnlPct,
     feesUsd: newFeesUsd,
     feesByToken: newFeesByToken,
+    feesLifetimeUsd: newFeesLifetimeUsd,
+    feeAprLifetime: newFeeAprLifetime,
+    feeApr: newFeeApr,
   };
 }
 
