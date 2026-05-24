@@ -112,3 +112,21 @@ export function resetClientFlag(key: string): void {
 export function isLendingAuditEnabled(): boolean {
   return getClientFlag("capflow.feature.lendingAudit", false);
 }
+
+/**
+ * Krystal V3 cross-validation: при включении `useKrystalV3Positions` hook
+ * fetch'ит Krystal Cloud /v1/positions для каждого wallet'а и сравнивает
+ * с нашим OpenPosition (currentUsd / feesUsd / feesClaimedUsd). Diff > 5%
+ * → `console.warn` с разбивкой. Помогает увидеть где наши overrides врут
+ * (POS-007 claimed: наши $758 vs Krystal $32.90 = реальный Collect events).
+ *
+ * **Default: OFF** — Krystal стоит credits (10/call/wallet). Включаем для
+ * dev/staging cross-validation.
+ *
+ * Future: при `capflow.feature.krystalV3PrimaryEnabled = true` (отдельный
+ * flag, не существует пока) Krystal становится PRIMARY source для V3
+ * current state (вытесняет on-chain feeGrowth math + DeBank).
+ */
+export function isKrystalV3CrossValidationEnabled(): boolean {
+  return getClientFlag("capflow.feature.krystalV3CrossValidation", false);
+}
