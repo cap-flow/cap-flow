@@ -1219,17 +1219,15 @@ function PositionRow({
       </td>
     ),
     kind: () => (
-      // Тип-столбец: показываем `p.itemName` (Yield / Deposit / Lending /
-      // Liquidity Pool — раздел внутри протокола из DeBank `item.name`),
-      // а цветом-badge остаётся kind (LP/Лендинг/Стейкинг/Perp) для
-      // быстрой визуальной категоризации. Подсветка через цвета KIND_BADGE.
-      <td key="kind" className={cn(cellPad, "text-center")}>
+      // Тип-столбец: plain текст `p.itemName` (Yield / Deposit / Lending /
+      // Liquidity Pool — раздел внутри протокола из DeBank `item.name`).
+      // Цветные badge'ы убраны для уменьшения визуального шума (user request).
+      // Broad-категория (KIND_LABEL) доступна в tooltip + используется
+      // для фильтрации в шапке.
+      <td key="kind" className={cn(cellPad, "text-center text-xs")}>
         <div className="inline-flex items-center gap-1.5">
           <span
-            className={cn(
-              "inline-block rounded border px-1.5 py-0.5 text-[10px] capitalize",
-              KIND_BADGE[p.kind],
-            )}
+            className="text-foreground"
             title={`Категория: ${KIND_LABEL[p.kind]}`}
           >
             {p.itemName || KIND_LABEL[p.kind]}
