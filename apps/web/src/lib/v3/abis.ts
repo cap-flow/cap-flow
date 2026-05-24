@@ -95,40 +95,9 @@ export const POOL_ABI = [
       { name: "unlocked", type: "bool" },
     ],
   },
-  // PR-1b: real-time fee accrual math (Uniswap V3 whitepaper §6.3).
-  // feeGrowthGlobal0/1X128 — cumulative fees per unit liquidity since pool inception.
-  {
-    type: "function",
-    name: "feeGrowthGlobal0X128",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-  {
-    type: "function",
-    name: "feeGrowthGlobal1X128",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-  // ticks(tick) — feeGrowthOutside0/1X128 на каждой границе нашего диапазона.
-  // Только нас интересуют первые 4 поля; остальные не нужны.
-  {
-    type: "function",
-    name: "ticks",
-    stateMutability: "view",
-    inputs: [{ name: "tick", type: "int24" }],
-    outputs: [
-      { name: "liquidityGross", type: "uint128" },
-      { name: "liquidityNet", type: "int128" },
-      { name: "feeGrowthOutside0X128", type: "uint256" },
-      { name: "feeGrowthOutside1X128", type: "uint256" },
-      { name: "tickCumulativeOutside", type: "int56" },
-      { name: "secondsPerLiquidityOutsideX128", type: "uint160" },
-      { name: "secondsOutside", type: "uint32" },
-      { name: "initialized", type: "bool" },
-    ],
-  },
+  // Pre-PR-CLEANUP содержал feeGrowthGlobal0/1X128 + ticks(int24) для
+  // real-time fee accrual (Uniswap §6.3 math). Убрано — Krystal Cloud
+  // делает это server-side. См. fee_growth.ts deletion в same PR.
 ] as const;
 
 export const ERC20_ABI = [
