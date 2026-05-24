@@ -821,6 +821,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         HELIUS_API_KEY: env.HELIUS_API_KEY,
         ETHERSCAN_API_KEY: env.ETHERSCAN_API_KEY,
         ALCHEMY_API_KEY: env.ALCHEMY_API_KEY,
+        KRYSTAL_API_KEY: env.KRYSTAL_API_KEY,
       });
       // Per-user rate-limit (S2). H3 (2026-05-14): now env-gated via
       // UPSTREAM_RATE_PER_MIN / UPSTREAM_RATE_PER_HOUR. Defaults

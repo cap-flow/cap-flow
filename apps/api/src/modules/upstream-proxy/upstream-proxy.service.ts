@@ -30,6 +30,7 @@ export interface ProxyEnv {
   readonly HELIUS_API_KEY?: string | undefined;
   readonly ETHERSCAN_API_KEY?: string | undefined;
   readonly ALCHEMY_API_KEY?: string | undefined;
+  readonly KRYSTAL_API_KEY?: string | undefined;
 }
 
 export interface ProxyRequest {
@@ -175,6 +176,31 @@ const PROVIDERS: Record<string, ProviderHandler> = {
       }
       // Placeholder URL — key gets spliced in `forward`.
       return new URL(`https://${chain}.g.alchemy.com/`);
+    },
+  },
+  // Krystal Cloud — V3 LP positions / pools / balances aggregator.
+  // Используется в `lib/krystal/*` для cross-validation OpenPosition
+  // против gold-standard Uniswap UI values (real-time feeGrowth math,
+  // Collect events без principal contamination).
+  krystal: {
+    auth: { kind: "header", name: "KC-APIKey" },
+    envVar: "KRYSTAL_API_KEY",
+    buildUrl: (req) => {
+      // Allow-list эндпоинтов которые мы реально дёргаем. Не пропускаем
+      // strategy-write endpoints (хотя их у Krystal нет в read API, но
+      // на всякий случай ограничиваем READ-only пути).
+      if (
+        !/^v1\/(positions|pools|balances|chains|protocols|strategies)\b/.test(
+          req.path
+        )
+      ) {
+        throw new UpstreamProxyError(
+          `Path not allowed for Krystal: ${safePathPreview(req.path)}`,
+          "forbidden_path",
+          "krystal"
+        );
+      }
+      return new URL(`https://cloud-api.krystal.app/${req.path}`);
     },
   },
 };
