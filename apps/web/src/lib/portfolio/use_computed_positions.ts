@@ -25,7 +25,15 @@ import { useV3CoinGeckoPrices } from "@/lib/coingecko_v3_prices";
 import { getV3PoolsForMintBatch } from "@/lib/v3/pool_lookup";
 import { useLendingAudit } from "@/lib/lending/use_lending_audit";
 import { useResolvedFeatureFlag } from "@/features/feature-flags/hooks";
-import { isLendingAuditEnabled } from "@/lib/portfolio/feature_flags";
+import {
+  isKrystalV3CrossValidationEnabled,
+  isLendingAuditEnabled,
+} from "@/lib/portfolio/feature_flags";
+import { useKrystalV3Positions } from "@/lib/krystal/hook";
+import {
+  findKrystalDivergences,
+  logKrystalDivergences,
+} from "@/lib/krystal/validate";
 import { useLotMethodology } from "@/lib/lot_methodology";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
 import { defillamaCoinKey, fetchHistoricalPrices } from "@/lib/defillama";
@@ -114,6 +122,22 @@ export function useComputedPositions(): ComputedPositions {
     "capflow.feature.lendingAudit",
   );
   const lendingAuditOn = lendingAuditFlag.enabled || isLendingAuditEnabled();
+
+  // PR-K1: cross-validate V3 LP positions против Krystal Cloud (gold standard).
+  // Default OFF; включается через `capflow.feature.krystalV3CrossValidation`
+  // в localStorage. Krystal API key из env (VITE_KRYSTAL_CLOUD_API_KEY).
+  const krystalFlag = useResolvedFeatureFlag(
+    "capflow.feature.krystalV3CrossValidation",
+  );
+  const krystalEnabled =
+    krystalFlag.enabled || isKrystalV3CrossValidationEnabled();
+  const krystalApiKey =
+    (import.meta.env.VITE_KRYSTAL_CLOUD_API_KEY as string | undefined) ?? null;
+  const krystalV3 = useKrystalV3Positions(
+    loadedList,
+    krystalApiKey,
+    krystalEnabled,
+  );
 
   const walletHistPrices = useWalletHistPrices(loadedList);
   const [lotMethodology, setLotMethodology] = useLotMethodology();
@@ -303,6 +327,13 @@ export function useComputedPositions(): ComputedPositions {
       }
       working = cexResult.positions;
     }
+    // PR-K2: после всех overrides сравниваем V3 LP с Krystal (если включён).
+    // Только console.warn — не мутирует данные. Помогает увидеть где наш
+    // движок врёт (POS-001 pending, POS-007 claimed misclassification).
+    if (krystalEnabled && krystalV3.data.size > 0) {
+      const divergences = findKrystalDivergences(working, krystalV3.data);
+      logKrystalDivergences(divergences);
+    }
     return working;
   }, [
     positionsRaw,
@@ -313,6 +344,8 @@ export function useComputedPositions(): ComputedPositions {
     lotMethodology,
     costBasisOverrideByHash,
     cexCostBasisByHash,
+    krystalEnabled,
+    krystalV3.data,
   ]);
 
   return {
