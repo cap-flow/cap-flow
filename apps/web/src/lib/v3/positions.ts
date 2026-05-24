@@ -289,25 +289,6 @@ export async function fetchV3PositionsForDeployment(
     client.multicall({ contracts: ticksCalls, allowFailure: true }),
   ]);
 
-  // PR-1b diagnostic: count failures для каждого набора multicall'ов.
-  if (typeof window !== "undefined") {
-    const fg0Fails = fg0Res.filter((r) => r.status !== "success").length;
-    const fg1Fails = fg1Res.filter((r) => r.status !== "success").length;
-    const ticksFails = ticksRes.filter((r) => r.status !== "success").length;
-    if (fg0Fails > 0 || fg1Fails > 0 || ticksFails > 0) {
-      const firstFail =
-        fg0Res.find((r) => r.status !== "success") ??
-        ticksRes.find((r) => r.status !== "success");
-      console.warn(
-        `[V3 multicall PR-1b] ${dep.chainCode}/${dep.id}: ` +
-          `fg0Fails=${fg0Fails}/${fgGlobal0Calls.length}, ` +
-          `fg1Fails=${fg1Fails}/${fgGlobal1Calls.length}, ` +
-          `ticksFails=${ticksFails}/${ticksCalls.length}. ` +
-          `First error: ${(firstFail as { error?: { message?: string } } | undefined)?.error?.message ?? "?"}`,
-      );
-    }
-  }
-
   const slotByPool = new Map<Address, { sqrtPriceX96: bigint; tick: number }>();
   const fgGlobalByPool = new Map<Address, { g0: bigint; g1: bigint }>();
   for (let i = 0; i < uniquePools.length; i++) {
@@ -380,20 +361,6 @@ export async function fetchV3PositionsForDeployment(
     const tickUpperData = ticksByKey.get(ptKey(pool, a.tickUpper));
     let pendingFee0 = tokensOwed0;
     let pendingFee1 = tokensOwed1;
-    // PR-1b VERBOSE diagnostic (temporary):
-    if (typeof window !== "undefined") {
-      console.log(
-        `[V3 pendingFee] tokenId=${a.tokenId} pool=${pool} ` +
-          `liq=${a.liquidity} tickL=${a.tickLower} tickU=${a.tickUpper} ` +
-          `currentTick=${slot.tick} ` +
-          `fgGlobal=${fgGlobal ? "✓" : "✗"} ` +
-          `tickL=${tickLowerData ? "✓" : "✗"} ` +
-          `tickU=${tickUpperData ? "✓" : "✗"} ` +
-          `tokensOwed=[${a.tokensOwed0Raw},${a.tokensOwed1Raw}] ` +
-          `fgInsideLast=[${a.feeGrowthInside0LastX128.toString().slice(0, 12)}...,` +
-          `${a.feeGrowthInside1LastX128.toString().slice(0, 12)}...]`,
-      );
-    }
     if (fgGlobal && tickLowerData && tickUpperData) {
       const fgInside0Now = computeFeeGrowthInside({
         tickLower: a.tickLower,
@@ -425,19 +392,6 @@ export async function fetchV3PositionsForDeployment(
         feeGrowthInsideLastX128: a.feeGrowthInside1LastX128,
         feeGrowthInsideNowX128: fgInside1Now,
       });
-      if (typeof window !== "undefined") {
-        console.log(
-          `[V3 pendingFee] tokenId=${a.tokenId} computed pendingFee0=${pendingFee0} ` +
-            `pendingFee1=${pendingFee1} ` +
-            `fgInside0Now=${fgInside0Now.toString().slice(0, 12)}... ` +
-            `delta0=${(fgInside0Now - a.feeGrowthInside0LastX128).toString().slice(0, 14)}`,
-        );
-      }
-    } else if (typeof window !== "undefined") {
-      console.warn(
-        `[V3 pendingFee FALLBACK] tokenId=${a.tokenId} → tokensOwed only ` +
-          `(${pendingFee0} / ${pendingFee1})`,
-      );
     }
     out.push({
       deploymentId: dep.id,
@@ -464,8 +418,12 @@ export async function fetchV3PositionsForDeployment(
       amount1AtPb: rawToHuman(atPb.amount1, dec1),
       tokensOwed0,
       tokensOwed1,
-      pendingFee0: tokensOwed0,
-      pendingFee1: tokensOwed1,
+      // PR-1b: use real-time computed pendingFee (tokensOwed + feeGrowth accrual),
+      // NOT raw tokensOwed snapshot. Pre-fix typo cost ≥5 deploy iterations debugging
+      // because verbose console.log read updated `pendingFee0` correctly but push
+      // hardcoded `tokensOwed0`. ALWAYS verify property values vs local vars.
+      pendingFee0,
+      pendingFee1,
     });
   }
   return out;
