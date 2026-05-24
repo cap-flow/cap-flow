@@ -32,9 +32,12 @@ const EMPTY: KrystalV3State = {
   creditsLeft: null,
 };
 
+/**
+ * Backend upstream-proxy инжектит server-side `KRYSTAL_API_KEY`,
+ * фронту никаких ключей не нужно. Hook gating: `enabled` flag + wallet list.
+ */
 export function useKrystalV3Positions(
   loaded: Loaded[],
-  apiKey: string | null,
   enabled: boolean,
 ): KrystalV3State {
   const wallets = useMemo<string[]>(() => {
@@ -54,7 +57,7 @@ export function useKrystalV3Positions(
   const [state, setState] = useState<KrystalV3State>(EMPTY);
 
   useEffect(() => {
-    if (!enabled || !apiKey || wallets.length === 0) {
+    if (!enabled || wallets.length === 0) {
       setState(EMPTY);
       return;
     }
@@ -69,7 +72,7 @@ export function useKrystalV3Positions(
       for (const w of wallets) {
         if (cancelled) return;
         try {
-          const { data, credits } = await fetchKrystalUniswapV3Positions(w, apiKey, {
+          const { data, credits } = await fetchKrystalUniswapV3Positions(w, {
             signal: controller.signal,
           });
           all.push(...data);
@@ -99,7 +102,7 @@ export function useKrystalV3Positions(
       cancelled = true;
       controller.abort();
     };
-  }, [wallets, apiKey, enabled]);
+  }, [wallets, enabled]);
 
   return state;
 }

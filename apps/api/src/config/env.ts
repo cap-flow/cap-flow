@@ -136,6 +136,7 @@ const envSchema = z.object({
   COINGECKO_API_KEY: z.string().optional(), // optional — free tier works without
   HELIUS_API_KEY: z.string().optional(),    // Solana wallet balances
   COINSTATS_API_KEY: z.string().optional(), // multi-chain unified API (Phase 3d)
+  KRYSTAL_API_KEY: z.string().optional(),   // Krystal Cloud V3 LP positions (cross-validation)
 
   /**
    * Optional HTTPS proxy for ALL outgoing CEX-exchange traffic. Set

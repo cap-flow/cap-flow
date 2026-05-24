@@ -125,19 +125,14 @@ export function useComputedPositions(): ComputedPositions {
 
   // PR-K1: cross-validate V3 LP positions против Krystal Cloud (gold standard).
   // Default OFF; включается через `capflow.feature.krystalV3CrossValidation`
-  // в localStorage. Krystal API key из env (VITE_KRYSTAL_CLOUD_API_KEY).
+  // в localStorage. API key инжектится server-side через upstream-proxy
+  // (см. `apps/api/.../upstream-proxy.service.ts` — `KRYSTAL_API_KEY`).
   const krystalFlag = useResolvedFeatureFlag(
     "capflow.feature.krystalV3CrossValidation",
   );
   const krystalEnabled =
     krystalFlag.enabled || isKrystalV3CrossValidationEnabled();
-  const krystalApiKey =
-    (import.meta.env.VITE_KRYSTAL_CLOUD_API_KEY as string | undefined) ?? null;
-  const krystalV3 = useKrystalV3Positions(
-    loadedList,
-    krystalApiKey,
-    krystalEnabled,
-  );
+  const krystalV3 = useKrystalV3Positions(loadedList, krystalEnabled);
 
   const walletHistPrices = useWalletHistPrices(loadedList);
   const [lotMethodology, setLotMethodology] = useLotMethodology();
