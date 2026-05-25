@@ -123,7 +123,12 @@ export class AdminUsersService {
         u.*,
         COALESCE(ac.cnt, 0)::int AS account_count,
         ls.created_at            AS last_snapshot_at,
-        (ls.metrics->>'totalUsd')::numeric AS last_snapshot_usd
+        -- Bug E (2026-05-25): gross capital (wallet + protocols) без debt.
+        -- См. portfolio-refresh.service.ts:75 — DeBank totalUsdValue уже net.
+        (
+          COALESCE((ls.metrics->>'walletUsd')::numeric, 0)
+          + COALESCE((ls.metrics->>'protocolsAssetUsd')::numeric, 0)
+        ) AS last_snapshot_usd
       FROM ${schema.users} u
       LEFT JOIN LATERAL (
         SELECT COUNT(*) AS cnt

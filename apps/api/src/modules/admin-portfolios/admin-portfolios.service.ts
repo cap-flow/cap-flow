@@ -69,7 +69,14 @@ export class AdminPortfoliosService {
         u.name        AS owner_name,
         a.is_primary  AS is_primary,
         ls.created_at AS last_snapshot_at,
-        (ls.metrics->>'totalUsd')::numeric AS last_snapshot_usd,
+        -- Bug E (2026-05-25): gross capital (wallet + protocols) WITHOUT
+        -- subtracting debt. DeBank totalUsdValue already nets debt out
+        -- (see portfolio-refresh.service.ts:75). We sum walletUsd +
+        -- protocolsAssetUsd from metrics to recover the gross figure.
+        (
+          COALESCE((ls.metrics->>'walletUsd')::numeric, 0)
+          + COALESCE((ls.metrics->>'protocolsAssetUsd')::numeric, 0)
+        ) AS last_snapshot_usd,
         ls.metrics->>'trigger' AS last_trigger,
         COALESCE(s24.cnt, 0)::int AS snapshot_count_24h,
         COALESCE(e24.cnt, 0)::int AS errors_24h
@@ -130,8 +137,13 @@ export class AdminPortfoliosService {
       .where(eq(schema.users.status, "active"));
 
     // sum( latest snapshot per account ) — a lateral-join pattern.
+    // Bug E (2026-05-25): gross capital (wallet + protocols) без вычитания
+    // debt. См. комментарий выше про DeBank netting.
     const totalUsdRow = await this.db.execute<{ total: string | null }>(sql`
-      SELECT COALESCE(SUM((ps.metrics->>'totalUsd')::numeric), 0) AS total
+      SELECT COALESCE(SUM(
+        COALESCE((ps.metrics->>'walletUsd')::numeric, 0)
+        + COALESCE((ps.metrics->>'protocolsAssetUsd')::numeric, 0)
+      ), 0) AS total
       FROM ${schema.accounts} a
       INNER JOIN LATERAL (
         SELECT metrics FROM ${schema.portfolioSnapshots}
