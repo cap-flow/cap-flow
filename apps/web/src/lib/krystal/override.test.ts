@@ -43,6 +43,7 @@ function basePos(args: {
   feesByToken?: { symbol: string; amount: number; usd: number; nativeApr: number | null }[];
   feesSource?: "v3_rewards" | "supply_yield" | null;
   feesClaimedHistory?: { time: number; hash: string; usd: number; positionUsdAtClaim?: number; daysSincePrev?: number; aprPeriod?: number; tokensReceived?: { symbol: string; amount: number; usd: number }[] }[];
+  v3?: { depositUsd: number; hodlUsd: number; currentLpUsd: number; impermanentLossUsd: number; pnlUsd: number; pnlPct: number };
 }): OpenPosition {
   return {
     id: args.id,
@@ -80,6 +81,18 @@ function basePos(args: {
     creditFundedUsd: 0,
     coverageIncomplete: false,
     ...(args.matchedV3TokenId && { matchedV3TokenId: args.matchedV3TokenId }),
+    ...(args.v3 && {
+      v3: {
+        depositUsd: args.v3.depositUsd,
+        hodlUsd: args.v3.hodlUsd,
+        currentLpUsd: args.v3.currentLpUsd,
+        impermanentLossUsd: args.v3.impermanentLossUsd,
+        pnlUsd: args.v3.pnlUsd,
+        pnlPct: args.v3.pnlPct,
+        depositTokens: [],
+        pricesSource: "historical" as const,
+      } as OpenPosition["v3"],
+    }),
   };
 }
 
@@ -542,6 +555,66 @@ describe("applyKrystalV3Override", () => {
       );
       expect(out[0]!.currentUsd).toBe(1000);
     });
+  });
+
+  it("PR-K10 (Bug C): пересчитывает v3.currentLpUsd / IL / v3.pnl после override supplyTokens", () => {
+    // lex POS-001 reproduction: DeBank mis-attributed amounts → v3.currentLpUsd
+    // показывает $1,868 (USDC-only портion) вместо реальных $14,956 (WETH+USDC).
+    // Krystal override должен пересчитать v3 sub-fields.
+    const pos = basePos({
+      id: "POS-001",
+      matchedV3TokenId: "5469945",
+      startUsd: 15691,
+      currentUsd: 1868, // pre-override (stale DeBank)
+      supply: [
+        { symbol: "WETH", amount: 0, currentUsd: 0, startUsd: 12903 }, // пустой WETH amount
+        { symbol: "USDC", amount: 1767.94, currentUsd: 1767.94, startUsd: 2788 },
+      ],
+      feesUsd: 18.86,
+      v3: {
+        depositUsd: 15691,
+        hodlUsd: 15331, // правильный HODL (1.327 WETH × current + 12550 USDC)
+        currentLpUsd: 1868, // ⚠ STALE — будет переписан
+        impermanentLossUsd: 13463, // 15331 - 1868 = ⚠ ABSURD
+        pnlUsd: -13822, // ⚠ STALE
+        pnlPct: -88,
+      },
+    });
+    const krystal = new Map<string, KrystalV3Summary>([
+      [
+        "5469945",
+        summary({
+          tokenId: "5469945",
+          currentUsd: 14956.10, // правильное LP value (Krystal authoritative)
+          current: [
+            { symbol: "WETH", amount: 6.17, usd: 12925.93 },
+            { symbol: "USDC", amount: 1767.94, usd: 1767.94 },
+          ],
+          pendingUsd: 18.86,
+          pending: [{ symbol: "WETH", amount: 0.009, usd: 18.86 }],
+          claimedUsd: 0,
+        }),
+      ],
+    ]);
+
+    const out = applyKrystalV3Override([pos], krystal);
+    const p = out[0]!;
+
+    // currentUsd обновлён Krystal'ом
+    expect(p.currentUsd).toBeCloseTo(14956.10, 1);
+    // v3.currentLpUsd теперь совпадает с реальным LP (был $1,868 → стал ~$14,956)
+    expect(p.v3!.currentLpUsd).toBeCloseTo(14956.10, 1);
+    // IL пересчитан: hodlUsd $15,331 - currentLpUsd $14,956 = $375 (small loss)
+    // НЕ $13,463 (which был absurd)
+    expect(p.v3!.impermanentLossUsd).toBeCloseTo(15331 - 14956.10, 1);
+    expect(Math.abs(p.v3!.impermanentLossUsd)).toBeLessThan(500);
+    // v3.pnlUsd = currentLpUsd - depositUsd = 14956 - 15691 = -$735
+    expect(p.v3!.pnlUsd).toBeCloseTo(14956.10 - 15691, 1);
+    expect(p.v3!.pnlPct).toBeCloseTo(((14956.10 - 15691) / 15691) * 100, 1);
+    // hodlUsd не trogan (depositTokens × currentPrices, не зависит от override)
+    expect(p.v3!.hodlUsd).toBe(15331);
+    // depositUsd тоже не trogan
+    expect(p.v3!.depositUsd).toBe(15691);
   });
 
   it("recomputes netPnlUsd и netPnlPct из нового currentUsd", () => {
