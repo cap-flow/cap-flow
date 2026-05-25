@@ -119,6 +119,30 @@ function overrideOne(
       ? (newFeesLifetimeUsd / base.startUsd) * (365 / ageDays) * 100
       : null;
 
+  // Bug C fix (2026-05-25 lex@ V3-popup audit): после override
+  // `supplyTokens.amount/currentUsd` и `currentUsd` пересчитываем
+  // `v3.currentLpUsd`/`impermanentLossUsd`/`pnlUsd`/`pnlPct`.
+  // hodlUsd НЕ трогаем — depositTokens × currentPrices, не зависит
+  // от Krystal-override.
+  const newV3 = base.v3
+    ? (() => {
+        const newCurrentLpUsd = newCurrentUsd;
+        const newImpermanentLossUsd = base.v3.hodlUsd - newCurrentLpUsd;
+        const newV3PnlUsd = newCurrentLpUsd - base.v3.depositUsd;
+        const newV3PnlPct =
+          base.v3.depositUsd > 0
+            ? (newV3PnlUsd / base.v3.depositUsd) * 100
+            : 0;
+        return {
+          ...base.v3,
+          currentLpUsd: newCurrentLpUsd,
+          impermanentLossUsd: newImpermanentLossUsd,
+          pnlUsd: newV3PnlUsd,
+          pnlPct: newV3PnlPct,
+        };
+      })()
+    : base.v3;
+
   return {
     ...base,
     supplyTokens: newSupply,
@@ -132,6 +156,7 @@ function overrideOne(
     feesLifetimeUsd: newFeesLifetimeUsd,
     feeApr,
     feeAprLifetime,
+    ...(newV3 && { v3: newV3 }),
     // Fallback path: если matchedV3TokenId не был установлен (Base chain
     // где Etherscan v2 unsupported / Alchemy 403) — проставляем его сейчас,
     // чтобы downstream UI / overrides работали как обычно.

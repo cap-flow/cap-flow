@@ -258,6 +258,35 @@ function overrideCurrentFromOnChain(
       ? (newFeesUsd / base.startUsd) * (365 / ageDays) * 100
       : base.feeApr;
 
+  // Bug C fix (2026-05-25 lex@ V3-popup audit): после override `supplyTokens.amount`
+  // нужно пересчитать `v3.currentLpUsd`/`impermanentLossUsd`/`pnlUsd`/`pnlPct`,
+  // иначе V3 popup ("Concentrated liquidity") показывает stale DeBank
+  // mis-attributed value (lex POS-001/003: их v3.currentLpUsd буквально
+  // swapped — $1,868 на POS-001 = реальная LP value POS-003).
+  //
+  // currentLpUsd = pure liquidity без pending fees (на параллели с
+  // оригинальным расчётом в buildOpenPositions: `lp.assetUsd - pendingFees`).
+  // hodlUsd НЕ трогаем — оно derived от depositTokens × currentPrices,
+  // currentPrices Phase J не меняет.
+  const newV3 = base.v3
+    ? (() => {
+        const newCurrentLpUsd = newCurrentUsd;
+        const newImpermanentLossUsd = base.v3.hodlUsd - newCurrentLpUsd;
+        const newV3PnlUsd = newCurrentLpUsd - base.v3.depositUsd;
+        const newV3PnlPct =
+          base.v3.depositUsd > 0
+            ? (newV3PnlUsd / base.v3.depositUsd) * 100
+            : 0;
+        return {
+          ...base.v3,
+          currentLpUsd: newCurrentLpUsd,
+          impermanentLossUsd: newImpermanentLossUsd,
+          pnlUsd: newV3PnlUsd,
+          pnlPct: newV3PnlPct,
+        };
+      })()
+    : base.v3;
+
   return {
     ...base,
     supplyTokens: newSupply,
@@ -269,6 +298,7 @@ function overrideCurrentFromOnChain(
     feesLifetimeUsd: newFeesLifetimeUsd,
     feeAprLifetime: newFeeAprLifetime,
     feeApr: newFeeApr,
+    ...(newV3 && { v3: newV3 }),
   };
 }
 
