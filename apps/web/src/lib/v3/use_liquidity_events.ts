@@ -61,7 +61,11 @@ const DECREASE_LIQ_TOPIC =
 // v2 → v3: добавлен DefiLlama historical-price fallback для exotic
 // non-stable + non-anchor пар (WBTC/PAXG и т.п.). Старые v2 entries
 // для таких пар содержали `netCostBasisUsd = 0` — нужно пересчитать.
-const CACHE_KEY = "capflow.cache.v3liq.v3";
+// v3 → v4: persistCache теперь сохраняет Map withdrawalsByTxHash как
+// Array<[hash, {amount0, amount1}]> (JSON.stringify на Map'е давал "{}",
+// поле терялось). Без bump'а старые `v3` entries без `withdrawalsByTxHash`
+// блокировали бы PR-2 split + PR-3 pre-mint filter навечно.
+const CACHE_KEY = "capflow.cache.v3liq.v4";
 const moduleCache = new Map<string, V3CostBasisResult>();
 
 /**
@@ -72,19 +76,37 @@ const moduleCache = new Map<string, V3CostBasisResult>();
  */
 const inFlight = new Map<string, Promise<V3CostBasisResult | null>>();
 
+/**
+ * Map<txHash, {amount0, amount1}> сериализуем как Array<[hash, value]> —
+ * JSON.stringify на сыром Map'е даёт "{}" (Map не enumerable как Object),
+ * поле полностью теряется при reload. Влияет на PR-2 (collect-vs-decrease
+ * split) и PR-3 (pre-mint filter использует cb.mintBlockTime — НЕ Map,
+ * но split всё равно read'ит withdrawalsByTxHash).
+ */
+type WithdrawalEntry = [string, { amount0: number; amount1: number }];
+
+function rehydrate(item: Record<string, unknown>): V3CostBasisResult {
+  const out: Record<string, unknown> = { ...item };
+  out.tokenId = BigInt(item.tokenId as string);
+  if (Array.isArray(item.withdrawalsByTxHash)) {
+    out.withdrawalsByTxHash = new Map(item.withdrawalsByTxHash as WithdrawalEntry[]);
+  } else {
+    // Старый формат сериализации (JSON.stringify на Map давал {}) —
+    // drop'аем пустое поле, чтобы downstream видел `undefined`, а не пустой Map.
+    delete out.withdrawalsByTxHash;
+  }
+  return out as V3CostBasisResult;
+}
+
 // Загрузить cache из localStorage при старте.
 try {
   const raw = localStorage.getItem(CACHE_KEY);
   if (raw) {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     for (const [k, v] of Object.entries(parsed)) {
-      // Restore bigint tokenId from string.
       const item = v as Record<string, unknown>;
       if (item.tokenId && typeof item.tokenId === "string") {
-        moduleCache.set(k, {
-          ...(item as object),
-          tokenId: BigInt(item.tokenId as string),
-        } as V3CostBasisResult);
+        moduleCache.set(k, rehydrate(item));
       }
     }
   }
@@ -96,7 +118,14 @@ function persistCache() {
   try {
     const obj: Record<string, unknown> = {};
     for (const [k, v] of moduleCache) {
-      obj[k] = { ...v, tokenId: v.tokenId.toString() };
+      const serialized: Record<string, unknown> = {
+        ...v,
+        tokenId: v.tokenId.toString(),
+      };
+      if (v.withdrawalsByTxHash) {
+        serialized.withdrawalsByTxHash = Array.from(v.withdrawalsByTxHash.entries());
+      }
+      obj[k] = serialized;
     }
     localStorage.setItem(CACHE_KEY, JSON.stringify(obj));
   } catch {
