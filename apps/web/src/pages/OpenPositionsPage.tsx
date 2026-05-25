@@ -3325,6 +3325,12 @@ function V3RangeBlock({
               </span>
             )}
           </div>
+          {avgSellPrice != null && pos.amount0Current > 0 && (
+            <div className="text-[10.5px] text-success/90 mt-0.5">
+              {pos.token0.symbol} продан по avg{" "}
+              <span className="font-mono">{fmtPrice(avgSellPrice)}</span> {pair}
+            </div>
+          )}
         </div>
         {avgSellPrice != null ? (
           <>
@@ -3373,6 +3379,15 @@ function V3RangeBlock({
               ≈ {formatUsd(pos.amount0AtPa * pos.priceLower, locale)} @ Pa
             </span>
           </div>
+          {pos.amount0AtPa > 0 && depositUsd > 0 && (
+            <div className="text-[10.5px] text-success/90 mt-0.5">
+              Средняя цена за весь объём:{" "}
+              <span className="font-mono">{fmtPrice(depositUsd / pos.amount0AtPa)}</span> {pair}
+              <span className="text-muted-foreground ml-1">
+                ({formatUsd(depositUsd, locale)} депозит ÷ {fmtAmount(pos.amount0AtPa)} {pos.token0.symbol})
+              </span>
+            </div>
+          )}
         </div>
         {avgBuyPrice != null ? (
           <>
