@@ -40,24 +40,74 @@ function canonicalSymbol(s: string): string {
   return u;
 }
 
+/**
+ * Recompute feesClaimedUsd / feesLifetimeUsd / feeAprLifetime после
+ * любого изменения feesClaimedHistory.
+ */
+function rebuildTotals(
+  base: OpenPosition,
+  newHistory: OpenPosition["feesClaimedHistory"],
+): OpenPosition {
+  const newClaimedUsd = newHistory.reduce((s, e) => s + (e.usd ?? 0), 0);
+  const newLifetime = (base.feesUsd ?? 0) + newClaimedUsd;
+  const ageDays = base.ageDays;
+  const feeAprLifetime =
+    ageDays && ageDays > 0 && base.startUsd > 0 && newLifetime > 0
+      ? (newLifetime / base.startUsd) * (365 / ageDays) * 100
+      : base.feeAprLifetime;
+  return {
+    ...base,
+    feesClaimedUsd: newClaimedUsd,
+    feesClaimedHistory: newHistory,
+    feesLifetimeUsd: newLifetime,
+    feeAprLifetime,
+  };
+}
+
 function processOne(
   base: OpenPosition,
   cb: V3CostBasisResult,
   nftToken0Symbol: string,
   nftToken1Symbol: string,
 ): OpenPosition {
-  if (!cb.withdrawalsByTxHash || cb.withdrawalsByTxHash.size === 0) {
+  if (base.feesClaimedHistory.length === 0) {
     return base;
   }
-  if (base.feesClaimedHistory.length === 0) return base;
+
+  // PR-3 (2026-05-25): drop pre-mint entries.
+  //
+  // Classifier приклеивает `claim_rewards` op к V3 LP позиции по pair
+  // (symbols) + chain + protocol. Когда юзер закрывает старую NFT
+  // (multicall decreaseLiquidity + collect) и через минуты mint'ит новую
+  // того же pair, $$ от закрытия может быть mis-attributed к новой
+  // позиции (lex POS-007: tx 0x94cb78 закрыл NFT 1181504 за 41 мин до
+  // mint'а NFT 1197028, но $701.18 попало в feesClaimedHistory POS-007).
+  //
+  // buildClaimedFeesHistory имеет temporal guard `op.time < openedTime`,
+  // но `openedTime` для V3 = DeBank lp_add time (может быть = время
+  // закрытия предыдущей NFT). Authoritative mint time = cb.mintBlockTime
+  // — используем его.
+  const preMintFiltered =
+    cb.mintBlockTime != null
+      ? base.feesClaimedHistory.filter((e) => e.time >= cb.mintBlockTime!)
+      : base.feesClaimedHistory;
+  const droppedPreMint = preMintFiltered.length !== base.feesClaimedHistory.length;
+
+  // Если withdrawalsByTxHash пуст — нечего split'ить per-tx. Но если мы
+  // удалили pre-mint entries — нужно пересчитать totals и вернуть position
+  // с очищенной history.
+  if (!cb.withdrawalsByTxHash || cb.withdrawalsByTxHash.size === 0) {
+    if (!droppedPreMint) return base;
+    return rebuildTotals(base, preMintFiltered);
+  }
 
   const sym0Canon = canonicalSymbol(nftToken0Symbol);
   const sym1Canon = canonicalSymbol(nftToken1Symbol);
 
   let totalAdjusted = 0;
-  let anyAdjusted = false;
+  let anyAdjusted = droppedPreMint;
 
-  const newHistory = base.feesClaimedHistory.map((entry) => {
+  const newHistory = preMintFiltered.map((entry) => {
     const w = cb.withdrawalsByTxHash!.get(entry.hash.toLowerCase());
     if (!w) {
       totalAdjusted += entry.usd ?? 0;

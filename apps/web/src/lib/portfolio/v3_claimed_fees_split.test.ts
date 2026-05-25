@@ -111,6 +111,7 @@ function makeNft(args: {
 function makeCb(args: {
   tokenId: bigint;
   withdrawalsByTxHash?: Map<string, { amount0: number; amount1: number }>;
+  mintBlockTime?: number;
 }): V3CostBasisResult {
   return {
     tokenId: args.tokenId,
@@ -121,6 +122,7 @@ function makeCb(args: {
     eventCount: { increase: 1, decrease: 0 },
     hasHistPrices: true,
     mintTxHash: "0xmint",
+    ...(args.mintBlockTime != null && { mintBlockTime: args.mintBlockTime }),
     ...(args.withdrawalsByTxHash && { withdrawalsByTxHash: args.withdrawalsByTxHash }),
   };
 }
@@ -281,6 +283,113 @@ describe("applyV3ClaimedFeesSplit", () => {
     // 0.05 ETH - 0.03 WETH (matched canon ETH==WETH) = 0.02 ETH × $2000 = $40
     expect(p.feesClaimedHistory[0]!.tokensReceived?.[0]?.amount).toBeCloseTo(0.02, 3);
     expect(p.feesClaimedHistory[0]!.usd).toBeCloseTo(40, 1);
+  });
+
+  it("PR-3: drops claim entries dated before NFT mint time", () => {
+    // POS-007 reproduction: classifier приклеил $701 entry на tx 0x94cb78
+    // (закрытие старой NFT #1181504) к новой POS-007 (NFT #1197028)
+    // потому что pair тот же (WETH/USDT) и время старой ops чуть раньше
+    // mint'а. cb.mintBlockTime = 1770545651 — entry 1770543155 < mint
+    // → drop.
+    const pos = basePos({
+      id: "POS-007",
+      matchedV3TokenId: "1197028",
+      feesClaimedUsd: 778.76, // включает phantom $701
+      ageDays: 118,
+      startUsd: 979.57,
+      history: [
+        {
+          hash: "0x94cb785cpre",
+          usd: 701.18, // ← pre-mint, нужно dropнуть
+          tokensReceived: [
+            { symbol: "USDT", amount: 4.95, usd: 4.95 },
+            { symbol: "ETH", amount: 0.329, usd: 696.22 },
+          ],
+        },
+        {
+          hash: "0xclaim18mar",
+          usd: 44.72,
+          tokensReceived: [
+            { symbol: "USDT", amount: 22.46, usd: 22.46 },
+            { symbol: "ETH", amount: 0.0105, usd: 22.26 },
+          ],
+        },
+        {
+          hash: "0xclaim01may",
+          usd: 32.86,
+          tokensReceived: [
+            { symbol: "USDT", amount: 16.81, usd: 16.81 },
+            { symbol: "ETH", amount: 0.00758, usd: 16.05 },
+          ],
+        },
+      ],
+    });
+    // Override history[0].time to be BEFORE mint, rest AFTER.
+    (pos.feesClaimedHistory as { time: number }[])[0]!.time = 1770543155;
+    (pos.feesClaimedHistory as { time: number }[])[1]!.time = 1773839135;
+    (pos.feesClaimedHistory as { time: number }[])[2]!.time = 1777648799;
+
+    const nft = makeNft({ tokenId: 1197028n, symbol0: "WETH", symbol1: "USDT" });
+    const cb = makeCb({
+      tokenId: 1197028n,
+      mintBlockTime: 1770545651, // 26.01.2026 18:54 UTC — реальный mint
+    });
+
+    const out = applyV3ClaimedFeesSplit(
+      [pos], mapFor(nft), new Map([["1197028", cb]]),
+    );
+    const p = out[0]!;
+
+    // $701 phantom entry удалена.
+    expect(p.feesClaimedHistory).toHaveLength(2);
+    expect(p.feesClaimedHistory[0]!.usd).toBe(44.72);
+    expect(p.feesClaimedHistory[1]!.usd).toBe(32.86);
+    // claimed total пересчитан.
+    expect(p.feesClaimedUsd).toBeCloseTo(77.58, 1);
+    // lifetime = pending (5) + claimed (77.58) = 82.58
+    expect(p.feesLifetimeUsd).toBeCloseTo(82.58, 1);
+  });
+
+  it("PR-3: pre-mint filter работает даже когда withdrawalsByTxHash пуст", () => {
+    const pos = basePos({
+      id: "POS-PRE",
+      matchedV3TokenId: "555",
+      feesClaimedUsd: 100,
+      history: [
+        { hash: "0xpre", usd: 80, tokensReceived: [{ symbol: "USDT", amount: 80, usd: 80 }] },
+        { hash: "0xpost", usd: 20, tokensReceived: [{ symbol: "USDT", amount: 20, usd: 20 }] },
+      ],
+    });
+    (pos.feesClaimedHistory as { time: number }[])[0]!.time = 1000;
+    (pos.feesClaimedHistory as { time: number }[])[1]!.time = 3000;
+
+    const nft = makeNft({ tokenId: 555n, symbol0: "WETH", symbol1: "USDT" });
+    const cb = makeCb({ tokenId: 555n, mintBlockTime: 2000 }); // no withdrawals
+
+    const out = applyV3ClaimedFeesSplit([pos], mapFor(nft), new Map([["555", cb]]));
+    const p = out[0]!;
+    expect(p.feesClaimedHistory).toHaveLength(1);
+    expect(p.feesClaimedHistory[0]!.hash).toBe("0xpost");
+    expect(p.feesClaimedUsd).toBe(20);
+  });
+
+  it("PR-3: без mintBlockTime — pre-mint filter выключен (backward compat)", () => {
+    const pos = basePos({
+      id: "POS-NB",
+      matchedV3TokenId: "666",
+      feesClaimedUsd: 50,
+      history: [
+        { hash: "0xany", usd: 50, tokensReceived: [{ symbol: "USDT", amount: 50, usd: 50 }] },
+      ],
+    });
+    (pos.feesClaimedHistory as { time: number }[])[0]!.time = 100;
+
+    const nft = makeNft({ tokenId: 666n, symbol0: "WETH", symbol1: "USDT" });
+    const cb = makeCb({ tokenId: 666n }); // no mintBlockTime
+
+    const out = applyV3ClaimedFeesSplit([pos], mapFor(nft), new Map([["666", cb]]));
+    expect(out[0]!.feesClaimedHistory).toHaveLength(1);
+    expect(out[0]!.feesClaimedUsd).toBe(50);
   });
 
   it("non-V3 (lending) positions — no-op", () => {
