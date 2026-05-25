@@ -3381,11 +3381,13 @@ function V3RangeBlock({
           </div>
           {pos.amount0AtPa > 0 && depositUsd > 0 && (
             <div className="text-[10.5px] text-success/90 mt-0.5">
-              Средняя цена за весь объём:{" "}
+              Получит{" "}
+              <span className="font-mono">{fmtAmount(pos.amount0AtPa)}</span>{" "}
+              {pos.token0.symbol} по цене{" "}
               <span className="font-mono">{fmtPrice(depositUsd / pos.amount0AtPa)}</span> {pair}
-              <span className="text-muted-foreground ml-1">
+              <div className="text-muted-foreground text-[9.5px]">
                 ({formatUsd(depositUsd, locale)} депозит ÷ {fmtAmount(pos.amount0AtPa)} {pos.token0.symbol})
-              </span>
+              </div>
             </div>
           )}
         </div>
