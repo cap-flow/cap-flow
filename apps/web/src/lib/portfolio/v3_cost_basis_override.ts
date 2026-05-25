@@ -158,6 +158,15 @@ function overrideCurrentFromOnChain(
    * позиций где она есть. Ключи: normalized uppercase symbol.
    */
   currentPrices?: ReadonlyMap<string, number>,
+  /**
+   * Bug D fix (2026-05-25 egorov_v V3 popup audit): когда классификатор
+   * не находит lp_add op в chain-history (старый mint, sync horizon),
+   * `buildV3Details` возвращает null → `V3InfoButton` не рендерит popup.
+   * Если `cb` (V3CostBasisResult от Etherscan) есть — синтезируем v3
+   * объект из cb.totalDeposited0/1 + cb.netCostBasisUsd. Покрывает
+   * orphans которым PR-30 не помог.
+   */
+  cb?: V3CostBasisResult,
 ): OpenPosition {
   // Build per-symbol price map from current supply (DeBank live prices).
   const priceBySymbol = new Map<string, number>();
@@ -264,21 +273,52 @@ function overrideCurrentFromOnChain(
   // mis-attributed value (lex POS-001/003: их v3.currentLpUsd буквально
   // swapped — $1,868 на POS-001 = реальная LP value POS-003).
   //
+  // Bug D fix (2026-05-25 egorov_v audit): если base.v3 === null но cb
+  // доступен (orphan NFT без матча lp_add op в chain-history) — синтезируем
+  // v3 из cb.totalDeposited0/1 + cb.netCostBasisUsd. Тогда V3InfoButton
+  // отрендерит popup для POS-009/010 PAXG/USDC и XAUt/USDT egorov_v.
+  //
   // currentLpUsd = pure liquidity без pending fees (на параллели с
   // оригинальным расчётом в buildOpenPositions: `lp.assetUsd - pendingFees`).
-  // hodlUsd НЕ трогаем — оно derived от depositTokens × currentPrices,
-  // currentPrices Phase J не меняет.
-  const newV3 = base.v3
+  // hodlUsd derived от depositTokens × currentPrices, currentPrices Phase J
+  // не меняет.
+  const synthesizedV3: OpenPosition["v3"] | null =
+    base.v3 == null && cb != null
+      ? (() => {
+          const depositTokens = [
+            { symbol: nft.token0.symbol, amount: cb.totalDeposited0, usdAtDeposit: 0 },
+            { symbol: nft.token1.symbol, amount: cb.totalDeposited1, usdAtDeposit: 0 },
+          ];
+          // hodlUsd = Σ depositTokens × currentPrice
+          let hodlUsd = 0;
+          for (const t of depositTokens) {
+            const px = resolvePrice(t.symbol, priceBySymbol, currentPrices);
+            if (px > 0) hodlUsd += t.amount * px;
+          }
+          return {
+            depositTokens,
+            depositUsd: cb.netCostBasisUsd,
+            hodlUsd,
+            currentLpUsd: 0, // будет переписан ниже
+            impermanentLossUsd: 0,
+            pnlUsd: 0,
+            pnlPct: 0,
+            pricesSource: "historical" as const,
+          };
+        })()
+      : null;
+  const v3Source = base.v3 ?? synthesizedV3;
+  const newV3 = v3Source
     ? (() => {
         const newCurrentLpUsd = newCurrentUsd;
-        const newImpermanentLossUsd = base.v3.hodlUsd - newCurrentLpUsd;
-        const newV3PnlUsd = newCurrentLpUsd - base.v3.depositUsd;
+        const newImpermanentLossUsd = v3Source.hodlUsd - newCurrentLpUsd;
+        const newV3PnlUsd = newCurrentLpUsd - v3Source.depositUsd;
         const newV3PnlPct =
-          base.v3.depositUsd > 0
-            ? (newV3PnlUsd / base.v3.depositUsd) * 100
+          v3Source.depositUsd > 0
+            ? (newV3PnlUsd / v3Source.depositUsd) * 100
             : 0;
         return {
-          ...base.v3,
+          ...v3Source,
           currentLpUsd: newCurrentLpUsd,
           impermanentLossUsd: newImpermanentLossUsd,
           pnlUsd: newV3PnlUsd,
@@ -429,7 +469,7 @@ export function applyV3CostBasisOverride(
           if (nftForCb) {
             next = backfillOrphanMeta(next, cb, nftForCb);
             // Phase J (Task #51): on-chain truth для current state.
-            next = overrideCurrentFromOnChain(next, nftForCb, currentPrices);
+            next = overrideCurrentFromOnChain(next, nftForCb, currentPrices, cb);
           }
           result[x.idx] = next;
           matchedTotalAuth.push(newStartUsd);
@@ -447,7 +487,7 @@ export function applyV3CostBasisOverride(
         if (nftForCb) {
           next = backfillOrphanMeta(next, cb, nftForCb);
           // Phase J (Task #51): on-chain truth для current state.
-          next = overrideCurrentFromOnChain(next, nftForCb, currentPrices);
+          next = overrideCurrentFromOnChain(next, nftForCb, currentPrices, cb);
         }
         // H6: do NOT subtract currentDebtUsd. PnL is the change in
         // collateral value only; debt is a separate liability tracked
@@ -566,7 +606,7 @@ export function applyV3CostBasisOverride(
           };
           next = backfillOrphanMeta(next, cb, nft);
           // Phase J (Task #51): on-chain truth для current state.
-          next = overrideCurrentFromOnChain(next, nft, currentPrices);
+          next = overrideCurrentFromOnChain(next, nft, currentPrices, cb);
           result[item.idx] = next;
           continue;
         }
@@ -581,7 +621,7 @@ export function applyV3CostBasisOverride(
         }
         next = backfillOrphanMeta(next, cb, nft);
         // Phase J (Task #51): on-chain truth для current state.
-        next = overrideCurrentFromOnChain(next, nft, currentPrices);
+        next = overrideCurrentFromOnChain(next, nft, currentPrices, cb);
         // H6: do NOT subtract currentDebtUsd. PnL is the change in
         // collateral value only; debt is a separate liability tracked
         // via `currentDebtUsd`. Subtracting it here double-counts the
