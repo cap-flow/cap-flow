@@ -3095,8 +3095,31 @@ function V3InfoButton({
   const v3 = p.v3;
   if (!v3) return null;
 
-  const totalCurrent = p.supplyTokens.reduce((s, t) => s + t.currentUsd, 0);
   const ilPct = v3.hodlUsd > 0 ? (v3.impermanentLossUsd / v3.hodlUsd) * 100 : 0;
+
+  // Use on-chain NPM read как single source of truth (consistent с exit scenarios).
+  // Match symbols к p.supplyTokens для USD-цен (post-override prices).
+  const priceBySym = new Map<string, number>();
+  for (const t of p.supplyTokens) {
+    if (t.amount > 0 && t.currentUsd > 0) {
+      priceBySym.set(canonicalSymbol(t.symbol), t.currentUsd / t.amount);
+    }
+  }
+  const displayTokens = onChain[0]
+    ? [
+        {
+          symbol: onChain[0].token0.symbol,
+          amount: onChain[0].amount0Current,
+          usd: onChain[0].amount0Current * (priceBySym.get(canonicalSymbol(onChain[0].token0.symbol)) ?? 0),
+        },
+        {
+          symbol: onChain[0].token1.symbol,
+          amount: onChain[0].amount1Current,
+          usd: onChain[0].amount1Current * (priceBySym.get(canonicalSymbol(onChain[0].token1.symbol)) ?? 0),
+        },
+      ]
+    : p.supplyTokens.map((t) => ({ symbol: t.symbol, amount: t.amount, usd: t.currentUsd }));
+  const totalCurrent = displayTokens.reduce((s, t) => s + t.usd, 0);
 
   return (
     <DetailsPopover
@@ -3136,8 +3159,8 @@ function V3InfoButton({
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Сейчас в позиции
           </div>
-          {p.supplyTokens.map((t) => {
-            const pct = totalCurrent > 0 ? (t.currentUsd / totalCurrent) * 100 : 0;
+          {displayTokens.map((t) => {
+            const pct = totalCurrent > 0 ? (t.usd / totalCurrent) * 100 : 0;
             return (
               <Row
                 key={t.symbol}
@@ -3290,6 +3313,19 @@ function V3RangeBlock({
         <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
           ↑ Выход вверх (Pb {fmtPrice(pos.priceUpper)})
         </div>
+        <div className="rounded border border-success/40 bg-success/10 px-2 py-1.5 my-1">
+          <div className="text-[9.5px] uppercase tracking-wider text-success/80">
+            Получит на баланс
+          </div>
+          <div className="font-mono tabular-nums text-sm font-semibold text-success">
+            {fmtAmount(pos.amount1AtPb)} {pos.token1.symbol}
+            {quoteIsStable && (
+              <span className="text-muted-foreground/80 font-normal ml-1.5 text-xs">
+                ≈ {formatUsd(pos.amount1AtPb, locale)}
+              </span>
+            )}
+          </div>
+        </div>
         {avgSellPrice != null ? (
           <>
             <Row label={`Продаст ${pos.token0.symbol}`} value={fmtAmount(soldBase)} />
@@ -3327,6 +3363,17 @@ function V3RangeBlock({
         <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
           ↓ Выход вниз (Pa {fmtPrice(pos.priceLower)})
         </div>
+        <div className="rounded border border-success/40 bg-success/10 px-2 py-1.5 my-1">
+          <div className="text-[9.5px] uppercase tracking-wider text-success/80">
+            Получит на баланс
+          </div>
+          <div className="font-mono tabular-nums text-sm font-semibold text-success">
+            {fmtAmount(pos.amount0AtPa)} {pos.token0.symbol}
+            <span className="text-muted-foreground/80 font-normal ml-1.5 text-xs">
+              ≈ {formatUsd(pos.amount0AtPa * pos.priceLower, locale)} @ Pa
+            </span>
+          </div>
+        </div>
         {avgBuyPrice != null ? (
           <>
             <Row label={`Докупит ${pos.token0.symbol}`} value={fmtAmount(boughtBase)} />
@@ -3362,8 +3409,7 @@ function V3RangeBlock({
                   value={`${fmtPrice(pnlAtPa.pBreakDown)} ${pair}`}
                 />
                 <div className="text-[10px] text-muted-foreground leading-snug pt-0.5">
-                  Если зафиксировался в {pos.token0.symbol} (на руках{" "}
-                  {fmtAmount(pos.amount0AtPa)}), нужно дождаться роста до{" "}
+                  При фиксации в {pos.token0.symbol} нужен рост до{" "}
                   {fmtPrice(pnlAtPa.pBreakDown)} {pair} — тогда продажа
                   вернёт депозит {formatUsd(depositUsd, locale)}.
                 </div>
