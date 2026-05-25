@@ -474,3 +474,108 @@ describe("PR-1 Bug #6: supplyTokens[].startUsd redistribute after amount change"
     expect(Math.abs(sumStartUsd - p.startUsd)).toBeLessThan(1);
   });
 });
+
+describe("Bug D: synthesize v3 from cb when buildV3Details returned null", () => {
+  it("synthesizes v3 объект — V3InfoButton renders popup даже без classifier-matched lp_add", () => {
+    // egorov_v POS-009 (PAXG/USDC, NFT #1159873): classifier не нашёл
+    // matching lp_add в chain history (старый mint вне sync horizon),
+    // → buildV3Details returned null → base.v3 === null. После Phase J
+    // override должен синтезировать v3 из cb данных.
+    const pos = basePos({
+      id: "POS-009",
+      startUsd: 230.67,
+      currentUsd: 230.38,
+      openHash: "0xpaxgmint",
+      supply: [
+        { symbol: "PAXG", amount: 0.0365, currentUsd: 165.88, startUsd: 165.88 },
+        { symbol: "USDC", amount: 62.85, currentUsd: 62.85, startUsd: 64.79 },
+      ],
+    });
+    expect(pos.v3).toBeUndefined();
+
+    const v3PositionMap: V3PositionMap = new Map([
+      [
+        v3PositionKey({
+          walletId: WALLET_ID,
+          chain: CHAIN,
+          deploymentId: DEPLOY_ID,
+          symbols: ["PAXG", "USDC"],
+        }),
+        [nft({ tokenId: 1159873n, amounts: [0.0365, 62.85], symbols: ["PAXG", "USDC"] })],
+      ],
+    ]);
+    const v3CostBasis = new Map<string, V3CostBasisResult>([
+      [
+        "1159873",
+        cbFor({
+          tokenId: 1159873n,
+          netCostBasisUsd: 230.67,
+          mintTxHash: "0xpaxgmint",
+          totalDeposited0: 0.0432,
+          totalDeposited1: 100,
+        }),
+      ],
+    ]);
+
+    const { positions } = applyV3CostBasisOverride([pos], v3PositionMap, v3CostBasis);
+    const p = positions[0]!;
+
+    expect(p.v3).toBeDefined();
+    expect(p.v3!.depositUsd).toBeCloseTo(230.67, 1);
+    expect(p.v3!.depositTokens).toHaveLength(2);
+    expect(p.v3!.depositTokens[0]!.symbol).toBe("PAXG");
+    expect(p.v3!.depositTokens[0]!.amount).toBeCloseTo(0.0432, 4);
+    expect(p.v3!.depositTokens[1]!.symbol).toBe("USDC");
+    expect(p.v3!.depositTokens[1]!.amount).toBeCloseTo(100, 1);
+    // currentLpUsd должен соответствовать new currentUsd (после Phase J)
+    expect(p.v3!.currentLpUsd).toBe(p.currentUsd);
+    // hodlUsd: 0.0432 PAXG × $4546 (165.88/0.0365) + 100 USDC × $1 ≈ $296
+    expect(p.v3!.hodlUsd).toBeGreaterThan(280);
+    expect(p.v3!.pricesSource).toBe("historical");
+  });
+
+  it("не трогает base.v3 если он уже задан (buildV3Details сработал)", () => {
+    const pos: OpenPosition = {
+      ...basePos({
+        id: "POS-Y",
+        startUsd: 1000,
+        currentUsd: 950,
+        openHash: "0xy",
+        supply: [
+          { symbol: "WETH", amount: 0.5, currentUsd: 950, startUsd: 1000 },
+          { symbol: "USDC", amount: 0, currentUsd: 0, startUsd: 0 },
+        ],
+      }),
+      v3: {
+        depositUsd: 1500, // отличается от cb netCostBasisUsd чтобы видеть приоритет
+        hodlUsd: 1100,
+        currentLpUsd: 950,
+        impermanentLossUsd: 150,
+        pnlUsd: -550,
+        pnlPct: -36.67,
+        depositTokens: [{ symbol: "ETH", amount: 0.4, usdAtDeposit: 1500 }],
+        pricesSource: "historical",
+      },
+    };
+    const v3PositionMap: V3PositionMap = new Map([
+      [
+        v3PositionKey({
+          walletId: WALLET_ID,
+          chain: CHAIN,
+          deploymentId: DEPLOY_ID,
+          symbols: ["WETH", "USDC"],
+        }),
+        [nft({ tokenId: 9991n, amounts: [0.5, 100], symbols: ["WETH", "USDC"] })],
+      ],
+    ]);
+    const v3CostBasis = new Map<string, V3CostBasisResult>([
+      ["9991", cbFor({ tokenId: 9991n, netCostBasisUsd: 2000, mintTxHash: "0xy" })],
+    ]);
+
+    const { positions } = applyV3CostBasisOverride([pos], v3PositionMap, v3CostBasis);
+    const p = positions[0]!;
+    // depositUsd сохраняется (1500 из base.v3), НЕ перезаписан cb (2000)
+    expect(p.v3!.depositUsd).toBe(1500);
+    expect(p.v3!.depositTokens[0]!.symbol).toBe("ETH");
+  });
+});
