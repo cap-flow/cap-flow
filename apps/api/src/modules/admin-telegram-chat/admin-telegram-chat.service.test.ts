@@ -46,17 +46,14 @@ function makeService(overrides: {
     listMessages: vi.fn(async () => []),
     totalUnread: vi.fn(async () => 0),
     markRead: vi.fn(async () => 0),
-  } as unknown as Parameters<typeof AdminTelegramChatService.prototype.sendMessage>[0] & {
-    findActiveByUser: ReturnType<typeof vi.fn>;
-    saveMessage: ReturnType<typeof vi.fn>;
   };
   const telegram = {
     sendToChat: vi.fn(async () => {
       if (overrides.sendThrows) throw new Error("API down");
       return overrides.sendOk ?? true;
     }),
-  } as unknown as Parameters<typeof AdminTelegramChatService.prototype.sendMessage>[0];
-  const audit = { log: vi.fn(async () => {}) } as unknown as Parameters<typeof AdminTelegramChatService.prototype.sendMessage>[0];
+  };
+  const audit = { log: vi.fn(async () => {}) };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const svc = new AdminTelegramChatService(repo as any, telegram as any, audit as any);
   return { svc, repo, telegram, audit };

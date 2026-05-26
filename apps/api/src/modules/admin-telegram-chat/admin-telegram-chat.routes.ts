@@ -17,6 +17,11 @@ import { z } from "zod";
 import { UnauthorizedError } from "../../core/errors.js";
 
 import type { AdminTelegramChatService } from "./admin-telegram-chat.service.js";
+import {
+  chatEventBus,
+  type ChatNewMessageEvent,
+  type ChatReadEvent,
+} from "./chat-events.bus.js";
 
 const messageSchema = z.object({
   id: z.string().uuid(),
@@ -141,6 +146,67 @@ export async function adminTelegramChatRoutes(
     async (req) => {
       const updated = await opts.service.markRead(req.params.userId);
       return { updated };
+    },
+  );
+
+  /**
+   * GET /stream — Server-Sent Events для real-time updates.
+   *
+   * Браузер открывает EventSource → подписывается на:
+   *   event: new-message  → broadcast'ит когда incoming/outgoing message
+   *   event: read         → broadcast'ит когда admin clear'ит unread
+   *   event: ping (30s)   → keep-alive чтобы прокси/balancers не убили connection
+   *
+   * Browser auto-reconnects при разрыве — robust enough для production
+   * без custom retry logic.
+   */
+  app.get(
+    "/stream",
+    {
+      // Skip Zod response schema validation — SSE not JSON.
+      // CSRF не нужен для GET через EventSource.
+      config: { skipCsrf: true },
+      preHandler: app.requireAdmin,
+    },
+    async (req, reply) => {
+      reply.raw.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no", // Disable nginx buffering.
+      });
+      const write = (event: string, data: unknown): void => {
+        try {
+          reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        } catch {
+          /* connection closed — handled by close event below */
+        }
+      };
+      // Initial ping чтобы client сразу видел connected state.
+      write("ping", { t: Date.now() });
+
+      const onMsg = (p: ChatNewMessageEvent): void => write("new-message", p);
+      const onRead = (p: ChatReadEvent): void => write("read", p);
+      chatEventBus.on("new-message", onMsg);
+      chatEventBus.on("read", onRead);
+
+      // Keep-alive ping каждые 30с (прокси типа nginx убивают idle через 60с).
+      const pingInterval = setInterval(() => {
+        try {
+          reply.raw.write(`: ping\n\n`);
+        } catch {
+          /* handled by close */
+        }
+      }, 30_000);
+
+      // Cleanup при disconnect (client tab close, network drop, server shutdown).
+      const cleanup = (): void => {
+        clearInterval(pingInterval);
+        chatEventBus.off("new-message", onMsg);
+        chatEventBus.off("read", onRead);
+      };
+      req.raw.on("close", cleanup);
+      req.raw.on("error", cleanup);
     },
   );
 }
