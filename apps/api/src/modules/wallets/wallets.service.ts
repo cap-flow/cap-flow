@@ -134,6 +134,25 @@ export class WalletsService {
 
     const normalized =
       p.type === "evm" ? p.address.toLowerCase() : p.address.trim();
+
+    // 2026-05-25 (user request): prevent duplicates across ALL wallets
+    // in account. Раньше можно было добавить тот же адрес в 2 разных
+    // кошелька — портфолио суммировал балансы 2×. DB constraint
+    // (walletId, address) спасал только от дубля в ОДНОМ кошельке.
+    //
+    // Поиск case-insensitive (lowercase EVM; trim для не-EVM). Если
+    // найден → возвращаем 409 с пояснением какому кошельку он принадлежит.
+    const existing = await this.repo.listAddressesByAccount(wallet.accountId);
+    const dup = existing.find(
+      (a) => a.address.toLowerCase() === normalized.toLowerCase(),
+    );
+    if (dup) {
+      throw new ConflictError(
+        `Адрес ${normalized.slice(0, 10)}… уже добавлен в кошелёк "${dup.walletName}". ` +
+          `Удалите его оттуда или используйте другой адрес.`,
+      );
+    }
+
     try {
       const row = await this.repo.addAddress({
         walletId: p.walletId,
