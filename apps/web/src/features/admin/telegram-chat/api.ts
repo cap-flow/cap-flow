@@ -41,6 +41,23 @@ export const conversationSchema = z.object({
 });
 export type Conversation = z.infer<typeof conversationSchema>;
 
+export const chatTemplateSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  body: z.string(),
+  sortOrder: z.number(),
+  createdBy: z.string().uuid().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type ChatTemplate = z.infer<typeof chatTemplateSchema>;
+
+export interface UpsertTemplateInput {
+  readonly title: string;
+  readonly body: string;
+  readonly sortOrder?: number;
+}
+
 export const adminTelegramChatApi = {
   listConversations: () =>
     api.get(
@@ -73,5 +90,24 @@ export const adminTelegramChatApi = {
     api.get(
       "/v1/admin/telegram-chat/unread",
       z.object({ count: z.number() }),
+    ),
+  listTemplates: () =>
+    api.get("/v1/admin/telegram-chat/templates", z.array(chatTemplateSchema)),
+  createTemplate: (input: UpsertTemplateInput) =>
+    api.post(
+      "/v1/admin/telegram-chat/templates",
+      input,
+      chatTemplateSchema,
+    ),
+  updateTemplate: (id: string, input: Partial<UpsertTemplateInput>) =>
+    api.patch(
+      `/v1/admin/telegram-chat/templates/${id}`,
+      input,
+      chatTemplateSchema,
+    ),
+  deleteTemplate: (id: string) =>
+    api.delete(
+      `/v1/admin/telegram-chat/templates/${id}`,
+      z.object({ deleted: z.boolean() }),
     ),
 };
