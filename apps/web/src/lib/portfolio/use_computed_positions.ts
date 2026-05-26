@@ -27,7 +27,6 @@ import { useLendingAudit } from "@/lib/lending/use_lending_audit";
 import { useResolvedFeatureFlag } from "@/features/feature-flags/hooks";
 import {
   isKrystalV3CrossValidationEnabled,
-  isKrystalV3PrimaryEnabled,
   isLendingAuditEnabled,
 } from "@/lib/portfolio/feature_flags";
 import { useKrystalV3Positions } from "@/lib/krystal/hook";
@@ -126,24 +125,20 @@ export function useComputedPositions(): ComputedPositions {
   );
   const lendingAuditOn = lendingAuditFlag.enabled || isLendingAuditEnabled();
 
-  // PR-K1: cross-validate V3 LP positions против Krystal Cloud (gold standard).
-  // Default OFF; включается через `capflow.feature.krystalV3CrossValidation`
-  // в localStorage. API key инжектится server-side через upstream-proxy
+  // PR-K11 (2026-05-25): Krystal V3 primary mode теперь always-on (был за
+  // feature flag, но это давало per-browser inconsistency — fees зависели от
+  // localStorage конкретного браузера). Cross-validation (debug warnings)
+  // остаётся за флагом для dev/diagnostic режима.
+  // API key инжектится server-side через upstream-proxy
   // (см. `apps/api/.../upstream-proxy.service.ts` — `KRYSTAL_API_KEY`).
   const krystalFlag = useResolvedFeatureFlag(
     "capflow.feature.krystalV3CrossValidation",
   );
-  const krystalPrimaryFlag = useResolvedFeatureFlag(
-    "capflow.feature.krystalV3Primary",
-  );
   const krystalCrossValidate =
     krystalFlag.enabled || isKrystalV3CrossValidationEnabled();
-  const krystalPrimary =
-    krystalPrimaryFlag.enabled || isKrystalV3PrimaryEnabled();
-  // Hook fetches если ЛЮБОЙ из двух режимов on (primary автоматически
-  // включает fetching — он построен поверх).
-  const krystalEnabled = krystalCrossValidate || krystalPrimary;
-  const krystalV3 = useKrystalV3Positions(loadedList, krystalEnabled);
+  const krystalPrimary = true;
+  // Hook fetches всегда (primary всегда on).
+  const krystalV3 = useKrystalV3Positions(loadedList, true);
 
   const walletHistPrices = useWalletHistPrices(loadedList);
   const [lotMethodology, setLotMethodology] = useLotMethodology();
