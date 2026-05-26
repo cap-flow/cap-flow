@@ -47,6 +47,12 @@ export interface TelegramPollerOptions {
    */
   readonly signup?: import("../auth-telegram-signup/signup.service.js").TelegramSignupService;
   /**
+   * Optional: admin chat repository. Без него non-/start сообщения от
+   * linked users теряются (return false из processTelegramUpdate),
+   * диалоги в админ-панели остаются пустыми.
+   */
+  readonly repository?: import("./telegram.repository.js").TelegramRepository;
+  /**
    * Long-poll timeout (seconds) — Telegram holds the connection open
    * up to this long if no update is ready. Server-side cap is 50s; we
    * use 25s as a safe default that survives most NAT keepalives.
@@ -100,6 +106,11 @@ export class TelegramPoller {
             await processTelegramUpdate(u, {
               telegram: this.opts.telegram,
               ...(this.opts.signup ? { signup: this.opts.signup } : {}),
+              ...(this.opts.repository
+                ? { repository: this.opts.repository }
+                : {}),
+              getBotApiToken: this.opts.getBotApiToken,
+              proxyState: this.opts.proxyState,
             });
           } catch (e) {
             this.opts.log.error(
