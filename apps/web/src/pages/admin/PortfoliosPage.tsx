@@ -35,7 +35,7 @@ export function AdminPortfoliosPage(): JSX.Element {
         title="Портфели"
         description="Все аккаунты платформы: текущий капитал, последний refresh, ошибки за 24ч. Кликни по строке — провалишься в дашборд этого пользователя (impersonation). Кнопка «Обновить» ставит задачу refresh для ВСЕХ активных аккаунтов; снэпшоты подтянутся в течение 30-60 сек."
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
