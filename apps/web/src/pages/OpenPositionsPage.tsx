@@ -3205,9 +3205,15 @@ function V3InfoButton({
 }) {
   const { locale } = useI18n();
   const v3 = p.v3;
-  if (!v3) return null;
+  // 2026-05-25 (Derbent21 audit): рендерим partial popup даже если
+  // p.v3 = null. Раньше return null блокировал popup для экзотических
+  // пар (PAXG/XAUt, etc.) где Etherscan не нашёл IncreaseLiquidity events.
+  // Нужно: onChain[0] (NFT range data из Alchemy) — ranges + exit
+  // scenarios available, только IL/HODL/PnL vs deposit secции скрываем.
+  if (!v3 && !onChain[0]) return null;
 
-  const ilPct = v3.hodlUsd > 0 ? (v3.impermanentLossUsd / v3.hodlUsd) * 100 : 0;
+  const hasIL = v3 && v3.hodlUsd > 0;
+  const ilPct = hasIL ? (v3.impermanentLossUsd / v3.hodlUsd) * 100 : 0;
 
   // Use on-chain NPM read как single source of truth (consistent с exit scenarios).
   // Match symbols к p.supplyTokens для USD-цен (post-override prices).
@@ -3249,22 +3255,31 @@ function V3InfoButton({
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Concentrated liquidity (V3)
           </div>
-          <div
-            className={cn(
-              "text-[10px]",
-              v3.impermanentLossUsd > 0
-                ? "text-destructive"
-                : v3.impermanentLossUsd < 0
-                  ? "text-success"
-                  : "text-muted-foreground",
-            )}
-            title={`HODL ${formatUsd(v3.hodlUsd, locale)} · LP ${formatUsd(v3.currentLpUsd, locale)}`}
-          >
-            IL {v3.impermanentLossUsd > 0 ? "−" : v3.impermanentLossUsd < 0 ? "+" : ""}
-            {formatUsd(Math.abs(v3.impermanentLossUsd), locale)} ·{" "}
-            {ilPct > 0 ? "−" : ilPct < 0 ? "+" : ""}
-            {Math.abs(ilPct).toFixed(2)}%
-          </div>
+          {hasIL ? (
+            <div
+              className={cn(
+                "text-[10px]",
+                v3!.impermanentLossUsd > 0
+                  ? "text-destructive"
+                  : v3!.impermanentLossUsd < 0
+                    ? "text-success"
+                    : "text-muted-foreground",
+              )}
+              title={`HODL ${formatUsd(v3!.hodlUsd, locale)} · LP ${formatUsd(v3!.currentLpUsd, locale)}`}
+            >
+              IL {v3!.impermanentLossUsd > 0 ? "−" : v3!.impermanentLossUsd < 0 ? "+" : ""}
+              {formatUsd(Math.abs(v3!.impermanentLossUsd), locale)} ·{" "}
+              {ilPct > 0 ? "−" : ilPct < 0 ? "+" : ""}
+              {Math.abs(ilPct).toFixed(2)}%
+            </div>
+          ) : (
+            <div
+              className="text-[10px] text-muted-foreground"
+              title="IL и PnL vs депозит недоступны — нет данных о mint этой NFT (Etherscan не вернул IncreaseLiquidity events)."
+            >
+              IL —
+            </div>
+          )}
         </div>
 
         <div className="space-y-1">
@@ -3293,8 +3308,8 @@ function V3InfoButton({
             <V3RangeBlock
               key={pos.tokenId.toString()}
               pos={pos}
-              depositUsd={v3.depositUsd}
-              depositTokens={v3.depositTokens}
+              depositUsd={v3?.depositUsd ?? 0}
+              depositTokens={v3?.depositTokens ?? []}
             />
           ))
         ) : (
@@ -3351,9 +3366,15 @@ function V3RangeBlock({
   const depAmount0 = findDepositAmount(depositTokens, pos.token0.symbol);
   const depAmount1 = findDepositAmount(depositTokens, pos.token1.symbol);
 
-  // PnL и P_break при exit-down (Pa). Считаем когда quote — стейбл.
+  // 2026-05-25 (Derbent21 audit): если depositUsd<=0 (V3 popup для NFT
+  // без mint history — экзотические пары PAXG/XAUt, etc.) — PnL vs
+  // deposit + Безубыток не имеют смысла. Range/exit amounts всё равно
+  // показываем.
+  const hasDeposit = depositUsd > 0;
+
+  // PnL и P_break при exit-down (Pa). Считаем когда quote — стейбл И есть deposit.
   let pnlAtPa: { lpUsd: number; lpDeltaUsd: number; lpDeltaPct: number; vsHoldUsd: number; pBreakDown: number | null } | null = null;
-  if (quoteIsStable) {
+  if (quoteIsStable && hasDeposit) {
     const lpUsd = pos.amount0AtPa * pos.priceLower + pos.amount1AtPa * 1;
     const hodlUsd = depAmount0 * pos.priceLower + depAmount1 * 1;
     pnlAtPa = {
@@ -3367,7 +3388,7 @@ function V3RangeBlock({
 
   // PnL при exit-up (Pb). Когда quote — стейбл, итог фиксирован.
   let pnlAtPb: { lpUsd: number; lpDeltaUsd: number; lpDeltaPct: number; vsHoldUsd: number; pBreakUp: number | null; lockedInQuote: boolean } | null = null;
-  if (quoteIsStable) {
+  if (quoteIsStable && hasDeposit) {
     const lpUsd = pos.amount1AtPb;
     const hodlUsd = depAmount0 * pos.priceUpper + depAmount1 * 1;
     pnlAtPb = {
