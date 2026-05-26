@@ -426,61 +426,107 @@ export function PortfolioPage(): JSX.Element {
           {tokensView.length === 0 ? (
             <Empty />
           ) : (
-            <table className="w-full text-sm">
-              <thead className="border-y border-border bg-secondary/40 text-xs uppercase tracking-wider text-muted-foreground">
-                <tr>
-                  <Th>Токен</Th>
-                  <Th>Кошелёк</Th>
-                  <Th>Сеть</Th>
-                  <Th align="right">Кол-во</Th>
-                  <Th align="right">Цена</Th>
-                  <Th align="right">USD</Th>
-                  <Th align="right">PnL</Th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {tokensView.map((t) => (
-                  <tr
-                    key={`${t.walletId}-${t.chain}-${t.tokenId}`}
-                    className="hover:bg-accent/40"
-                  >
-                    <td className="px-4 py-2.5">
-                      <span className="font-medium">{t.symbol}</span>
-                      {t.isStable && (
-                        <Badge variant="muted" className="ml-2 h-5 px-1.5 text-[10px]">
-                          stable
-                        </Badge>
-                      )}
-                      {!t.isKnown && (
-                        <Badge variant="warning" className="ml-2 h-5 px-1.5 text-[10px]">
-                          ?
-                        </Badge>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5 text-muted-foreground">
-                      {t.walletName}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <Badge variant="outline" className="uppercase text-[10px]">
-                        {t.chain}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">
-                      {formatNumber(t.amount, locale, 6)}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">
-                      {t.price != null ? formatUsd(t.price, locale) : "—"}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">
-                      {formatUsd(t.usd, locale)}
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">
-                      <PnlBadge pnlUsd={t.pnlUsd} pnlPct={t.pnlPct} />
-                    </td>
+            <>
+              {/* Desktop: таблица */}
+              <table className="hidden md:table w-full text-sm">
+                <thead className="border-y border-border bg-secondary/40 text-xs uppercase tracking-wider text-muted-foreground">
+                  <tr>
+                    <Th>Токен</Th>
+                    <Th>Кошелёк</Th>
+                    <Th>Сеть</Th>
+                    <Th align="right">Кол-во</Th>
+                    <Th align="right">Цена</Th>
+                    <Th align="right">USD</Th>
+                    <Th align="right">PnL</Th>
                   </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {tokensView.map((t) => (
+                    <tr
+                      key={`${t.walletId}-${t.chain}-${t.tokenId}`}
+                      className="hover:bg-accent/40"
+                    >
+                      <td className="px-4 py-2.5">
+                        <span className="font-medium">{t.symbol}</span>
+                        {t.isStable && (
+                          <Badge variant="muted" className="ml-2 h-5 px-1.5 text-[10px]">
+                            stable
+                          </Badge>
+                        )}
+                        {!t.isKnown && (
+                          <Badge variant="warning" className="ml-2 h-5 px-1.5 text-[10px]">
+                            ?
+                          </Badge>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-muted-foreground">
+                        {t.walletName}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <Badge variant="outline" className="uppercase text-[10px]">
+                          {t.chain}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums">
+                        {formatNumber(t.amount, locale, 6)}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">
+                        {t.price != null ? formatUsd(t.price, locale) : "—"}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums">
+                        {formatUsd(t.usd, locale)}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums">
+                        <PnlBadge pnlUsd={t.pnlUsd} pnlPct={t.pnlPct} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {/* Mobile: карточки */}
+              <ul className="md:hidden divide-y divide-border">
+                {tokensView.map((t) => (
+                  <li
+                    key={`${t.walletId}-${t.chain}-${t.tokenId}`}
+                    className="px-4 py-3 text-sm"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                        <span className="font-medium">{t.symbol}</span>
+                        {t.isStable && (
+                          <Badge variant="muted" className="h-5 px-1.5 text-[10px]">stable</Badge>
+                        )}
+                        {!t.isKnown && (
+                          <Badge variant="warning" className="h-5 px-1.5 text-[10px]">?</Badge>
+                        )}
+                        <Badge variant="outline" className="uppercase text-[10px]">{t.chain}</Badge>
+                      </div>
+                      <div className="text-right tabular-nums shrink-0">
+                        <div className="font-medium">{formatUsd(t.usd, locale)}</div>
+                        <PnlBadge pnlUsd={t.pnlUsd} pnlPct={t.pnlPct} />
+                      </div>
+                    </div>
+                    <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Кошелёк</dt>
+                        <dd className="text-right truncate">{t.walletName}</dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Кол-во</dt>
+                        <dd className="text-right tabular-nums">{formatNumber(t.amount, locale, 6)}</dd>
+                      </div>
+                      <div className="flex justify-between gap-2 col-span-2">
+                        <dt className="text-muted-foreground">Цена</dt>
+                        <dd className="text-right tabular-nums">
+                          {t.price != null ? formatUsd(t.price, locale) : "—"}
+                        </dd>
+                      </div>
+                    </dl>
+                  </li>
                 ))}
-              </tbody>
-            </table>
+              </ul>
+            </>
           )}
         </CardContent>
       </Card>

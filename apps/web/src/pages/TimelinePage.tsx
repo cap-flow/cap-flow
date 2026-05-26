@@ -440,8 +440,9 @@ export function TimelinePage(): JSX.Element {
           </CardTitle>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs" style={{ minWidth: 900 }}>
+          {/* Desktop */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-xs">
               <thead className="border-y border-border bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium w-44">Time</th>
@@ -648,6 +649,149 @@ export function TimelinePage(): JSX.Element {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile */}
+          <ul className="md:hidden divide-y divide-border border-y border-border">
+            {visible.length === 0 ? (
+              <li className="px-4 py-12 text-center text-xs text-muted-foreground">
+                {totalCount === 0
+                  ? "Нет операций. Подключи кошелёк в Registry."
+                  : "Нет операций по выбранным фильтрам."}
+              </li>
+            ) : (
+              visible.map((it, idx) => {
+                if (it.kind === "cex") {
+                  const noteColor = it.note?.startsWith("+")
+                    ? "text-emerald-400"
+                    : it.note?.startsWith("-")
+                      ? "text-destructive"
+                      : "text-muted-foreground";
+                  return (
+                    <li
+                      key={`cex:${it.exchange}:${it.txHash ?? idx}:${idx}`}
+                      className="px-4 py-3 text-xs bg-purple-500/[0.03]"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                          <span className="rounded border border-purple-500/30 bg-purple-500/15 text-purple-300 px-1.5 py-0.5 text-[10px] uppercase font-medium">
+                            {it.exchange}
+                          </span>
+                          <Badge variant="outline" className="text-[9px] uppercase">cex</Badge>
+                          <span
+                            className={
+                              "inline-block rounded border px-1.5 py-0.5 text-[10px] " +
+                              (it.subtype === "sale" || it.subtype === "withdrawal"
+                                ? "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                                : it.subtype === "income"
+                                  ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                                  : it.subtype === "deposit"
+                                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                                    : "bg-cyan-500/15 text-cyan-300 border-cyan-500/30")
+                            }
+                          >
+                            {it.subtype}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+                          {formatDateTime(it.time)}
+                        </span>
+                      </div>
+                      <div className="mt-2 inline-flex items-center gap-1 rounded border border-muted px-1.5 py-0.5 text-[11px]">
+                        <span className="tabular-nums">{formatAmount(it.amount)}</span>
+                        <span className="font-medium">{it.asset}</span>
+                        {it.usd > 0 && (
+                          <span className="text-muted-foreground/70 text-[9px]">
+                            ({formatUsd(it.usd)})
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1.5 flex justify-between gap-2 text-[11px]">
+                        <span className={"tabular-nums " + noteColor}>{it.note ?? "—"}</span>
+                        <span className="font-mono text-[10px] text-muted-foreground">
+                          {it.txHash ? shortHash(it.txHash) : "—"}
+                        </span>
+                      </div>
+                    </li>
+                  );
+                }
+                const op = it.op;
+                const displayedType = it.manualOpType ?? op.type;
+                const colorClass = OP_TYPE_COLOR[displayedType as OpType] ?? DEFAULT_BADGE;
+                return (
+                  <li
+                    key={`${op.chain}:${op.hash}:${idx}`}
+                    className={
+                      "px-4 py-3 text-xs " +
+                      (it.excluded ? "opacity-50 line-through" : "")
+                    }
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                        <Link
+                          to={`/wallet/${it.walletId.startsWith("api:") ? it.walletId.split(":")[1] : it.walletId}`}
+                          className="text-brand-cyan hover:underline"
+                        >
+                          {it.walletName}
+                        </Link>
+                        <Badge variant="outline" className="text-[9px] uppercase">{op.chain}</Badge>
+                        <span className={"inline-block rounded border px-1.5 py-0.5 text-[10px] " + colorClass}>
+                          {displayedType}
+                          {it.manualOpType && <span className="ml-1 opacity-70">✎</span>}
+                        </span>
+                        {it.excluded && (
+                          <span className="text-destructive text-[10px]">✕</span>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+                        {formatDateTime(op.time)}
+                      </span>
+                    </div>
+                    {op.movement.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {op.movement.slice(0, 4).map((m, i) => (
+                          <span
+                            key={i}
+                            className={
+                              "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] " +
+                              (m.direction === "in"
+                                ? "border-emerald-500/30 text-emerald-300"
+                                : "border-rose-500/30 text-rose-300")
+                            }
+                          >
+                            <span>{m.direction === "in" ? "+" : "−"}</span>
+                            <span className="tabular-nums">{formatAmount(m.amount)}</span>
+                            <span className="font-medium">{m.symbol}</span>
+                            {m.usd != null && m.usd >= 1 && (
+                              <span className="text-muted-foreground/70 text-[9px]">
+                                ({formatUsd(m.usd)})
+                              </span>
+                            )}
+                          </span>
+                        ))}
+                        {op.movement.length > 4 && (
+                          <span className="text-[10px] text-muted-foreground self-center">
+                            +{op.movement.length - 4}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    <div className="mt-1.5 flex justify-between gap-2 text-[11px]">
+                      <span className="tabular-nums text-muted-foreground">
+                        {op.netUsd !== 0 ? `Net ${formatUsd(op.netUsd)}` : ""}
+                      </span>
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {shortHash(op.hash)}
+                        {it.manualCostBasisUsd != null && (
+                          <span className="ml-1.5 text-amber-400">$</span>
+                        )}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })
+            )}
+          </ul>
+
           {hasMore && (
             <div className="border-t border-border p-3 text-center">
               <button

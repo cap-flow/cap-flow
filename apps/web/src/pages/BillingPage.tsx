@@ -144,34 +144,70 @@ export function BillingPage(): JSX.Element {
           ) : !payments.data || payments.data.length === 0 ? (
             <p className="text-sm text-muted-foreground">Платежей пока нет.</p>
           ) : (
-            <table className="w-full text-sm">
-              <thead className="text-left text-muted-foreground">
-                <tr>
-                  <th className="py-2">Дата</th>
-                  <th className="py-2">Тип</th>
-                  <th className="py-2">Тариф</th>
-                  <th className="py-2 text-right">Сумма, USD</th>
-                  <th className="py-2">До</th>
-                </tr>
-              </thead>
-              <tbody>
-                {payments.data.map((p) => (
-                  <tr key={p.id} className="border-t">
-                    <td className="py-2">
-                      {new Date(p.paidAt).toLocaleDateString("ru")}
-                    </td>
-                    <td className="py-2">{p.kind}</td>
-                    <td className="py-2">{p.plan}</td>
-                    <td className="py-2 text-right">{p.amountUsd}</td>
-                    <td className="py-2">
-                      {p.periodEnd
-                        ? new Date(p.periodEnd).toLocaleDateString("ru")
-                        : "—"}
-                    </td>
+            <>
+              {/* Desktop */}
+              <table className="hidden md:table w-full text-sm">
+                <thead className="text-left text-muted-foreground">
+                  <tr>
+                    <th className="py-2">Дата</th>
+                    <th className="py-2">Тип</th>
+                    <th className="py-2">Тариф</th>
+                    <th className="py-2 text-right">Сумма, USD</th>
+                    <th className="py-2">До</th>
                   </tr>
+                </thead>
+                <tbody>
+                  {payments.data.map((p) => (
+                    <tr key={p.id} className="border-t">
+                      <td className="py-2">
+                        {new Date(p.paidAt).toLocaleDateString("ru")}
+                      </td>
+                      <td className="py-2">{p.kind}</td>
+                      <td className="py-2">{p.plan}</td>
+                      <td className="py-2 text-right">{p.amountUsd}</td>
+                      <td className="py-2">
+                        {p.periodEnd
+                          ? new Date(p.periodEnd).toLocaleDateString("ru")
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {/* Mobile */}
+              <ul className="md:hidden divide-y divide-border">
+                {payments.data.map((p) => (
+                  <li key={p.id} className="py-3 text-sm">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="font-medium">{p.plan}</div>
+                        <div className="text-xs text-muted-foreground">{p.kind}</div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="font-semibold tabular-nums">${p.amountUsd}</div>
+                      </div>
+                    </div>
+                    <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Дата</dt>
+                        <dd className="tabular-nums">
+                          {new Date(p.paidAt).toLocaleDateString("ru")}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">До</dt>
+                        <dd className="tabular-nums">
+                          {p.periodEnd
+                            ? new Date(p.periodEnd).toLocaleDateString("ru")
+                            : "—"}
+                        </dd>
+                      </div>
+                    </dl>
+                  </li>
                 ))}
-              </tbody>
-            </table>
+              </ul>
+            </>
           )}
         </CardContent>
       </Card>

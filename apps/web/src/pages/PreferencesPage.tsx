@@ -215,7 +215,8 @@ function SubscriptionsSection(): JSX.Element {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <table className="w-full text-sm">
+        {/* Desktop */}
+        <table className="hidden md:table w-full text-sm">
           <thead className="text-left text-muted-foreground">
             <tr>
               <th className="py-2">Событие</th>
@@ -256,6 +257,38 @@ function SubscriptionsSection(): JSX.Element {
             ))}
           </tbody>
         </table>
+
+        {/* Mobile */}
+        <ul className="md:hidden divide-y divide-border">
+          {KNOWN_NOTIFICATION_TYPES.map((t) => (
+            <li key={t.key} className="py-3 text-sm">
+              <div className="font-medium">{t.label}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                {t.description}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <label className="flex items-center justify-between gap-2 rounded border border-border bg-secondary/30 px-3 py-2">
+                  <span className="text-xs">Email</span>
+                  <input
+                    type="checkbox"
+                    checked={isEnabled(t.key, "email")}
+                    onChange={(e) => onToggle(t.key, "email", e.target.checked)}
+                    disabled={upsert.isPending}
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-2 rounded border border-border bg-secondary/30 px-3 py-2">
+                  <span className="text-xs">Telegram</span>
+                  <input
+                    type="checkbox"
+                    checked={isEnabled(t.key, "telegram")}
+                    onChange={(e) => onToggle(t.key, "telegram", e.target.checked)}
+                    disabled={upsert.isPending}
+                  />
+                </label>
+              </div>
+            </li>
+          ))}
+        </ul>
       </CardContent>
     </Card>
   );

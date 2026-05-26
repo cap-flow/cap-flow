@@ -109,7 +109,7 @@ export function CoveragePage(): JSX.Element {
   if (!data) return <></>;
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 sm:p-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">
           Покрытие данных
@@ -135,68 +135,129 @@ export function CoveragePage(): JSX.Element {
               (BingX/Bybit API limit) — cost basis для них стартует с $0,
               реализованный gain в Tax export будет завышен.
             </p>
-            <div className="overflow-x-auto rounded border border-border">
-              <table className="w-full text-xs">
-                <thead className="bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-1.5 text-left">Asset</th>
-                    <th className="px-3 py-1.5 text-left">Issue</th>
-                    <th className="px-3 py-1.5 text-right">Bought + Deposited</th>
-                    <th className="px-3 py-1.5 text-right">Sold + Withdrawn</th>
-                    <th className="px-3 py-1.5 text-right">Missing</th>
-                    <th className="px-3 py-1.5 text-right">Ratio</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {gapsQ.data.gaps.map((g) => (
-                    <tr
-                      key={g.asset}
-                      className={
-                        g.severity === "error"
-                          ? "bg-destructive/5"
-                          : "bg-amber-500/5"
-                      }
-                    >
-                      <td className="px-3 py-1.5 font-medium">{g.asset}</td>
-                      <td className="px-3 py-1.5 text-[11px]">
-                        {g.kind === "no_acquisitions_at_all"
-                          ? "Нет покупок / депозитов"
-                          : "Outflow > inflow"}
-                        <span
-                          className={
-                            "ml-1.5 rounded border px-1 py-0.5 text-[9px] uppercase " +
-                            (g.severity === "error"
-                              ? "border-destructive/30 text-destructive"
-                              : "border-amber-500/30 text-amber-400")
-                          }
-                        >
-                          {g.severity}
-                        </span>
-                      </td>
-                      <td className="px-3 py-1.5 text-right tabular-nums">
-                        {g.inflow.toLocaleString("ru-RU", {
-                          maximumFractionDigits: 4,
-                        })}
-                      </td>
-                      <td className="px-3 py-1.5 text-right tabular-nums">
-                        {g.outflow.toLocaleString("ru-RU", {
-                          maximumFractionDigits: 4,
-                        })}
-                      </td>
-                      <td className="px-3 py-1.5 text-right tabular-nums text-destructive">
-                        {g.missing.toLocaleString("ru-RU", {
-                          maximumFractionDigits: 4,
-                        })}
-                      </td>
-                      <td className="px-3 py-1.5 text-right tabular-nums">
-                        {Number.isFinite(g.ratio)
-                          ? `${g.ratio.toFixed(1)}×`
-                          : "∞"}
-                      </td>
+            <div className="rounded border border-border">
+              {/* Desktop: таблица */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-1.5 text-left">Asset</th>
+                      <th className="px-3 py-1.5 text-left">Issue</th>
+                      <th className="px-3 py-1.5 text-right">Bought + Deposited</th>
+                      <th className="px-3 py-1.5 text-right">Sold + Withdrawn</th>
+                      <th className="px-3 py-1.5 text-right">Missing</th>
+                      <th className="px-3 py-1.5 text-right">Ratio</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {gapsQ.data.gaps.map((g) => (
+                      <tr
+                        key={g.asset}
+                        className={
+                          g.severity === "error"
+                            ? "bg-destructive/5"
+                            : "bg-amber-500/5"
+                        }
+                      >
+                        <td className="px-3 py-1.5 font-medium">{g.asset}</td>
+                        <td className="px-3 py-1.5 text-[11px]">
+                          {g.kind === "no_acquisitions_at_all"
+                            ? "Нет покупок / депозитов"
+                            : "Outflow > inflow"}
+                          <span
+                            className={
+                              "ml-1.5 rounded border px-1 py-0.5 text-[9px] uppercase " +
+                              (g.severity === "error"
+                                ? "border-destructive/30 text-destructive"
+                                : "border-amber-500/30 text-amber-400")
+                            }
+                          >
+                            {g.severity}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          {g.inflow.toLocaleString("ru-RU", {
+                            maximumFractionDigits: 4,
+                          })}
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          {g.outflow.toLocaleString("ru-RU", {
+                            maximumFractionDigits: 4,
+                          })}
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-destructive">
+                          {g.missing.toLocaleString("ru-RU", {
+                            maximumFractionDigits: 4,
+                          })}
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          {Number.isFinite(g.ratio)
+                            ? `${g.ratio.toFixed(1)}×`
+                            : "∞"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile: карточки */}
+              <ul className="md:hidden divide-y divide-border">
+                {gapsQ.data.gaps.map((g) => (
+                  <li
+                    key={g.asset}
+                    className={
+                      "px-3 py-2.5 text-xs " +
+                      (g.severity === "error" ? "bg-destructive/5" : "bg-amber-500/5")
+                    }
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-sm">{g.asset}</span>
+                      <span
+                        className={
+                          "rounded border px-1.5 py-0.5 text-[9px] uppercase " +
+                          (g.severity === "error"
+                            ? "border-destructive/30 text-destructive"
+                            : "border-amber-500/30 text-amber-400")
+                        }
+                      >
+                        {g.severity}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      {g.kind === "no_acquisitions_at_all"
+                        ? "Нет покупок / депозитов"
+                        : "Outflow > inflow"}
+                    </div>
+                    <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Bought+Dep</dt>
+                        <dd className="tabular-nums">
+                          {g.inflow.toLocaleString("ru-RU", { maximumFractionDigits: 4 })}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Sold+Wdr</dt>
+                        <dd className="tabular-nums">
+                          {g.outflow.toLocaleString("ru-RU", { maximumFractionDigits: 4 })}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Missing</dt>
+                        <dd className="tabular-nums text-destructive">
+                          {g.missing.toLocaleString("ru-RU", { maximumFractionDigits: 4 })}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Ratio</dt>
+                        <dd className="tabular-nums">
+                          {Number.isFinite(g.ratio) ? `${g.ratio.toFixed(1)}×` : "∞"}
+                        </dd>
+                      </div>
+                    </dl>
+                  </li>
+                ))}
+              </ul>
             </div>
             <p className="text-[10px] text-muted-foreground">
               Решение: (1) Re-sync CEX accounts с включёнными Deposit
@@ -215,8 +276,9 @@ export function CoveragePage(): JSX.Element {
           </CardTitle>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs" style={{ minWidth: 800 }}>
+          {/* Desktop: таблица */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-xs">
               <thead className="border-y border-border bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">Кошелёк</th>
@@ -289,6 +351,63 @@ export function CoveragePage(): JSX.Element {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile: карточки */}
+          <ul className="md:hidden divide-y divide-border border-y border-border">
+            {data.wallets.length === 0 ? (
+              <li className="px-4 py-6 text-center text-xs text-muted-foreground">
+                Нет кошельков
+              </li>
+            ) : (
+              data.wallets.map((w) => {
+                const badge = freshnessBadge(w.lastSyncAt);
+                return (
+                  <li key={w.id} className="px-4 py-3 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <Link
+                        to={`/wallet/${w.id}`}
+                        className="font-medium text-sm text-brand-cyan hover:underline truncate"
+                      >
+                        {w.name}
+                      </Link>
+                      <span
+                        className={
+                          "inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] shrink-0 " +
+                          badge.className
+                        }
+                      >
+                        {badge.emoji}{" "}
+                        {w.lastSyncError ? "ошибка" : w.lastSyncAt ? "ok" : "не синканся"}
+                      </span>
+                    </div>
+                    <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Сеть</dt>
+                        <dd className="uppercase">{w.kind}</dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Ops</dt>
+                        <dd className="tabular-nums">
+                          {w.opsCount > 0 ? w.opsCount.toLocaleString() : "—"}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2 col-span-2">
+                        <dt className="text-muted-foreground">Last sync</dt>
+                        <dd className="text-muted-foreground">
+                          {formatRelativeTime(w.lastSyncAt)}
+                        </dd>
+                      </div>
+                    </dl>
+                    {w.lastSyncError && (
+                      <div className="mt-1 text-[10px] text-destructive">
+                        {w.lastSyncError.slice(0, 120)}
+                      </div>
+                    )}
+                  </li>
+                );
+              })
+            )}
+          </ul>
         </CardContent>
       </Card>
 
@@ -299,8 +418,9 @@ export function CoveragePage(): JSX.Element {
           </CardTitle>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs" style={{ minWidth: 1000 }}>
+          {/* Desktop: таблица */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-xs">
               <thead className="border-y border-border bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">Биржа</th>
@@ -420,6 +540,100 @@ export function CoveragePage(): JSX.Element {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile: карточки */}
+          <ul className="md:hidden divide-y divide-border border-y border-border">
+            {data.cexAccounts.length === 0 ? (
+              <li className="px-4 py-6 text-center text-xs text-muted-foreground">
+                Нет подключённых бирж
+              </li>
+            ) : (
+              data.cexAccounts.map((a) => {
+                const newest =
+                  a.lastSyncAt && a.lastTradesSyncAt
+                    ? a.lastSyncAt > a.lastTradesSyncAt
+                      ? a.lastSyncAt
+                      : a.lastTradesSyncAt
+                    : (a.lastSyncAt ?? a.lastTradesSyncAt);
+                const badge = freshnessBadge(newest);
+                const hasError = !!(a.lastSyncError || a.lastTradesSyncError);
+                return (
+                  <li key={a.id} className="px-4 py-3 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="font-medium text-sm">{a.exchange}</div>
+                        {a.label && (
+                          <div className="text-[10px] text-muted-foreground truncate">
+                            {a.label}
+                          </div>
+                        )}
+                      </div>
+                      <span
+                        className={
+                          "inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] shrink-0 " +
+                          badge.className
+                        }
+                      >
+                        {badge.emoji} {hasError ? "ошибка" : newest ? "ok" : "не синканся"}
+                      </span>
+                    </div>
+                    <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Trades</dt>
+                        <dd className="tabular-nums">
+                          {a.tradesCount > 0 ? a.tradesCount.toLocaleString() : "—"}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Transfers</dt>
+                        <dd className="tabular-nums">
+                          {a.transfersCount > 0 ? a.transfersCount.toLocaleString() : "—"}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Internal</dt>
+                        <dd className="tabular-nums">
+                          {a.internalTransfersCount > 0
+                            ? a.internalTransfersCount.toLocaleString()
+                            : a.lastInternalTransfersSyncAt
+                              ? "0"
+                              : "—"}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">P2P</dt>
+                        <dd className="tabular-nums">
+                          {a.p2pCount > 0 ? a.p2pCount.toLocaleString() : "—"}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2 col-span-2">
+                        <dt className="text-muted-foreground">Last sync</dt>
+                        <dd className="text-muted-foreground">
+                          {formatRelativeTime(a.lastSyncAt)}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-2 col-span-2">
+                        <dt className="text-muted-foreground">Last trades</dt>
+                        <dd className="text-muted-foreground">
+                          {formatRelativeTime(a.lastTradesSyncAt)}
+                        </dd>
+                      </div>
+                    </dl>
+                    {(a.lastSyncError || a.lastTradesSyncError) && (
+                      <div className="mt-1 text-[10px] text-destructive">
+                        {(a.lastSyncError ?? a.lastTradesSyncError ?? "")
+                          .toString()
+                          .slice(0, 120)}
+                      </div>
+                    )}
+                    <div className="mt-2 text-[10px] text-muted-foreground">
+                      Sync через /registry
+                    </div>
+                  </li>
+                );
+              })
+            )}
+          </ul>
         </CardContent>
       </Card>
     </div>
