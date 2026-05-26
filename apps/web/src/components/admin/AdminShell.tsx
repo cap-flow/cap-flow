@@ -11,6 +11,7 @@ import {
   ListChecks,
   LogOut,
   Menu,
+  MessageSquare,
   ShieldAlert,
   ShieldCheck,
   Undo2,
@@ -22,6 +23,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { LogoLockup } from "@/components/brand/Logo";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/features/auth/AuthProvider";
+import { useUnreadCount } from "@/features/admin/telegram-chat/hooks";
 import { cn } from "@/lib/utils";
 
 interface AdminNavItem {
@@ -62,6 +64,7 @@ const ADMIN_NAV: AdminNavGroup[] = [
       { to: "/admin/users", label: "Пользователи", icon: Users },
       { to: "/admin/portfolios", label: "Портфели", icon: LayoutGrid },
       { to: "/admin/billing", label: "Биллинг", icon: CreditCard },
+      { to: "/admin/telegram-chat", label: "Чат TG", icon: MessageSquare },
     ],
   },
   {
@@ -169,7 +172,10 @@ function AdminSidebar({
                         isActive ? "text-brand-cyan" : "text-muted-foreground"
                       )}
                     />
-                    <span>{label}</span>
+                    <span className="flex-1">{label}</span>
+                    {to === "/admin/telegram-chat" && (
+                      <TelegramUnreadBadge />
+                    )}
                   </>
                 )}
               </NavLink>
@@ -227,5 +233,20 @@ function AdminTopbar({ onMenuClick }: { readonly onMenuClick: () => void }) {
         </Button>
       </div>
     </header>
+  );
+}
+
+/**
+ * Маленький компонент-индикатор unread в sidebar — показывает counter
+ * входящих Telegram сообщений (если > 0). Hook polls /unread каждые 10с.
+ */
+function TelegramUnreadBadge(): JSX.Element | null {
+  const q = useUnreadCount();
+  const count = q.data?.count ?? 0;
+  if (count === 0) return null;
+  return (
+    <span className="inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
+      {count > 99 ? "99+" : count}
+    </span>
   );
 }
