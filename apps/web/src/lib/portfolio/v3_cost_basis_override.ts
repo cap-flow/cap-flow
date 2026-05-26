@@ -66,8 +66,24 @@ function backfillOrphanMeta(
   cb: V3CostBasisResult,
   nft: V3Position,
 ): OpenPosition {
-  if (!base.coverageIncomplete) return base;
+  // 2026-05-26 (VolnyySanya audit POS-002): раньше эта функция бежала только
+  // при coverageIncomplete=true (orphan path). Но Phase 1/1.5 match-path
+  // тоже нуждается в overrides: если у юзера была СТАРАЯ NFT в том же пуле
+  // (бёрнт), DeBank's earliest lp_add op подбирался как `openedAt` текущей
+  // позиции → дата на 6 месяцев раньше реального mint'а. Etherscan
+  // mintBlockTime — single source of truth.
+  //
+  // Теперь backfill ВСЕГДА runs если cb.mintBlockTime известен и
+  // отличается от base.openedAt (или последний null). Возвращаем patched
+  // position с правильными openedAt/openHash/ageDays/feeApr.
   if (cb.mintBlockTime === undefined) return base;
+  // Skip если openedAt уже совпадает (за epsilon 60 сек — для floor разницы).
+  if (
+    base.openedAt != null &&
+    Math.abs(base.openedAt - cb.mintBlockTime) <= 60
+  ) {
+    return base;
+  }
   const now = Math.floor(Date.now() / 1000);
   const ageDays = Math.max(0, Math.floor((now - cb.mintBlockTime) / 86_400));
   // UCB Phase H (Task #41, 2026-05-23): после backfill orphan'а ageDays стал
@@ -91,10 +107,17 @@ function backfillOrphanMeta(
     ageDays,
     feeApr,
     feeAprLifetime,
-    openedInTokens: [
-      { symbol: nft.token0.symbol, amount: cb.totalDeposited0 },
-      { symbol: nft.token1.symbol, amount: cb.totalDeposited1 },
-    ],
+    // Для non-orphan path сохраняем existing `openedInTokens` если они есть
+    // и cb.totalDeposited{0,1} = 0 (например только одна сторона депозита —
+    // existing data может быть более полной от ops history). Для orphan
+    // path / когда cb имеет данные — overwrite cb-derived.
+    openedInTokens:
+      cb.totalDeposited0 > 0 || cb.totalDeposited1 > 0
+        ? [
+            { symbol: nft.token0.symbol, amount: cb.totalDeposited0 },
+            { symbol: nft.token1.symbol, amount: cb.totalDeposited1 },
+          ]
+        : base.openedInTokens,
   };
 }
 
