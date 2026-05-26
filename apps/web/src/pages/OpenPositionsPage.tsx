@@ -854,7 +854,7 @@ function OpenPositionsPageInner(): JSX.Element {
               Нет открытых позиций по этим фильтрам.
             </p>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="hidden md:block overflow-x-auto">
               {/*
                 M12 (2026-05-14): give the table an explicit min-width
                 proportional to its column count so phones render the
@@ -862,6 +862,11 @@ function OpenPositionsPageInner(): JSX.Element {
                 squishing columns into unreadable 6px-wide stripes.
                 Default w-full was making columns collapse below
                 readable thresholds on iPhone-SE-class widths.
+
+                Mobile (< md): полностью отдельный card-view ниже —
+                только ключевые поля (symbol, USD, PnL, fees), потому
+                что 15-колоночная dynamic-таблица в карточки не
+                умещается.
               */}
               <table
                 className="w-full text-sm"
@@ -946,6 +951,113 @@ function OpenPositionsPageInner(): JSX.Element {
                 </tbody>
               </table>
             </div>
+          )}
+
+          {/* Mobile: компактные карточки (только ключевые поля) */}
+          {view.length > 0 && (
+            <ul className="md:hidden divide-y divide-border border-y border-border">
+              {view.map((p) => {
+                const totalAssets = totalAssetsOf(p);
+                const pnlUsd = totalAssets - p.startUsd;
+                const pnlPct = p.startUsd > 0 ? (pnlUsd / p.startUsd) * 100 : 0;
+                const pnlColor =
+                  pnlUsd > 0
+                    ? "text-emerald-400"
+                    : pnlUsd < 0
+                      ? "text-destructive"
+                      : "text-muted-foreground";
+                const symbols = p.supplyTokens.map((t) => t.symbol).join(" + ");
+                const pendingFees = p.feesSource === "supply_yield" ? 0 : (p.feesUsd ?? 0);
+                const totalFees = pendingFees + p.feesClaimedUsd;
+                return (
+                  <li
+                    key={p.id}
+                    className={cn(
+                      "px-4 py-3 text-xs",
+                      isHidden(p) && "opacity-50",
+                    )}
+                  >
+                    <Link
+                      to={`/position/${p.id}`}
+                      className="block hover:bg-accent/30 -mx-4 px-4 py-1 -my-1"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
+                          <span className="font-medium text-sm truncate">
+                            {symbols || p.itemName}
+                          </span>
+                          <Badge variant="outline" className="text-[9px] uppercase">
+                            {p.chain}
+                          </Badge>
+                          <Badge
+                            variant="muted"
+                            className={cn("text-[9px]", KIND_BADGE[p.kind])}
+                          >
+                            {KIND_LABEL[p.kind] ?? p.kind}
+                          </Badge>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className="tabular-nums font-semibold">
+                            {formatUsd(totalAssets, locale)}
+                          </div>
+                          <div className={"tabular-nums text-[11px] " + pnlColor}>
+                            {pnlUsd >= 0 ? "+" : ""}
+                            {formatUsd(pnlUsd, locale)} ({pnlPct >= 0 ? "+" : ""}
+                            {pnlPct.toFixed(1)}%)
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-1 text-[11px] text-muted-foreground truncate">
+                        {p.protocol.name} · {p.walletName}
+                      </div>
+                      <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-muted-foreground">Cost basis</dt>
+                          <dd className="tabular-nums">
+                            {formatUsd(p.startUsd, locale)}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-muted-foreground">Срок</dt>
+                          <dd className="tabular-nums">
+                            {p.ageDays != null ? `${p.ageDays} дн` : "—"}
+                          </dd>
+                        </div>
+                        {totalFees > 0 && (
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-muted-foreground">Fees</dt>
+                            <dd className="tabular-nums text-emerald-400">
+                              {formatUsd(totalFees, locale)}
+                            </dd>
+                          </div>
+                        )}
+                        {p.feeAprLifetime != null && (
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-muted-foreground">Fee APR</dt>
+                            <dd className="tabular-nums text-muted-foreground">
+                              {p.feeAprLifetime.toFixed(1)}%
+                            </dd>
+                          </div>
+                        )}
+                        {p.currentDebtUsd > 0 && (
+                          <div className="flex justify-between gap-2 col-span-2">
+                            <dt className="text-muted-foreground">Долг</dt>
+                            <dd className="tabular-nums text-destructive">
+                              {formatUsd(p.currentDebtUsd, locale)}
+                              {p.healthRate != null && (
+                                <span className="ml-1 text-[10px]">
+                                  · HF {p.healthRate.toFixed(2)}
+                                </span>
+                              )}
+                            </dd>
+                          </div>
+                        )}
+                      </dl>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
           )}
         </CardContent>
       </Card>
