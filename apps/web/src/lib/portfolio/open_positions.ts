@@ -2158,6 +2158,28 @@ function buildOne(
     }
   }
 
+  // 2026-05-25 (Derbent21 audit POS-004/005/006): last-resort fallback —
+  // если ни один из ранее cascade'ов не нашёл `opened`, берём earliest
+  // ЛЮБОЙ OPEN_TYPES op этого protocol+chain без symbol filtering. Это
+  // не perfect attribution (user может иметь 2+ позиции в том же протоколе
+  // на той же сети — все получат earliest date), но «—» в UI хуже чем
+  // приблизительная дата. Pendle V2 / GMX V2 типично у юзера 1-2 позиции
+  // → fallback почти всегда соответствует реальному открытию.
+  if (!opened) {
+    const earliestProtoOp = ops
+      .filter(
+        (o) =>
+          o.status !== "failed" &&
+          o.protocol?.id === lp.protocolId &&
+          o.chain === lp.chain &&
+          (OPEN_TYPES.has(o.type) || o.type === "lp_add" || o.type === "lend_supply"),
+      )
+      .sort((a, b) => a.time - b.time)[0];
+    if (earliestProtoOp) {
+      opened = { time: earliestProtoOp.time, hash: earliestProtoOp.hash };
+    }
+  }
+
   // Диагностика: live позиция есть, но `opened` остался null после всех
   // попыток. Это означает что в `ops` нет ни одного matching lp_add /
   // lend_supply / stake / perp_open. Самые частые причины:
