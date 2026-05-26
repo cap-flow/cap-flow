@@ -3023,13 +3023,32 @@ function FeesUsdCell({ p }: { p: OpenPosition }) {
   const claimed = p.feesClaimedUsd;
   const lifetime = p.feesLifetimeUsd;
   const history = p.feesClaimedHistory ?? [];
+
+  // 2026-05-25 (Derbent21 audit POS-003): sanity guard. Если lifetime
+  // fees > 5× startUsd — cost basis incomplete, fees inflated.
+  // Показываем число с амбер-warning вместо зелёного и tooltip.
+  const isAbsurd = p.startUsd > 0 && lifetime > p.startUsd * 5;
+
   return (
     <DetailsPopover
       label={
-        <span className="text-success font-medium inline-flex items-center gap-1">
-          +{formatUsd(lifetime, locale)}
-          <Info className="h-3 w-3 opacity-60" />
-        </span>
+        isAbsurd ? (
+          <span
+            className="text-amber-500 font-medium inline-flex items-center gap-1"
+            title={
+              `Fees ($${lifetime.toFixed(0)}) сильно превышают cost basis ($${p.startUsd.toFixed(0)}).\n` +
+              `Cost basis incomplete — classifier мог пропустить часть deposit ops.`
+            }
+          >
+            ⚠ +{formatUsd(lifetime, locale)}
+            <Info className="h-3 w-3 opacity-60" />
+          </span>
+        ) : (
+          <span className="text-success font-medium inline-flex items-center gap-1">
+            +{formatUsd(lifetime, locale)}
+            <Info className="h-3 w-3 opacity-60" />
+          </span>
+        )
       }
     >
       <div className="space-y-1.5 min-w-[260px]">
@@ -3140,6 +3159,32 @@ function FeeAprCell({ p }: { p: OpenPosition }) {
   const hasNative = p.feesByToken.some((t) => t.nativeApr != null);
   const aprLifetime = p.feeAprLifetime ?? 0;
   const aprPending = p.feeApr ?? 0;
+
+  // 2026-05-25 (Derbent21 audit POS-003): sanity guard для absurd APR.
+  // Если feesUsd выпрыгивает выше 5× startUsd (для lending — невозможно
+  // даже при максимальных аave rates) ИЛИ feeAprLifetime > 1000% —
+  // cost basis incomplete (classifier пропустил supply ops). Показываем
+  // «—» с warning tooltip вместо misleading 459% / 5757%.
+  const isAbsurd =
+    aprLifetime > 1000 ||
+    (p.startUsd > 0 && (p.feesUsd ?? 0) + p.feesClaimedUsd > p.startUsd * 5);
+
+  if (isAbsurd) {
+    return (
+      <span
+        className="text-amber-500 font-medium inline-flex items-center gap-1 cursor-help"
+        title={
+          `Fee APR недостоверен (рассчитано ${aprLifetime.toFixed(0)}%).\n` +
+          `feesUsd $${((p.feesUsd ?? 0) + p.feesClaimedUsd).toFixed(0)} ` +
+          `на startUsd $${p.startUsd.toFixed(0)} — cost basis incomplete ` +
+          `(classifier мог пропустить часть deposit ops). Проверьте детали позиции.`
+        }
+      >
+        ⚠ —
+      </span>
+    );
+  }
+
   return (
     <DetailsPopover
       label={
