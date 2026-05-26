@@ -38,10 +38,13 @@ Notes могут быть stale. Проверять против актуаль�
 
 | Источник | Когда | Команда |
 |----------|-------|---------|
-| **a) DB query** | Самый точный — agg реальных swap/transfer ops | postgres MCP (требует разрешения юзера) |
-| **b) Live React state** | Чтение `OpenPosition.supplyTokens` + `lots` через dev tools | `chrome-devtools` evaluate_script |
-| **c) Purchase History popup** | UI в Position Detail page (показывает per-lot breakdown) | navigate + screenshot |
-| **d) Integration test** | Если есть test с этим scenario | `grep "POS-005\|artur" apps/web/src` |
+| **a) On-chain RPC truth** | V3 NFT amounts, aToken balance, oracle prices — всё что лежит в smart contracts. **Most authoritative для current state.** | useV3Positions hook / Etherscan IncreaseLiquidity / Revert Finance (для V3) |
+| **b) DB query** | Cost basis aggregations, swap/transfer ops history | postgres MCP (требует разрешения юзера) |
+| **c) Live React state** | `OpenPosition.supplyTokens` + `lots` через dev tools | `chrome-devtools` evaluate_script |
+| **d) Purchase History popup** | UI в Position Detail page (per-lot breakdown) | navigate + screenshot |
+| **e) Integration test** | Если есть test с этим scenario | `grep "POS-005\|artur" apps/web/src` |
+
+**ВАЖНО:** DeBank / CoinStats / Vybe могут lying! Если показанные API данные противоречат on-chain (Revert / Etherscan) — on-chain wins. См. паттерн #4 в [anti-recurrence-methodology.md](./anti-recurrence-methodology.md).
 
 ОБЯЗАТЕЛЬНО собрать:
 - ☐ Все swap-ops для целевого asset cross-protocol

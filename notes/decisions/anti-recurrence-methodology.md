@@ -14,9 +14,9 @@ stage: Post-Phase H (Task #48)
 - **C10b**: `inferMarketKey` null для borrow IN-only
 - **C8**: `cross_protocol.ts` игнорировал `linkedCostBasisUsd`
 
-После этого ещё 3 раза возвращались к POS-005 ту же session-серию (Phases D/E/G/H в 2026-05-24): cost basis $21,613 vs честных $30,000. Все рецидивы — следствие 3 корневых паттернов ниже.
+После этого ещё 3 раза возвращались к POS-005 ту же session-серию (Phases D/E/G/H в 2026-05-24): cost basis $21,613 vs честных $30,000. Phase J (2026-05-24) обнаружил 4-й паттерн — DeBank свопает amounts между V3 NFT'ами одного pool'а (lex POS-001/003). Все рецидивы — следствие 4 корневых паттернов ниже.
 
-## 3 корневых паттерна
+## 4 корневых паттерна
 
 ### Паттерн 1: «Тихие fallback'ы» вместо честных unknowns
 
@@ -39,6 +39,21 @@ Walker (`computePositionConsumedCostFromLots`, `handleSupply`, и т.п.) ког
 C10 self-loop сначала добавили в build.ts → POS-005 баг остался → потом добавили в cross_protocol.ts. C8 — ровно та же история.
 
 Phase H (2026-05-24) выявил **4-й pipeline на верхнем layer**: `open_positions.ts:computePositionConsumedCostFromLots` — walker который читал `tracker.wacAt(time)` для каждого supply. Расходился с popup (`getPositionLotCostBasis`) на leverage-loop сценариях.
+
+### Паттерн 4: «External data API lies — on-chain truth ignored»
+
+External provider (DeBank / CoinStats / Vybe / Helius) даёт **wrong data** для конкретного case, но эти данные становятся single source of truth в нашем коде. Когда есть **on-chain альтернатива** через `useV3Positions` / direct RPC — игнорируем её.
+
+**Канарейка** (2026-05-24, lex@mail.ru POS-001/003):
+- 2 V3 NFT в одном Uniswap V3 pool (ETH/USDC arb), разные tick ranges
+- DeBank API свопает `lp.supply.amount` между portfolio_items одного pool'а — приписывает NFT-A amounts к OpenPosition-B и наоборот
+- Cost basis side был правильный (mint tx hash через Etherscan IncreaseLiquidity)
+- Current state side — DeBank → **физически невозможный PnL** (POS-001 показал -88%, POS-003 +710% — V3 LP IL physically не может дать +710%)
+- `useV3Positions` hook читает `amount0Current`/`amount1Current` напрямую из NFT contract via Alchemy. Это **правда**.
+
+**Fix:** Phase J (Task #51, 2026-05-24) — `overrideCurrentFromOnChain` helper в `v3_cost_basis_override.ts`. Когда `matchedV3TokenId` set → overrride `supplyTokens.amount` + `currentUsd` из on-chain NFT data. Прайсы (USD/unit) остаются от DeBank live (они accurate).
+
+**Правило:** если для какого-то domain есть on-chain RPC truth + есть external API данные → on-chain wins для state/amount, external — только для prices/metadata. Не trust API для critical numbers если есть способ verify on-chain.
 
 ## 7 действий чтобы остановить рецидив
 
@@ -73,6 +88,7 @@ Phase H (2026-05-24) выявил **4-й pipeline на верхнем layer**: `
 5. ☐ Walker всё ещё silent fallback на m.usd где-нибудь?
 6. ☐ Provenance UI на детальной странице явно показывает unknown%?
 7. ☐ Cross-layer invariant test добавлен (popup ↔ display same number)?
+8. ☐ Если есть on-chain truth (V3Position / aToken contract / etc) — использую ли я её для state/amount? Не доверяю DeBank/external API для critical numbers если есть способ verify on-chain (паттерн #4).
 
 ## Связанные
 
