@@ -150,6 +150,53 @@ export async function adminTelegramChatRoutes(
   );
 
   /**
+   * GET /files/:storageKey — serve downloaded TG media (photo / document)
+   * с admin-only гвардом. Path traversal защищён в resolveStorageKey.
+   */
+  app.get(
+    "/files/:storageKey",
+    {
+      config: { skipCsrf: true },
+      preHandler: app.requireAdmin,
+    },
+    async (req, reply) => {
+      const params = req.params as { storageKey: string };
+      const { resolveStorageKey } = await import(
+        "../telegram/telegram-file-download.js"
+      );
+      const path = resolveStorageKey(params.storageKey);
+      if (!path) {
+        reply.code(400);
+        return { error: "invalid storage key" };
+      }
+      const { createReadStream } = await import("node:fs");
+      const { stat } = await import("node:fs/promises");
+      try {
+        await stat(path);
+      } catch {
+        reply.code(404);
+        return { error: "file not found" };
+      }
+      // Простой content-type guess по extension.
+      const ext = params.storageKey.split(".").pop()?.toLowerCase() ?? "";
+      const ct: Record<string, string> = {
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        png: "image/png",
+        webp: "image/webp",
+        gif: "image/gif",
+        mp4: "video/mp4",
+        mp3: "audio/mpeg",
+        ogg: "audio/ogg",
+        pdf: "application/pdf",
+      };
+      reply.header("Content-Type", ct[ext] ?? "application/octet-stream");
+      reply.header("Cache-Control", "private, max-age=3600");
+      return reply.send(createReadStream(path));
+    },
+  );
+
+  /**
    * GET /stream — Server-Sent Events для real-time updates.
    *
    * Браузер открывает EventSource → подписывается на:
