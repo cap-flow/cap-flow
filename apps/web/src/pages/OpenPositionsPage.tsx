@@ -1906,13 +1906,24 @@ interface AnalyticsData {
 function computeAnalytics(positions: OpenPosition[]): AnalyticsData {
   const investedUsd = positions.reduce((s, p) => s + p.startUsd, 0);
   const currentUsd = positions.reduce((s, p) => s + p.currentUsd, 0);
-  const feesPendingUsd = positions.reduce((s, p) => s + (p.feesUsd ?? 0), 0);
+
+  // P0b: Pending fees. Для supply_yield (Aave/Compound/Fluid aTokens) `p.feesUsd`
+  // — derived view (`current − Σdeposited`), который УЖЕ включён в `currentUsd`
+  // (rebase-style). Если суммировать его в pending — получим double-count
+  // относительно `totalAssetsUsd` (которая правильно skip'ает supply_yield
+  // через totalAssetsOf). Поэтому реальный pending — только v3_rewards / прочие.
+  const feesPendingUsd = positions.reduce(
+    (s, p) => s + (p.feesSource === "supply_yield" ? 0 : (p.feesUsd ?? 0)),
+    0,
+  );
   const feesClaimedUsd = positions.reduce((s, p) => s + p.feesClaimedUsd, 0);
   const feesLifetimeUsd = feesPendingUsd + feesClaimedUsd;
 
-  // Pending по токенам — суммируем p.feesByToken.
+  // Pending по токенам — суммируем p.feesByToken для тех же позиций
+  // (исключая supply_yield во избежание double-count, см. выше).
   const feesPendingByToken = new Map<string, { amount: number; usd: number }>();
   for (const p of positions) {
+    if (p.feesSource === "supply_yield") continue;
     for (const t of p.feesByToken) {
       const cur = feesPendingByToken.get(t.symbol) ?? { amount: 0, usd: 0 };
       cur.amount += t.amount;
@@ -1925,27 +1936,41 @@ function computeAnalytics(positions: OpenPosition[]): AnalyticsData {
   // double-count protection: для Aave/Compound aTokens currentUsd УЖЕ
   // включает накопленный yield, не складываем с feesUsd).
   const totalAssetsUsd = positions.reduce((s, p) => s + totalAssetsOf(p), 0);
-  const priceOnlyPnlUsd = currentUsd - investedUsd;
+
+  // P0c: Price PnL = изменение цены БЕЗ дивидендов. Для supply_yield (rebase)
+  // `currentUsd` уже содержит accrued yield, поэтому считаем «как если бы
+  // yield не было» = currentUsd − feesUsd_derived. Иначе «PnL без fee»
+  // ложно включал бы yield в price-движение.
+  const priceOnlyPnlUsd = positions.reduce((s, p) => {
+    const yieldInCurrent = p.feesSource === "supply_yield" ? (p.feesUsd ?? 0) : 0;
+    return s + (p.currentUsd - yieldInCurrent - p.startUsd);
+  }, 0);
   const priceOnlyPnlPct = investedUsd > 0 ? (priceOnlyPnlUsd / investedUsd) * 100 : 0;
   const totalPnlUsd = totalAssetsUsd - investedUsd;
   const totalPnlPct = investedUsd > 0 ? (totalPnlUsd / investedUsd) * 100 : 0;
 
   // Средневзвешенно по currentUsd. Per-row Total PnL = totalAssets − start.
+  // P0a: feeAprWeightDenom отдельный — иначе позиции без feeAprLifetime
+  // (null) разбавляли знаменатель, занижая средний Fee APR в 2-3 раза.
   let totalAprWSum = 0;
+  let totalAprWeightDenom = 0;
   let feeAprWSum = 0;
-  let weightDenom = 0;
+  let feeAprWeightDenom = 0;
   for (const p of positions) {
     if (!p.ageDays || p.ageDays <= 0 || p.currentUsd <= 0 || p.startUsd <= 0) continue;
     const totalPnlI = totalAssetsOf(p) - p.startUsd;
     const totalAprI = (totalPnlI / p.startUsd) * (365 / p.ageDays) * 100;
     totalAprWSum += totalAprI * p.currentUsd;
+    totalAprWeightDenom += p.currentUsd;
     if (p.feeAprLifetime != null) {
       feeAprWSum += p.feeAprLifetime * p.currentUsd;
+      feeAprWeightDenom += p.currentUsd;
     }
-    weightDenom += p.currentUsd;
   }
-  const avgTotalAprPct = weightDenom > 0 ? totalAprWSum / weightDenom : null;
-  const avgFeeAprPct = weightDenom > 0 ? feeAprWSum / weightDenom : null;
+  const avgTotalAprPct =
+    totalAprWeightDenom > 0 ? totalAprWSum / totalAprWeightDenom : null;
+  const avgFeeAprPct =
+    feeAprWeightDenom > 0 ? feeAprWSum / feeAprWeightDenom : null;
 
   return {
     positionCount: positions.length,
@@ -2009,8 +2034,8 @@ function AnalyticsBlock({
       body: "Σ live-стоимости всех позиций прямо сейчас. Pending дивиденды (внутри позиции) и собранные дивиденды (на кошельке) НЕ включаются — они выделены отдельно.",
     },
     pnl: {
-      title: "PnL (без fee)",
-      body: "Прибыль/убыток ТОЛЬКО от движения цены. = Текущая стоимость − Инвестировано. Не учитывает накопленные и собранные дивиденды.",
+      title: "Price PnL",
+      body: "Прибыль/убыток ТОЛЬКО от движения цены, без дивидендов. Для обычных позиций = Текущая стоимость − Инвестировано. Для rebase-токенов (Aave/Compound/Fluid aTokens, где currentUsd уже включает yield) — yield предварительно вычитается, чтобы метрика не путала price-движение с дивидендами.",
     },
     totalAssets: {
       title: "Общая сумма активов",
@@ -2584,10 +2609,73 @@ function buildProtocolBreakdown(
 }
 
 /**
- * Структура активов — три donut chart'а с легендами под ними.
- * 1. Тип позиции (LP / Лендинг / Стейкинг / Перп)
- * 2. Состав по токенам (USDC / WETH / WBTC / …)
- * 3. По протоколам (Uniswap V3 / Fluid / Flash Trade / …)
+ * Распределение totalAssets по «типу позиции» (PositionKind).
+ * Цвета фиксированные per-kind, чтобы при перерисовке Лендинг всегда был
+ * warning-amber, LP — blue, Стейкинг — emerald-green, Perp — violet,
+ * Другое — neutral. Без sub-items (kind — листовая категория).
+ */
+const KIND_COLOR: Record<PositionKind, string> = {
+  lp: "#3b82f6", // blue-500
+  lending: "#fbbf24", // amber-400 (warning)
+  staking: "#34d399", // emerald-400 (success)
+  perp: "#a78bfa", // violet-400
+  other: "#94a3b8", // slate-400
+};
+
+function buildKindBreakdown(
+  positions: OpenPosition[],
+  total: number,
+): BreakdownEntry[] {
+  const m = new Map<
+    PositionKind,
+    { usd: number; count: number; positions: { posId: string; itemName: string; usd: number }[] }
+  >();
+  for (const p of positions) {
+    const cur = m.get(p.kind) ?? { usd: 0, count: 0, positions: [] };
+    const ta = totalAssetsOf(p);
+    cur.usd += ta;
+    cur.count += 1;
+    cur.positions.push({
+      posId: p.id,
+      itemName: p.itemName || p.protocol.name,
+      usd: ta,
+    });
+    m.set(p.kind, cur);
+  }
+  return [...m.entries()]
+    .map(([kind, v]) => {
+      // subItems: до 8 крупнейших позиций внутри типа (по убыванию totalAssets).
+      const subItems =
+        v.positions.length > 1
+          ? v.positions
+              .sort((a, b) => b.usd - a.usd)
+              .slice(0, 8)
+              .map((sp) => ({
+                label: `${sp.posId} · ${sp.itemName}`,
+                usd: sp.usd,
+                pct: total > 0 ? (sp.usd / total) * 100 : 0,
+              }))
+          : undefined;
+      return {
+        key: kind,
+        label: KIND_LABEL[kind],
+        usd: v.usd,
+        pct: total > 0 ? (v.usd / total) * 100 : 0,
+        count: v.count,
+        color: KIND_COLOR[kind],
+        ...(subItems && { subItems }),
+      };
+    })
+    .sort((a, b) => b.usd - a.usd);
+}
+
+/**
+ * Структура активов — пять donut chart'ов с легендами под ними.
+ * 1. По кошелькам (sub-items: протоколы внутри кошелька)
+ * 2. По токенам (USDC / WETH / WBTC / Стейблкоины / …)
+ * 3. По протоколам (Uniswap V3 / Fluid / Aave / …)
+ * 4. По типу позиции (LP / Лендинг / Стейкинг / Perp / Другое)
+ * 5. По Total PnL — что приносит больше
  */
 function AssetStructureBlock({
   positions,
@@ -2608,6 +2696,7 @@ function AssetStructureBlock({
     [positions, total, compositions],
   );
   const byProto = useMemo(() => buildProtocolBreakdown(positions, total), [positions, total]);
+  const byKind = useMemo(() => buildKindBreakdown(positions, total), [positions, total]);
   const byPnl = useMemo(() => buildPnlBreakdown(positions), [positions]);
 
   if (positions.length === 0 || total <= 0) return null;
@@ -2622,10 +2711,10 @@ function AssetStructureBlock({
         </h4>
         <InfoTip
           title="Структура активов"
-          body="Четыре разреза распределения по открытым позициям. Считается по ИТОГО АКТИВЫ (текущая стоимость + накопленные fee'и за всё время), чтобы доход от fee'ев не терялся в структуре. По кошелькам — где лежит у кого (hover → протоколы внутри кошелька), по токенам — что лежит, по протоколам — где размещено в проектах, по Total PnL — что приносит больше."
+          body="Пять разрезов распределения по открытым позициям. Считается по ИТОГО АКТИВЫ (текущая стоимость + накопленные fee'и за всё время), чтобы доход от fee'ев не терялся в структуре. По кошелькам — где лежит у кого (hover → протоколы внутри кошелька), по токенам — что лежит, по протоколам — где размещено, по типу — какая доля капитала в LP / Лендинге / Стейкинге / Perp, по Total PnL — что приносит больше."
         />
       </div>
-      <div className="grid grid-cols-1 divide-y divide-border/40 md:grid-cols-2 md:divide-x lg:grid-cols-4 lg:divide-y-0">
+      <div className="grid grid-cols-1 divide-y divide-border/40 sm:grid-cols-2 sm:divide-x md:grid-cols-3 lg:grid-cols-5 lg:divide-y-0">
         <DonutPanel
           title="По кошелькам"
           subtitle="распределение по wallets"
@@ -2640,6 +2729,11 @@ function AssetStructureBlock({
           title="По протоколам"
           subtitle="где размещены"
           breakdown={byProto}
+        />
+        <DonutPanel
+          title="По типу позиции"
+          subtitle="LP / Лендинг / Стейк / Perp"
+          breakdown={byKind}
         />
         <DonutPanel
           title="По Total PnL"
