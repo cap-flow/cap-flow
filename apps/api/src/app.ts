@@ -822,6 +822,18 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
           prefix: "/admin/telegram-chat",
         },
       );
+      // Quick-reply шаблоны для admin chat.
+      const chatTemplatesRepo = new (
+        await import("./modules/chat-templates/chat-templates.repository.js")
+      ).ChatTemplatesRepository(app.db);
+      await api.register(
+        (await import("./modules/chat-templates/chat-templates.routes.js"))
+          .chatTemplatesRoutes,
+        {
+          repo: chatTemplatesRepo,
+          prefix: "/admin/telegram-chat/templates",
+        },
+      );
       await api.register(notificationsRoutes, {
         repo: notificationSubsRepo,
         prefix: "/me/notifications",

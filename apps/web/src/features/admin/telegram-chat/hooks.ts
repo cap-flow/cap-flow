@@ -1,13 +1,14 @@
 import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { adminTelegramChatApi } from "./api";
+import { adminTelegramChatApi, type UpsertTemplateInput } from "./api";
 
 const KEYS = {
   all: ["admin", "telegram-chat"] as const,
   conversations: () => [...KEYS.all, "conversations"] as const,
   messages: (userId: string) => [...KEYS.all, "messages", userId] as const,
   unread: () => [...KEYS.all, "unread"] as const,
+  templates: () => [...KEYS.all, "templates"] as const,
 };
 
 /**
@@ -60,6 +61,40 @@ export function useMarkRead() {
       qc.invalidateQueries({ queryKey: KEYS.conversations() });
       qc.invalidateQueries({ queryKey: KEYS.unread() });
     },
+  });
+}
+
+export function useChatTemplates() {
+  return useQuery({
+    queryKey: KEYS.templates(),
+    queryFn: () => adminTelegramChatApi.listTemplates(),
+    staleTime: 60_000,
+  });
+}
+
+export function useCreateChatTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: UpsertTemplateInput) =>
+      adminTelegramChatApi.createTemplate(input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: KEYS.templates() }),
+  });
+}
+
+export function useUpdateChatTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<UpsertTemplateInput> }) =>
+      adminTelegramChatApi.updateTemplate(id, patch),
+    onSuccess: () => qc.invalidateQueries({ queryKey: KEYS.templates() }),
+  });
+}
+
+export function useDeleteChatTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => adminTelegramChatApi.deleteTemplate(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: KEYS.templates() }),
   });
 }
 
