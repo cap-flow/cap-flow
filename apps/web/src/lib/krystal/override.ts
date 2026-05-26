@@ -157,6 +157,13 @@ function overrideOne(
     feeApr,
     feeAprLifetime,
     ...(newV3 && { v3: newV3 }),
+    // Bug F (O_lll_ABC_lll_O audit 2026-05-25): Krystal — authoritative
+    // источник для current state. Если override применился, ⚠ "coverage
+    // incomplete" badge становится бесполезным (current/fees уже корректные,
+    // missing только historical mint date). Чистим флаг чтобы UX не пугал.
+    // openedAt/openHash остаются null если Etherscan не подгрузил — это
+    // отдельная UX-проблема (не относится к coverage флагу).
+    coverageIncomplete: false,
     // Fallback path: если matchedV3TokenId не был установлен (Base chain
     // где Etherscan v2 unsupported / Alchemy 403) — проставляем его сейчас,
     // чтобы downstream UI / overrides работали как обычно.
