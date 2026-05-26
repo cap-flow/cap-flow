@@ -186,8 +186,16 @@ describe("applyKrystalV3Override", () => {
     expect(p.openedAt).toBe(1770000000);
     expect(p.openHash).toBe("0xpos");
     expect(p.ageDays).toBe(118);
-    expect(p.supplyTokens[0]!.startUsd).toBe(227.26);
-    expect(p.supplyTokens[1]!.startUsd).toBe(752.31);
+    // PR (Derbent21 audit 2026-05-25): supplyTokens.startUsd rebalanced
+    // pro-rata по Krystal current. Total preserved (= position.startUsd).
+    // WETH: 780.0 / 985.10 × 979.57 = $775.61
+    // USDT: 205.10 / 985.10 × 979.57 = $203.96
+    // Σ = $979.57 = position.startUsd ✓
+    expect(p.supplyTokens[0]!.startUsd).toBeCloseTo(775.61, 1);
+    expect(p.supplyTokens[1]!.startUsd).toBeCloseTo(203.96, 1);
+    expect(
+      p.supplyTokens[0]!.startUsd + p.supplyTokens[1]!.startUsd,
+    ).toBeCloseTo(p.startUsd, 1);
   });
 
   it("recomputes feeApr и feeAprLifetime с новыми fees", () => {
