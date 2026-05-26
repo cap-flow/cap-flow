@@ -161,7 +161,13 @@ export class TelegramRepository {
   > {
     // Используем raw SQL для distinct on + window function (drizzle helpers
     // покрывают это менее красиво).
-    const rows = (await this.db.execute(sql`
+    const result = await this.db.execute<{
+      userId: string;
+      lastText: string | null;
+      lastDirection: "in" | "out";
+      lastAt: Date;
+      unreadCount: number;
+    }>(sql`
       WITH last_msg AS (
         SELECT DISTINCT ON (user_id)
           user_id, text, direction, created_at
@@ -183,14 +189,8 @@ export class TelegramRepository {
       FROM last_msg lm
       LEFT JOIN unread u USING (user_id)
       ORDER BY lm.created_at DESC
-    `)) as unknown as Array<{
-      userId: string;
-      lastText: string | null;
-      lastDirection: "in" | "out";
-      lastAt: Date;
-      unreadCount: number;
-    }>;
-    return rows;
+    `);
+    return result.rows;
   }
 
   async listMessages(args: {
