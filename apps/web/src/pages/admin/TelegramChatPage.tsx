@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Send, Loader2, MessageSquare, ExternalLink } from "lucide-react";
+import {
+  Send,
+  Loader2,
+  MessageSquare,
+  ExternalLink,
+  Settings,
+  Plus,
+  Pencil,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import { PageHeader } from "./_PageHeader";
 import {
@@ -8,9 +18,14 @@ import {
   useMessages,
   useSendMessage,
   useMarkRead,
+  useChatTemplates,
+  useCreateChatTemplate,
+  useUpdateChatTemplate,
+  useDeleteChatTemplate,
 } from "@/features/admin/telegram-chat/hooks";
 import { useAdminUsers } from "@/features/admin/users/hooks";
 import type { AdminUserRow } from "@/features/admin/users/api";
+import type { ChatTemplate } from "@/features/admin/telegram-chat/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -168,10 +183,13 @@ export function AdminTelegramChatPage(): JSX.Element {
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [onlyUnread, setOnlyUnread] = useState(false);
   const [draft, setDraft] = useState("");
+  const [templatesModalOpen, setTemplatesModalOpen] = useState(false);
   const messages = useMessages(selectedUserId);
   const sendMutation = useSendMessage();
   const markReadMutation = useMarkRead();
+  const templates = useChatTemplates();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const draftRef = useRef<HTMLTextAreaElement>(null);
 
   const userById = useMemo(() => {
     const m = new Map<string, AdminUserRow>();
@@ -430,9 +448,37 @@ export function AdminTelegramChatPage(): JSX.Element {
                 <div ref={messagesEndRef} />
               </div>
 
+              {/* Шаблоны быстрых ответов */}
+              <div className="border-t border-border px-3 py-2 flex items-center gap-2 flex-wrap">
+                {(templates.data ?? []).map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => {
+                      setDraft((prev) => (prev ? prev + "\n" + t.body : t.body));
+                      draftRef.current?.focus();
+                    }}
+                    title={t.body}
+                    className="inline-flex items-center rounded-full border border-border bg-card/60 px-2.5 py-1 text-xs text-foreground hover:bg-accent transition-colors"
+                  >
+                    {t.title}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setTemplatesModalOpen(true)}
+                  className="inline-flex items-center gap-1 rounded-full border border-dashed border-border px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:bg-accent transition-colors"
+                  title="Управление шаблонами"
+                >
+                  <Settings className="h-3 w-3" />
+                  Шаблоны
+                </button>
+              </div>
+
               {/* Composer */}
               <div className="border-t border-border p-3 flex items-end gap-2">
                 <textarea
+                  ref={draftRef}
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => {
@@ -468,6 +514,208 @@ export function AdminTelegramChatPage(): JSX.Element {
               )}
             </>
           )}
+        </div>
+      </div>
+      {templatesModalOpen && (
+        <TemplatesModal onClose={() => setTemplatesModalOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+function TemplatesModal({
+  onClose,
+}: {
+  readonly onClose: () => void;
+}): JSX.Element {
+  const templates = useChatTemplates();
+  const createMut = useCreateChatTemplate();
+  const updateMut = useUpdateChatTemplate();
+  const deleteMut = useDeleteChatTemplate();
+  const [editing, setEditing] = useState<ChatTemplate | null>(null);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+
+  function startNew() {
+    setEditing(null);
+    setTitle("");
+    setBody("");
+  }
+
+  function startEdit(t: ChatTemplate) {
+    setEditing(t);
+    setTitle(t.title);
+    setBody(t.body);
+  }
+
+  async function handleSave() {
+    const trimmedTitle = title.trim();
+    const trimmedBody = body.trim();
+    if (!trimmedTitle || !trimmedBody) return;
+    try {
+      if (editing) {
+        await updateMut.mutateAsync({
+          id: editing.id,
+          patch: { title: trimmedTitle, body: trimmedBody },
+        });
+      } else {
+        await createMut.mutateAsync({ title: trimmedTitle, body: trimmedBody });
+      }
+      startNew();
+    } catch (e) {
+      alert(`Ошибка: ${(e as Error).message}`);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (!confirm("Удалить шаблон?")) return;
+    try {
+      await deleteMut.mutateAsync(id);
+      if (editing?.id === id) startNew();
+    } catch (e) {
+      alert(`Ошибка: ${(e as Error).message}`);
+    }
+  }
+
+  const saving = createMut.isPending || updateMut.isPending;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-2xl max-h-[80vh] flex flex-col rounded-lg border border-border bg-card shadow-xl">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h2 className="text-sm font-semibold">Шаблоны быстрых ответов</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground"
+            aria-label="Закрыть"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr] flex-1 min-h-0">
+          {/* Список */}
+          <div className="border-r border-border overflow-y-auto">
+            {templates.isLoading && (
+              <div className="p-4 text-xs text-muted-foreground">Загрузка…</div>
+            )}
+            {(templates.data ?? []).length === 0 && !templates.isLoading && (
+              <div className="p-4 text-xs text-muted-foreground">
+                Шаблонов ещё нет. Создайте первый справа.
+              </div>
+            )}
+            {(templates.data ?? []).map((t) => (
+              <div
+                key={t.id}
+                className={cn(
+                  "group flex items-start justify-between gap-2 border-b border-border/40 px-3 py-2 hover:bg-accent/20 cursor-pointer",
+                  editing?.id === t.id && "bg-accent/40",
+                )}
+                onClick={() => startEdit(t)}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium truncate">{t.title}</div>
+                  <div className="text-[11px] text-muted-foreground truncate">
+                    {t.body}
+                  </div>
+                </div>
+                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      startEdit(t);
+                    }}
+                    className="p-1 text-muted-foreground hover:text-foreground"
+                    title="Редактировать"
+                  >
+                    <Pencil className="h-3 w-3" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleDelete(t.id);
+                    }}
+                    className="p-1 text-muted-foreground hover:text-destructive"
+                    title="Удалить"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          {/* Редактор */}
+          <div className="flex flex-col p-4 gap-2 overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <span className="text-xs uppercase tracking-wider text-muted-foreground">
+                {editing ? "Редактирование" : "Новый шаблон"}
+              </span>
+              {editing && (
+                <button
+                  type="button"
+                  onClick={startNew}
+                  className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  <Plus className="h-3 w-3" /> Новый
+                </button>
+              )}
+            </div>
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Название (на кнопке)
+            </label>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={80}
+              placeholder="напр. Приветствие"
+              className="rounded border border-border bg-background px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+            <label className="mt-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+              Текст ответа
+            </label>
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              maxLength={4096}
+              rows={6}
+              placeholder="Текст, который вставится в поле ввода при клике на шаблон…"
+              className="flex-1 min-h-[120px] resize-none rounded border border-border bg-background px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+            <div className="flex justify-end gap-2 pt-1">
+              {editing && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={startNew}
+                  disabled={saving}
+                >
+                  Отмена
+                </Button>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                onClick={handleSave}
+                disabled={!title.trim() || !body.trim() || saving}
+              >
+                {saving ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : editing ? (
+                  "Сохранить"
+                ) : (
+                  "Добавить"
+                )}
+              </Button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

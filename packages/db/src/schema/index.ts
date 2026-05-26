@@ -28,6 +28,9 @@ export * from "./notification_subscriptions.js";
 // Admin↔user chat через Telegram bot (2026-05-25).
 export * from "./telegram_messages.js";
 
+// Quick-reply шаблоны для admin chat (2026-05-27).
+export * from "./chat_templates.js";
+
 // Telegram-based primary auth (signup/login through bot, 2026-05-21).
 export * from "./telegram_signup_nonces.js";
 
