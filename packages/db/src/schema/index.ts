@@ -25,6 +25,9 @@ export * from "./portfolio_snapshots.js";
 export * from "./telegram_links.js";
 export * from "./notification_subscriptions.js";
 
+// Admin↔user chat через Telegram bot (2026-05-25).
+export * from "./telegram_messages.js";
+
 // Telegram-based primary auth (signup/login through bot, 2026-05-21).
 export * from "./telegram_signup_nonces.js";
 

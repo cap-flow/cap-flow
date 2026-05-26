@@ -80,13 +80,19 @@ export interface ProcessTelegramUpdateDeps {
    * Если не задан, signup-коды получают friendly "сервис недоступен".
    */
   readonly signup?: import("../auth-telegram-signup/signup.service.js").TelegramSignupService;
+  /**
+   * Опциональный — admin chat. Если задан, любые non-/start messages от
+   * linked users сохраняются в `telegram_messages` для отображения в
+   * admin panel чата.
+   */
+  readonly repository?: import("./telegram.repository.js").TelegramRepository;
 }
 
 export async function processTelegramUpdate(
   update: TelegramUpdate,
   deps: ProcessTelegramUpdateDeps,
 ): Promise<boolean> {
-  const { telegram, signup } = deps;
+  const { telegram, signup, repository } = deps;
   const msg = update.message;
   if (!msg || typeof msg.text !== "string" || !msg.chat?.id) {
     return false;
@@ -96,7 +102,28 @@ export async function processTelegramUpdate(
   // identifies user by TG-id и регистрирует / отправляет login-link.
   const withPayload = msg.text.trim().match(/^\/start(?:@\S+)?\s+(\S+)/i);
   const bareStart = msg.text.trim().match(/^\/start(?:@\S+)?\s*$/i);
-  if (!withPayload && !bareStart) return false;
+  if (!withPayload && !bareStart) {
+    // Admin chat: non-/start message от linked user — сохраняем в
+    // telegram_messages для отображения в admin panel.
+    if (repository) {
+      try {
+        const userId = await repository.findUserIdByChatId(msg.chat.id);
+        if (userId) {
+          await repository.saveMessage({
+            userId,
+            chatId: msg.chat.id,
+            direction: "in",
+            text: msg.text,
+            type: "text",
+          });
+          return true;
+        }
+      } catch {
+        /* swallow — webhook не должен падать на chat save errors */
+      }
+    }
+    return false;
+  }
   const rawCode = withPayload ? withPayload[1]! : null;
   const chatId = msg.chat.id;
   const tgUsername = msg.from?.username?.trim() || null;
@@ -278,6 +305,7 @@ interface WebhookOptions {
   readonly telegram: TelegramService;
   readonly getBotApiToken: () => string | undefined;
   readonly signup?: import("../auth-telegram-signup/signup.service.js").TelegramSignupService;
+  readonly repository?: import("./telegram.repository.js").TelegramRepository;
 }
 
 export async function telegramWebhookRoutes(
@@ -335,6 +363,7 @@ export async function telegramWebhookRoutes(
         await processTelegramUpdate(parsed.data, {
           telegram: opts.telegram,
           ...(opts.signup ? { signup: opts.signup } : {}),
+          ...(opts.repository ? { repository: opts.repository } : {}),
         });
       } catch (e) {
         app.log.error(
