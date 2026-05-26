@@ -783,6 +783,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(telegramWebhookRoutes, {
         telegram: telegramService,
         signup: telegramSignupService,
+        repository: telegramRepo,
         getBotApiToken: () =>
           process.env["TELEGRAM_BOT_API_TOKEN"]?.trim() ||
           env.TELEGRAM_BOT_API_TOKEN,
@@ -804,6 +805,21 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         proxyState: telegramProxyState,
         prefix: "/admin/telegram",
       });
+      // Admin chat: переписка admin↔user через Telegram bot.
+      const adminTelegramChatService = new (
+        await import(
+          "./modules/admin-telegram-chat/admin-telegram-chat.service.js"
+        )
+      ).AdminTelegramChatService(telegramRepo, telegramService, app.audit);
+      await api.register(
+        (await import(
+          "./modules/admin-telegram-chat/admin-telegram-chat.routes.js"
+        )).adminTelegramChatRoutes,
+        {
+          service: adminTelegramChatService,
+          prefix: "/admin/telegram-chat",
+        },
+      );
       await api.register(notificationsRoutes, {
         repo: notificationSubsRepo,
         prefix: "/me/notifications",
