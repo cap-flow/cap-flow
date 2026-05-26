@@ -589,7 +589,8 @@ function OperationsTable({ operations }: { operations: ManualOp[] }) {
   return (
     <Card>
       <CardContent className="px-0 pb-0">
-        <div className="overflow-x-auto">
+        {/* Desktop: таблица */}
+        <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="border-b border-border bg-secondary/40 text-xs uppercase tracking-wider text-muted-foreground">
               <tr>
@@ -662,6 +663,84 @@ function OperationsTable({ operations }: { operations: ManualOp[] }) {
             </tbody>
           </table>
         </div>
+
+        {/* Mobile: карточки */}
+        <ul className="md:hidden divide-y divide-border">
+          {rows.map((op) => {
+            const commentText = op.comment || (op.loanPosId ? `→ ${op.loanPosId}` : op.returnPosId ? `← ${op.returnPosId}` : "");
+            return (
+              <li key={op.id} className="px-4 py-3 text-sm">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Badge variant={OP_VARIANT[op.type]}>{op.type}</Badge>
+                    <span className="font-mono text-[11px] text-muted-foreground">{op.id}</span>
+                    {op.source === "auto" && (
+                      <span className="inline-block rounded bg-primary/10 px-1 text-[9px] uppercase text-primary">
+                        auto
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0">{op.date}</span>
+                </div>
+
+                {(op.amount1 != null && op.cur1) && (
+                  <div className="mt-2 text-sm tabular-nums">
+                    {formatNumber(op.amount1, locale, 6)} {op.cur1}
+                    {op.amount2 != null && op.cur2 && (
+                      <span className="text-muted-foreground"> → {formatNumber(op.amount2, locale, 6)} {op.cur2}</span>
+                    )}
+                  </div>
+                )}
+                {op.price != null && op.type === "open" && (
+                  <div className="text-[11px] text-muted-foreground">≈ {formatUsd(op.price, locale)}</div>
+                )}
+                {op.avgPrice != null && op.type === "buy" && (
+                  <div className="text-[11px] text-muted-foreground">avg {formatNumber(op.avgPrice, locale, 4)}</div>
+                )}
+
+                <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                  {op.from && (
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">{t("ledger.col.from")}</dt>
+                      <dd className="text-right truncate">{op.from}</dd>
+                    </div>
+                  )}
+                  {op.to && (
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">{t("ledger.col.to")}</dt>
+                      <dd className="text-right truncate">{op.to}</dd>
+                    </div>
+                  )}
+                  {op.posType && (
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">{t("ledger.col.posType")}</dt>
+                      <dd className="text-right truncate">{op.posType}</dd>
+                    </div>
+                  )}
+                  {op.funds && (
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">{t("ledger.col.funds")}</dt>
+                      <dd className="text-right truncate">{op.funds}</dd>
+                    </div>
+                  )}
+                  {op.network && (
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">{t("ledger.col.network")}</dt>
+                      <dd className="text-right truncate">{op.network}</dd>
+                    </div>
+                  )}
+                </dl>
+
+                {(commentText || op.source === "auto") && (
+                  <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span className="truncate">{commentText}</span>
+                    {op.source === "auto" && <AnnotateOpButton op={op} />}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
       </CardContent>
     </Card>
   );

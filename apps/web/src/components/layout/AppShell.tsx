@@ -255,26 +255,34 @@ function Topbar() {
       >
         <Menu />
       </Button>
-      <div className="lg:hidden">
+      {/* Lockup в header'е дублирует drawer на мобиле — скрываем < sm. */}
+      <div className="hidden sm:block lg:hidden">
         <LogoLockup />
       </div>
 
-      <div className="ml-auto flex flex-1 items-center justify-end gap-2 sm:gap-3">
-        <WalletSearch />
+      <div className="ml-auto flex flex-1 items-center justify-end gap-1 sm:gap-3">
+        {/* Поиск кошельков и переключатель темы на мобиле прячем —
+            доступны через drawer / settings. */}
+        <div className="hidden sm:flex">
+          <WalletSearch />
+        </div>
 
         <AccountSwitcher />
 
-        <ThemeToggle />
+        <div className="hidden sm:flex">
+          <ThemeToggle />
+        </div>
 
         <Button variant="ghost" size="icon" aria-label={t("topbar.notifications")}>
           <Bell />
         </Button>
 
+        {/* Settings link уже есть в drawer — на мобиле прячем. */}
         <NavLink
           to="/settings"
           className={({ isActive }) =>
             cn(
-              "inline-flex h-10 w-10 items-center justify-center rounded-md transition-colors",
+              "hidden sm:inline-flex h-10 w-10 items-center justify-center rounded-md transition-colors",
               isActive
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -288,12 +296,13 @@ function Topbar() {
 
         <NavLink
           to="/settings"
-          className="flex items-center gap-2 rounded-full border border-border bg-secondary pl-1 pr-3 py-1 hover:bg-accent transition-colors"
+          className="flex items-center gap-2 rounded-full border border-border bg-secondary pl-1 pr-1 py-1 sm:pr-3 hover:bg-accent transition-colors"
           aria-label={t("settings.section.profile")}
           title={t("settings.section.profile")}
         >
           <Avatar profile={profile} size={28} />
-          <span className="text-sm font-medium">
+          {/* Имя пользователя только на десктопе — на мобиле только аватар. */}
+          <span className="hidden sm:inline text-sm font-medium">
             {profile.displayName || profile.username}
           </span>
         </NavLink>

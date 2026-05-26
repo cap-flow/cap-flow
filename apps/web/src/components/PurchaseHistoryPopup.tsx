@@ -246,7 +246,7 @@ export function PurchaseHistoryPopup({
         </div>
       }
     >
-      <div className="flex max-h-[80vh] flex-col gap-2 overflow-hidden text-sm">
+      <div className="flex flex-col gap-2 text-sm">
         {/* Сворачиваемое пояснение методологии — по умолчанию свёрнуто */}
         <div className="shrink-0 rounded-md border border-brand-cyan/40 bg-brand-cyan/5 ring-1 ring-brand-cyan/10">
           <button

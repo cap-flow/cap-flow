@@ -956,8 +956,9 @@ function RawOpsTable({
   return (
     <Card>
       <CardContent className="px-0 pb-0">
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs" style={{ minWidth: 1200 }}>
+        {/* Desktop: таблица */}
+        <div className="hidden md:block overflow-x-auto">
+          <table className="w-full text-xs">
             <thead className="border-y border-border bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 text-left font-medium w-32">Дата / время</th>
@@ -1153,6 +1154,138 @@ function RawOpsTable({
             </tbody>
           </table>
         </div>
+
+        {/* Mobile: карточки */}
+        <ul className="md:hidden divide-y divide-border border-y border-border">
+          {ops.map((op) => {
+            const cex = cexLinkByHash.get(op.hash.toLowerCase());
+            const cb = cexCostBasisByHash.get(op.hash.toLowerCase());
+            const annotKey = `${realWalletId(op.wallet.id)}|${op.hash.toLowerCase()}|0`;
+            const hasAnnot = !!annotationsByKey.get(annotKey);
+            const lpCloseUsd = lpCloseUsdByHash.get(`${op.wallet.id}|${op.hash}`);
+            const inMv = op.movement.find((m) => m.direction === "in" && m.amount > 0);
+            return (
+              <li key={op.wallet.id + op.chain + op.hash} className="px-4 py-3 text-xs">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        className={cn(
+                          "inline-flex items-center gap-1 rounded border border-border bg-secondary px-1.5 py-0.5 text-[10px]",
+                          op.wallet.chain === "sol" ? "text-[#14F195]" : "text-brand-cyan",
+                        )}
+                      >
+                        <Wallet className="h-3 w-3" />
+                        {op.wallet.name}
+                      </span>
+                      <Badge variant="outline" className="uppercase text-[10px]">{op.chain}</Badge>
+                    </div>
+                    <div className="mt-1 text-[10px] text-muted-foreground tabular-nums">
+                      {formatDateTime(op.time)}
+                    </div>
+                  </div>
+                  <a
+                    href={explorerUrl(op)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 font-mono text-[10px] text-brand-cyan hover:underline shrink-0"
+                  >
+                    {shortAddress(op.hash, 6, 4)}
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                </div>
+
+                <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                  <span className="font-mono text-[10px] text-muted-foreground">{op.type}</span>
+                  {op.status === "failed" && (
+                    <span className="text-[10px] uppercase tracking-wider text-destructive">· failed</span>
+                  )}
+                  {internalHashes.has(op.hash) && (
+                    <span className="inline-block rounded border border-brand-cyan/40 bg-brand-cyan/10 px-1 py-0.5 text-[9px] uppercase tracking-wider text-brand-cyan">
+                      ↔ internal
+                    </span>
+                  )}
+                  {cex && (
+                    <span className="inline-block rounded border border-purple-500/40 bg-purple-500/10 px-1 py-0.5 text-[9px] uppercase tracking-wider text-purple-400">
+                      ↔ {cex.label ? `${cex.exchange}/${cex.label}` : cex.exchange}
+                    </span>
+                  )}
+                  {cb && cb.costBasisUsd > 0 && (
+                    <span className="inline-block rounded border border-emerald-500/40 bg-emerald-500/10 px-1 py-0.5 text-[9px] uppercase tracking-wider text-emerald-400">
+                      $ {cb.costBasisUsd.toFixed(2)}
+                    </span>
+                  )}
+                </div>
+
+                <div className="mt-2">
+                  <Movements op={op} locale={locale} />
+                </div>
+
+                <div className="mt-1.5">
+                  <ManualAnnotationCell
+                    walletId={op.wallet.id}
+                    chain={op.chain}
+                    hash={op.hash}
+                    {...(inMv && {
+                      primaryToken: { symbol: inMv.symbol, amount: inMv.amount },
+                    })}
+                  />
+                </div>
+
+                {op.type === "lp_remove" && lpCloseUsd != null && (
+                  <div className="mt-1 inline-block rounded border border-blue-500/40 bg-blue-500/10 px-1 py-0.5 text-[9px] text-blue-400">
+                    cost basis +{formatUsd(lpCloseUsd, locale)}
+                  </div>
+                )}
+
+                <dl className="mt-2 grid grid-cols-1 gap-x-3 gap-y-1">
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-muted-foreground">Протокол</dt>
+                    <dd className="text-right truncate">
+                      {op.protocol ? (
+                        <span className="inline-flex items-center gap-1">
+                          <span className="font-medium text-foreground">{op.protocol.name}</span>
+                          {op.detection === "auto" && (
+                            <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1 text-[9px] font-bold uppercase text-amber-500">
+                              auto
+                            </span>
+                          )}
+                        </span>
+                      ) : op.counterparty ? (
+                        <span className="font-mono text-[10px]">{shortAddress(op.counterparty, 6, 4)}</span>
+                      ) : op.fnName ? (
+                        <span className="font-mono text-[10px]">{op.fnName}</span>
+                      ) : (
+                        "—"
+                      )}
+                    </dd>
+                  </div>
+                  {op.gasUsd != null && op.gasUsd > 0 && (
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">Газ</dt>
+                      <dd className="tabular-nums text-muted-foreground">{formatUsd(op.gasUsd, locale)}</dd>
+                    </div>
+                  )}
+                </dl>
+
+                <div className="mt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setEditingOp(op)}
+                    className={
+                      "rounded border px-2 py-1 text-[10px] transition " +
+                      (hasAnnot
+                        ? "border-brand-cyan/60 bg-brand-cyan/10 text-brand-cyan"
+                        : "border-border text-muted-foreground hover:bg-accent/40")
+                    }
+                  >
+                    ✎ {hasAnnot ? "Аннотация" : "Аннотировать"}
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       </CardContent>
       {editingOp && (
         <OpAnnotationDialog

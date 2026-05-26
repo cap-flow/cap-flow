@@ -198,8 +198,9 @@ export function AssetsPage(): JSX.Element {
           </CardTitle>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs" style={{ minWidth: 800 }}>
+          {/* Desktop: таблица */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-xs">
               <thead className="border-y border-border bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium w-32">
@@ -352,6 +353,120 @@ export function AssetsPage(): JSX.Element {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile: карточки */}
+          <ul className="md:hidden divide-y divide-border border-y border-border">
+            {rollups.length === 0 ? (
+              <li className="px-4 py-6 text-center text-xs text-muted-foreground">
+                Нет активов. Подключи кошелёк в Registry.
+              </li>
+            ) : (
+              rollups.map((r) => {
+                const isOpen = expanded.has(r.family);
+                const pnlClass =
+                  r.unrealizedPnlUsd > 0
+                    ? "text-emerald-400"
+                    : r.unrealizedPnlUsd < 0
+                      ? "text-destructive"
+                      : "text-muted-foreground";
+                const rz = realizedByFamily.get(r.family);
+                const rzClass = rz
+                  ? rz.realizedUsd > 0
+                    ? "text-emerald-400"
+                    : rz.realizedUsd < 0
+                      ? "text-destructive"
+                      : "text-muted-foreground"
+                  : "text-muted-foreground";
+                return (
+                  <li key={r.family} className="text-xs">
+                    <button
+                      type="button"
+                      onClick={() => toggle(r.family)}
+                      className="w-full px-4 py-3 text-left hover:bg-accent/40"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="font-medium text-sm">{r.family}</div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="tabular-nums font-semibold">
+                            {formatUsd(r.totalUsd)}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {isOpen ? "▾" : "▸"}
+                          </span>
+                        </div>
+                      </div>
+                      <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-muted-foreground">Amount</dt>
+                          <dd className="tabular-nums">{formatAmount(r.totalAmount)}</dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-muted-foreground">WAC</dt>
+                          <dd className="tabular-nums text-muted-foreground">
+                            {r.wac > 0 ? formatUsd(r.wac) : "—"}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-muted-foreground">Cost basis</dt>
+                          <dd className="tabular-nums">
+                            {r.totalCostBasisUsd > 0 ? formatUsd(r.totalCostBasisUsd) : "—"}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-muted-foreground">Unrealized</dt>
+                          <dd className={"tabular-nums " + pnlClass}>
+                            {r.totalCostBasisUsd > 0 ? (
+                              <>
+                                {r.unrealizedPnlUsd >= 0 ? "+" : ""}
+                                {formatUsd(r.unrealizedPnlUsd)}{" "}
+                                <span className="text-[10px]">({formatPct(r.unrealizedPnlPct)})</span>
+                              </>
+                            ) : (
+                              "—"
+                            )}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2 col-span-2">
+                          <dt className="text-muted-foreground">Realized</dt>
+                          <dd className={"tabular-nums " + rzClass}>
+                            {rz && Math.abs(rz.realizedUsd) >= 0.01
+                              ? `${rz.realizedUsd >= 0 ? "+" : ""}${formatUsd(rz.realizedUsd)}`
+                              : "—"}
+                          </dd>
+                        </div>
+                      </dl>
+                    </button>
+                    {isOpen && (
+                      <ul className="divide-y divide-border/40 border-t border-border/40 bg-secondary/20">
+                        {r.sources.map((s) => (
+                          <li
+                            key={`${r.family}-${s.sourceId}-${s.chain}`}
+                            className="px-4 py-2"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="inline-flex items-center gap-1.5 min-w-0">
+                                <span className="rounded border border-border bg-secondary px-1.5 py-0.5 text-[9px] uppercase tracking-wider shrink-0">
+                                  {s.chain}
+                                </span>
+                                <span className="text-muted-foreground truncate">{s.sourceName}</span>
+                              </span>
+                              <span className="tabular-nums shrink-0">{formatUsd(s.usd)}</span>
+                            </div>
+                            <div className="mt-1 flex justify-between gap-2 text-[11px] text-muted-foreground">
+                              <span className="tabular-nums">{formatAmount(s.amount)}</span>
+                              <span className="tabular-nums">
+                                cb: {s.costBasisUsd > 0 ? formatUsd(s.costBasisUsd) : "—"}
+                              </span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })
+            )}
+          </ul>
         </CardContent>
       </Card>
     </div>

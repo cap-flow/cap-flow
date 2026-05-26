@@ -360,8 +360,9 @@ export function PositionDetailPage(): JSX.Element {
           </CardTitle>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs" style={{ minWidth: 600 }}>
+          {/* Desktop */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-xs">
               <thead className="border-y border-border bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">Token</th>
@@ -407,6 +408,42 @@ export function PositionDetailPage(): JSX.Element {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile */}
+          <ul className="md:hidden divide-y divide-border border-y border-border">
+            {position.supplyTokens.map((t) => {
+              const tokenPnl = t.currentUsd - t.startUsd;
+              return (
+                <li key={t.symbol} className="px-4 py-3 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="font-medium text-sm">{t.symbol}</span>
+                    <div className="text-right shrink-0">
+                      <div className="tabular-nums font-semibold">{formatUsd(t.currentUsd)}</div>
+                      <div className={"tabular-nums text-[11px] " + pnlColor(tokenPnl)}>
+                        {tokenPnl >= 0 ? "+" : ""}{formatUsd(tokenPnl)}
+                      </div>
+                    </div>
+                  </div>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">Amount</dt>
+                      <dd className="tabular-nums">{formatAmount(t.amount)}</dd>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">Avg buy</dt>
+                      <dd className="tabular-nums text-muted-foreground">
+                        {t.avgBuyPrice ? formatUsd(t.avgBuyPrice) : "—"}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-2 col-span-2">
+                      <dt className="text-muted-foreground">Cost basis</dt>
+                      <dd className="tabular-nums">{formatUsd(t.startUsd)}</dd>
+                    </div>
+                  </dl>
+                </li>
+              );
+            })}
+          </ul>
         </CardContent>
       </Card>
 
@@ -481,9 +518,9 @@ export function PositionDetailPage(): JSX.Element {
                         );
                       })}
                     </div>
-                    {/* Detailed lot table */}
-                    <div className="overflow-x-auto rounded border border-border">
-                      <table className="w-full text-[11px]" style={{ minWidth: 700 }}>
+                    {/* Detailed lot table — desktop */}
+                    <div className="hidden md:block overflow-x-auto rounded border border-border">
+                      <table className="w-full text-[11px]">
                         <thead className="bg-secondary/40 text-[9px] uppercase tracking-wider text-muted-foreground">
                           <tr>
                             <th className="px-2 py-1.5 text-left font-medium">Date</th>
@@ -546,6 +583,54 @@ export function PositionDetailPage(): JSX.Element {
                         </tbody>
                       </table>
                     </div>
+
+                    {/* Mobile lots */}
+                    <ul className="md:hidden divide-y divide-border rounded border border-border">
+                      {lots.map((lot, idx) => {
+                        const meta = ACQUIRED_VIA_META[lot.acquiredVia];
+                        const total = lot.amount * lot.costPerUnitUsd;
+                        return (
+                          <li key={`${lot.sourceHash}-${idx}`} className="px-3 py-2 text-[11px]">
+                            <div className="flex items-start justify-between gap-2">
+                              <span
+                                className={
+                                  "inline-block rounded border px-1.5 py-0.5 text-[9px] " + meta.color
+                                }
+                              >
+                                {meta.label}
+                              </span>
+                              <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+                                {formatDate(lot.acquiredAt)}
+                              </span>
+                            </div>
+                            <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5">
+                              <div className="flex justify-between gap-2">
+                                <dt className="text-muted-foreground">Amount</dt>
+                                <dd className="tabular-nums">{formatAmount(lot.amount)}</dd>
+                              </div>
+                              <div className="flex justify-between gap-2">
+                                <dt className="text-muted-foreground">Cost/unit</dt>
+                                <dd className="tabular-nums text-muted-foreground">
+                                  {lot.costPerUnitUsd > 0 ? formatUsd(lot.costPerUnitUsd) : "—"}
+                                </dd>
+                              </div>
+                              <div className="flex justify-between gap-2 col-span-2">
+                                <dt className="text-muted-foreground">Total cost</dt>
+                                <dd className="tabular-nums">
+                                  {total > 0 ? formatUsd(total) : "—"}
+                                  {lot.fmvAtAcquisitionUsd != null && lot.fmvAtAcquisitionUsd > 0 && (
+                                    <span className="ml-1 text-[9px] text-amber-400">FMV</span>
+                                  )}
+                                </dd>
+                              </div>
+                            </dl>
+                            <div className="mt-1 font-mono text-[10px] text-muted-foreground">
+                              {shortHash(lot.sourceHash)}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
                   </div>
                 );
               })}
@@ -572,7 +657,7 @@ export function PositionDetailPage(): JSX.Element {
           </CardHeader>
           <CardContent className="px-0 pb-0">
             <div className="overflow-x-auto">
-              <table className="w-full text-xs" style={{ minWidth: 400 }}>
+              <table className="w-full text-xs">
                 <thead className="border-y border-border bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Token</th>
@@ -685,8 +770,9 @@ export function PositionDetailPage(): JSX.Element {
             </CardTitle>
           </CardHeader>
           <CardContent className="px-0 pb-0">
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs" style={{ minWidth: 700 }}>
+            {/* Desktop */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-xs">
                 <thead className="border-y border-border bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">Date</th>
@@ -728,6 +814,39 @@ export function PositionDetailPage(): JSX.Element {
                 </tbody>
               </table>
             </div>
+
+            {/* Mobile */}
+            <ul className="md:hidden divide-y divide-border border-y border-border">
+              {position.feesClaimedHistory.map((e) => (
+                <li key={e.hash} className="px-4 py-3 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-muted-foreground tabular-nums">{formatDate(e.time)}</span>
+                    <span className="tabular-nums font-semibold shrink-0">{formatUsd(e.usd)}</span>
+                  </div>
+                  <div className="mt-1 text-[11px]">
+                    {e.tokensReceived
+                      .map((t) => `${formatAmount(t.amount)} ${t.symbol}`)
+                      .join(" + ") || "—"}
+                  </div>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">Period APR</dt>
+                      <dd className="tabular-nums text-muted-foreground">
+                        {e.aprPeriod != null ? formatPct(e.aprPeriod) : "—"}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">PnL since prev</dt>
+                      <dd className={"tabular-nums " + pnlColor(e.pnlSincePrev)}>
+                        {e.pnlSincePrev != null
+                          ? `${e.pnlSincePrev >= 0 ? "+" : ""}${formatUsd(e.pnlSincePrev)}`
+                          : "—"}
+                      </dd>
+                    </div>
+                  </dl>
+                </li>
+              ))}
+            </ul>
           </CardContent>
         </Card>
       )}

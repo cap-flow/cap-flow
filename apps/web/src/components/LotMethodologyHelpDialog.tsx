@@ -30,7 +30,7 @@ export function LotMethodologyHelpDialog({
         </div>
       }
     >
-      <div className="flex max-h-[75vh] flex-col gap-3 overflow-y-auto text-sm leading-relaxed">
+      <div className="flex flex-col gap-3 text-sm leading-relaxed">
         {/* Зачем нужны методики */}
         <section className="rounded-md border border-border/60 bg-secondary/20 px-3 py-3">
           <h3 className="mb-2 font-bold text-foreground">

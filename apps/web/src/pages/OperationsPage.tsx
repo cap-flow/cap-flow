@@ -380,63 +380,121 @@ function OperationsTable({
   const { locale } = useI18n();
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead className="border-b border-border bg-secondary/40 text-xs uppercase tracking-wider text-muted-foreground">
-          <tr>
-            <Th className="w-28">{t("ledger.col.date")}</Th>
-            <Th className="w-28">{t("ledger.col.type")}</Th>
-            <Th className="w-32">{t("ledger.col.from")}</Th>
-            <Th className="w-32">{t("ledger.col.to")}</Th>
-            <Th>{t("operations.col.amount")}</Th>
-            <Th className="w-32">{t("operations.col.value")}</Th>
-            <Th className="w-24">{t("ledger.col.network")}</Th>
-            <Th>{t("ledger.col.comment")}</Th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {operations.map((op) => (
-            <tr key={op.id} className="hover:bg-accent/40">
-              <td className="px-3 py-2 tabular-nums text-muted-foreground">
-                {op.date}
-              </td>
-              <td className="px-3 py-2">
-                <Badge variant={TYPE_VARIANT[op.type]}>{op.type}</Badge>
-              </td>
-              <td className="px-3 py-2 text-muted-foreground">
-                {op.fromName ?? "—"}
-              </td>
-              <td className="px-3 py-2 text-muted-foreground">
-                {op.toName ?? "—"}
-              </td>
-              <td className="px-3 py-2 text-xs">
-                {op.amount1 && op.cur1 && (
-                  <div className="tabular-nums">
-                    {formatNumber(Number(op.amount1), locale, 6)} {op.cur1}
-                  </div>
-                )}
-                {op.amount2 && op.cur2 && (
-                  <div className="text-muted-foreground tabular-nums">
-                    → {formatNumber(Number(op.amount2), locale, 6)} {op.cur2}
-                  </div>
-                )}
-              </td>
-              <td className="px-3 py-2 text-xs tabular-nums text-muted-foreground">
-                {op.priceUsd
-                  ? `$${formatNumber(Number(op.priceUsd), locale, 2)}`
-                  : "—"}
-              </td>
-              <td className="px-3 py-2 text-xs text-muted-foreground">
-                {op.network ?? "—"}
-              </td>
-              <td className="max-w-[320px] truncate px-3 py-2 text-xs text-muted-foreground">
-                {op.comment || "—"}
-              </td>
+    <>
+      {/* Desktop: таблица */}
+      <div className="hidden md:block overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="border-b border-border bg-secondary/40 text-xs uppercase tracking-wider text-muted-foreground">
+            <tr>
+              <Th className="w-28">{t("ledger.col.date")}</Th>
+              <Th className="w-28">{t("ledger.col.type")}</Th>
+              <Th className="w-32">{t("ledger.col.from")}</Th>
+              <Th className="w-32">{t("ledger.col.to")}</Th>
+              <Th>{t("operations.col.amount")}</Th>
+              <Th className="w-32">{t("operations.col.value")}</Th>
+              <Th className="w-24">{t("ledger.col.network")}</Th>
+              <Th>{t("ledger.col.comment")}</Th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {operations.map((op) => (
+              <tr key={op.id} className="hover:bg-accent/40">
+                <td className="px-3 py-2 tabular-nums text-muted-foreground">
+                  {op.date}
+                </td>
+                <td className="px-3 py-2">
+                  <Badge variant={TYPE_VARIANT[op.type]}>{op.type}</Badge>
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {op.fromName ?? "—"}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {op.toName ?? "—"}
+                </td>
+                <td className="px-3 py-2 text-xs">
+                  {op.amount1 && op.cur1 && (
+                    <div className="tabular-nums">
+                      {formatNumber(Number(op.amount1), locale, 6)} {op.cur1}
+                    </div>
+                  )}
+                  {op.amount2 && op.cur2 && (
+                    <div className="text-muted-foreground tabular-nums">
+                      → {formatNumber(Number(op.amount2), locale, 6)} {op.cur2}
+                    </div>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-xs tabular-nums text-muted-foreground">
+                  {op.priceUsd
+                    ? `$${formatNumber(Number(op.priceUsd), locale, 2)}`
+                    : "—"}
+                </td>
+                <td className="px-3 py-2 text-xs text-muted-foreground">
+                  {op.network ?? "—"}
+                </td>
+                <td className="max-w-[320px] truncate px-3 py-2 text-xs text-muted-foreground">
+                  {op.comment || "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Mobile: карточки */}
+      <ul className="md:hidden divide-y divide-border">
+        {operations.map((op) => (
+          <li key={op.id} className="px-4 py-3 text-sm">
+            <div className="flex items-start justify-between gap-2">
+              <Badge variant={TYPE_VARIANT[op.type]}>{op.type}</Badge>
+              <span className="text-xs text-muted-foreground tabular-nums shrink-0">{op.date}</span>
+            </div>
+            {op.amount1 && op.cur1 && (
+              <div className="mt-2 text-sm tabular-nums">
+                {formatNumber(Number(op.amount1), locale, 6)} {op.cur1}
+                {op.amount2 && op.cur2 && (
+                  <span className="text-muted-foreground">
+                    {" "}→ {formatNumber(Number(op.amount2), locale, 6)} {op.cur2}
+                  </span>
+                )}
+              </div>
+            )}
+            <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+              {op.fromName && (
+                <div className="flex justify-between gap-2">
+                  <dt className="text-muted-foreground">{t("ledger.col.from")}</dt>
+                  <dd className="text-right truncate">{op.fromName}</dd>
+                </div>
+              )}
+              {op.toName && (
+                <div className="flex justify-between gap-2">
+                  <dt className="text-muted-foreground">{t("ledger.col.to")}</dt>
+                  <dd className="text-right truncate">{op.toName}</dd>
+                </div>
+              )}
+              {op.priceUsd && (
+                <div className="flex justify-between gap-2">
+                  <dt className="text-muted-foreground">{t("operations.col.value")}</dt>
+                  <dd className="text-right tabular-nums">
+                    ${formatNumber(Number(op.priceUsd), locale, 2)}
+                  </dd>
+                </div>
+              )}
+              {op.network && (
+                <div className="flex justify-between gap-2">
+                  <dt className="text-muted-foreground">{t("ledger.col.network")}</dt>
+                  <dd className="text-right truncate">{op.network}</dd>
+                </div>
+              )}
+            </dl>
+            {op.comment && (
+              <div className="mt-2 text-xs text-muted-foreground truncate">
+                {op.comment}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 

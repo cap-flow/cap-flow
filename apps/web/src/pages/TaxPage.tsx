@@ -420,8 +420,9 @@ export function TaxPage(): JSX.Element {
           </CardTitle>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs" style={{ minWidth: 900 }}>
+          {/* Desktop: таблица */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-xs">
               <thead className="border-y border-border bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium w-28">
@@ -514,6 +515,71 @@ export function TaxPage(): JSX.Element {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile: карточки */}
+          <ul className="md:hidden divide-y divide-border border-y border-border">
+            {visible.length === 0 ? (
+              <li className="px-4 py-12 text-center text-xs text-muted-foreground">
+                {allEvents.length === 0
+                  ? "Нет tax events. Подключи кошельки в Registry."
+                  : "Нет events по выбранным фильтрам."}
+              </li>
+            ) : (
+              visible.map((e, idx) => (
+                <li key={`${e.txHash}:${idx}:${e.acquiredAt}`} className="px-4 py-3 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                      <span
+                        className={
+                          "inline-block rounded border px-1.5 py-0.5 text-[10px] " +
+                          EVENT_TYPE_COLOR[e.eventType]
+                        }
+                      >
+                        {e.eventType}
+                      </span>
+                      <span className="font-medium text-sm">{e.asset}</span>
+                      <Badge
+                        variant="outline"
+                        className={
+                          "text-[9px] uppercase " +
+                          (e.term === "long"
+                            ? "border-emerald-500/30 text-emerald-300"
+                            : "border-amber-500/30 text-amber-300")
+                        }
+                      >
+                        {e.term} ({e.holdingPeriodDays}d)
+                      </Badge>
+                    </div>
+                    <div className={"text-right tabular-nums font-semibold shrink-0 " + pnlColor(e.gainUsd)}>
+                      {e.gainUsd >= 0 ? "+" : ""}
+                      {formatUsd(e.gainUsd)}
+                    </div>
+                  </div>
+                  <div className="mt-1 text-[11px] text-muted-foreground tabular-nums">
+                    {formatDate(e.disposedAt)}
+                  </div>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">Amount</dt>
+                      <dd className="tabular-nums">{formatAmount(e.amount)}</dd>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">Proceeds</dt>
+                      <dd className="tabular-nums">{formatUsd(e.proceedsUsd)}</dd>
+                    </div>
+                    <div className="flex justify-between gap-2 col-span-2">
+                      <dt className="text-muted-foreground">Cost</dt>
+                      <dd className="tabular-nums text-muted-foreground">{formatUsd(e.costBasisUsd)}</dd>
+                    </div>
+                  </dl>
+                  <div className="mt-1 font-mono text-[10px] text-muted-foreground/70">
+                    {e.txHash.slice(0, 8)}…{e.txHash.slice(-4)}
+                  </div>
+                </li>
+              ))
+            )}
+          </ul>
+
           {hasMore && (
             <div className="border-t border-border p-3 text-center">
               <button

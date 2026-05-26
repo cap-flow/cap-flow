@@ -26,7 +26,7 @@ export function AdminQueuePage(): JSX.Element {
         title="Очередь refresh"
         description="BullMQ queue portfolio-refresh — counts + recurring schedulers."
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => refetch()}>
               Обновить
             </Button>

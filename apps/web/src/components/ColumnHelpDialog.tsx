@@ -618,7 +618,7 @@ export function ColumnHelpDialog({
         </div>
       }
     >
-      <div className="max-h-[60vh] overflow-y-auto py-1">{help.detailed}</div>
+      <div className="py-1">{help.detailed}</div>
     </Dialog>
   );
 }

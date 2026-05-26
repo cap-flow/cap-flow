@@ -443,16 +443,16 @@ function ClientFlagRow({ flag }: { flag: ClientFeatureFlag }): JSX.Element {
   return (
     <div className="rounded-md border border-border bg-secondary/30 p-3">
       <div className="flex items-start justify-between gap-3">
-        <label className="flex flex-1 cursor-pointer items-start gap-2">
+        <label className="flex flex-1 cursor-pointer items-start gap-2 min-w-0">
           <input
             type="checkbox"
             checked={enabled}
             onChange={(e) => onToggle(e.target.checked)}
             className="mt-0.5"
           />
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <div className="text-sm font-medium">{flag.label}</div>
-            <code className="text-[10px] text-muted-foreground">{flag.key}</code>
+            <code className="block text-[10px] text-muted-foreground break-all">{flag.key}</code>
             {dirty && (
               <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
                 Перезагрузи страницу чтобы изменения применились

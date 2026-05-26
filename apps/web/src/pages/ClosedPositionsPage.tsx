@@ -183,7 +183,8 @@ export function ClosedPositionsPage(): JSX.Element {
               <CardTitle className="text-sm">Закрытые позиции</CardTitle>
             </CardHeader>
             <CardContent className="px-0 pb-0">
-              <div className="overflow-x-auto">
+              {/* Desktop: таблица */}
+              <div className="hidden md:block overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead className="border-y border-border bg-secondary/40 text-xs uppercase tracking-wider text-muted-foreground">
                     <tr>
@@ -289,6 +290,72 @@ export function ClosedPositionsPage(): JSX.Element {
                   </tbody>
                 </table>
               </div>
+
+              {/* Mobile: карточки */}
+              <ul className="md:hidden divide-y divide-border border-y border-border">
+                {view.map((p) => (
+                  <li key={p.id} className="px-4 py-3 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
+                        <span className="font-medium text-sm truncate">{p.symbols.join(" + ")}</span>
+                        <Badge variant="outline" className="text-[9px] uppercase">{p.chain}</Badge>
+                        <Badge variant="muted" className="text-[9px]">{KIND_LABEL[p.kind] ?? p.kind}</Badge>
+                      </div>
+                      <div
+                        className={cn(
+                          "text-right tabular-nums font-semibold shrink-0 text-sm",
+                          p.pnlUsd >= 0 ? "text-success" : "text-destructive",
+                        )}
+                      >
+                        {p.pnlUsd >= 0 ? (
+                          <ArrowUpRight className="inline h-3 w-3" />
+                        ) : (
+                          <ArrowDownRight className="inline h-3 w-3" />
+                        )}
+                        {p.pnlUsd >= 0 ? "+" : ""}{formatUsd(p.pnlUsd, locale)}
+                      </div>
+                    </div>
+                    <div className="mt-1 text-[11px] text-muted-foreground truncate">
+                      {p.protocol.name} · {p.walletName}
+                    </div>
+                    <div className="mt-1.5 flex items-center gap-1.5 text-[11px]">
+                      {p.closureType === "complete" ? (
+                        <Badge variant="muted" className="border-success/30 bg-success/10 text-[9px] text-success">
+                          ✓ Полное
+                        </Badge>
+                      ) : (
+                        <Badge variant="warning" className="text-[9px]">
+                          ⚠ Из истории
+                        </Badge>
+                      )}
+                      <span className="text-muted-foreground tabular-nums">
+                        {formatDateShort(p.openedAt)} → {formatDateShort(p.closedAt)} · {p.ageDays} дн.
+                      </span>
+                    </div>
+                    <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Депонировано</dt>
+                        <dd className="tabular-nums">{formatUsd(p.depositedUsd, locale)}</dd>
+                      </div>
+                      <div className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground">Выведено</dt>
+                        <dd className="tabular-nums">{formatUsd(p.withdrawnUsd, locale)}</dd>
+                      </div>
+                      {p.claimedRewardsUsd > 0 && (
+                        <div className="flex justify-between gap-2 col-span-2">
+                          <dt className="text-muted-foreground">Награды</dt>
+                          <dd className="tabular-nums text-muted-foreground">
+                            +{formatUsd(p.claimedRewardsUsd, locale)}
+                          </dd>
+                        </div>
+                      )}
+                    </dl>
+                    <div className="mt-1 font-mono text-[10px] text-muted-foreground/70">
+                      {p.id}
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </CardContent>
           </Card>
         </>
