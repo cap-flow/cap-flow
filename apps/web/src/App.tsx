@@ -17,6 +17,7 @@ import { AdminHealthPage } from "./pages/admin/HealthPage";
 import { AdminTechAuditPage } from "./pages/admin/TechAuditPage";
 import { AdminUsersPage } from "./pages/admin/UsersPage";
 import { AdminUserDetailPage } from "./pages/admin/UserDetailPage";
+import { AdminTelegramChatPage } from "./pages/admin/TelegramChatPage";
 import { BillingPage } from "./pages/BillingPage";
 import { ClosedPositionsPage } from "./pages/ClosedPositionsPage";
 import { HomePage } from "./pages/HomePage";
@@ -68,6 +69,7 @@ function AdminRoutes() {
           <Route path="health" element={<AdminHealthPage />} />
           <Route path="api-usage" element={<AdminApiUsagePage />} />
           <Route path="integrations" element={<AdminIntegrationsPage />} />
+          <Route path="telegram-chat" element={<AdminTelegramChatPage />} />
           <Route path="billing" element={<AdminBillingPage />} />
           <Route path="feature-flags" element={<AdminFeatureFlagsPage />} />
           <Route path="*" element={<NotFound />} />
