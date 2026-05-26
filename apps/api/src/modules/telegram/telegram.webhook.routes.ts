@@ -38,6 +38,10 @@ export function deriveWebhookSecret(botApiToken: string | undefined): string {
   return crypto.createHash("sha256").update(t).digest("hex").slice(0, 32);
 }
 
+const telegramFileBase = z
+  .object({ file_id: z.string(), file_size: z.number().optional() })
+  .passthrough();
+
 export const telegramUpdateSchema = z
   .object({
     update_id: z.number().optional(),
@@ -54,6 +58,21 @@ export const telegramUpdateSchema = z
           .partial()
           .optional(),
         text: z.string().optional(),
+        caption: z.string().optional(),
+        // Media types — все опциональны, exactly one populated (по convention TG).
+        photo: z.array(telegramFileBase).optional(),
+        document: telegramFileBase
+          .extend({
+            file_name: z.string().optional(),
+            mime_type: z.string().optional(),
+          })
+          .optional(),
+        voice: telegramFileBase.optional(),
+        audio: telegramFileBase
+          .extend({ file_name: z.string().optional() })
+          .optional(),
+        video: telegramFileBase.optional(),
+        sticker: telegramFileBase.optional(),
       })
       .partial()
       .optional(),
@@ -86,6 +105,15 @@ export interface ProcessTelegramUpdateDeps {
    * admin panel чата.
    */
   readonly repository?: import("./telegram.repository.js").TelegramRepository;
+  /**
+   * Bot token для download media (PR 3b). Без него incoming photo/document
+   * сохраняются с type но без file_url.
+   */
+  readonly getBotApiToken?: () => string | undefined;
+  /**
+   * Proxy state для download через те же дорожки что и sendMessage.
+   */
+  readonly proxyState?: TelegramProxyState | null;
 }
 
 export async function processTelegramUpdate(
@@ -94,8 +122,16 @@ export async function processTelegramUpdate(
 ): Promise<boolean> {
   const { telegram, signup, repository } = deps;
   const msg = update.message;
-  if (!msg || typeof msg.text !== "string" || !msg.chat?.id) {
+  if (!msg || !msg.chat?.id) {
     return false;
+  }
+  // Media-only message (photo/doc/voice без text) — НЕ /start, переходим к
+  // admin chat save сразу. Text-based dispatcher ниже требует msg.text.
+  if (typeof msg.text !== "string") {
+    if (repository) {
+      await trySaveIncomingMedia(msg, repository, deps);
+    }
+    return true;
   }
   // Task #45: support both `/start <code>` (с payload) и bare `/start`
   // (без payload). С payload → legacy link-flow или signup-nonce. Без —
@@ -103,43 +139,10 @@ export async function processTelegramUpdate(
   const withPayload = msg.text.trim().match(/^\/start(?:@\S+)?\s+(\S+)/i);
   const bareStart = msg.text.trim().match(/^\/start(?:@\S+)?\s*$/i);
   if (!withPayload && !bareStart) {
-    // Admin chat: non-/start message от linked user — сохраняем в
-    // telegram_messages для отображения в admin panel + broadcast
-    // через SSE event bus для real-time updates.
+    // Admin chat: non-/start text message — save + broadcast.
     if (repository) {
-      try {
-        const userId = await repository.findUserIdByChatId(msg.chat.id);
-        if (userId) {
-          const saved = await repository.saveMessage({
-            userId,
-            chatId: msg.chat.id,
-            direction: "in",
-            text: msg.text,
-            type: "text",
-          });
-          // SSE broadcast — лениво подгружаем bus чтобы избежать
-          // циклической зависимости (telegram ← admin-chat).
-          try {
-            const { chatEventBus } = await import(
-              "../admin-telegram-chat/chat-events.bus.js"
-            );
-            chatEventBus.emitNewMessage({
-              userId,
-              message: {
-                id: saved.id,
-                direction: "in",
-                text: saved.text,
-                createdAt: saved.createdAt.toISOString(),
-              },
-            });
-          } catch {
-            /* admin-chat module не registered — OK, polling fallback */
-          }
-          return true;
-        }
-      } catch {
-        /* swallow — webhook не должен падать на chat save errors */
-      }
+      await trySaveIncomingMedia(msg, repository, deps);
+      return true;
     }
     return false;
   }
@@ -320,11 +323,127 @@ export async function processTelegramUpdate(
   return true;
 }
 
+/**
+ * Сохранить incoming text OR media (photo/document/voice/audio/video/sticker)
+ * в admin chat. Для media — download через Telegram getFile + сохранение
+ * на disk. Errors swallowed чтобы webhook не падал.
+ */
+async function trySaveIncomingMedia(
+  msg: NonNullable<TelegramUpdate["message"]>,
+  repository: import("./telegram.repository.js").TelegramRepository,
+  deps: ProcessTelegramUpdateDeps,
+): Promise<void> {
+  try {
+    if (!msg.chat?.id) return;
+    const userId = await repository.findUserIdByChatId(msg.chat.id);
+    if (!userId) return;
+
+    // Detect media type + file_id. Photo → largest size (last array элемент).
+    let type:
+      | "text"
+      | "photo"
+      | "document"
+      | "audio"
+      | "voice"
+      | "video"
+      | "sticker"
+      | "other" = "text";
+    let fileId: string | null = null;
+    let fileName: string | null = null;
+    let defaultExt = "bin";
+
+    if (Array.isArray(msg.photo) && msg.photo.length > 0) {
+      type = "photo";
+      fileId = msg.photo[msg.photo.length - 1]!.file_id;
+      defaultExt = "jpg";
+    } else if (msg.document) {
+      type = "document";
+      fileId = msg.document.file_id;
+      fileName = msg.document.file_name ?? null;
+    } else if (msg.voice) {
+      type = "voice";
+      fileId = msg.voice.file_id;
+      defaultExt = "ogg";
+    } else if (msg.audio) {
+      type = "audio";
+      fileId = msg.audio.file_id;
+      fileName = msg.audio.file_name ?? null;
+      defaultExt = "mp3";
+    } else if (msg.video) {
+      type = "video";
+      fileId = msg.video.file_id;
+      defaultExt = "mp4";
+    } else if (msg.sticker) {
+      type = "sticker";
+      fileId = msg.sticker.file_id;
+      defaultExt = "webp";
+    }
+
+    // Download file если есть и token есть.
+    let fileUrl: string | null = null;
+    if (fileId && deps.getBotApiToken) {
+      const token = deps.getBotApiToken()?.trim();
+      if (token) {
+        try {
+          const { downloadTelegramFile } = await import(
+            "./telegram-file-download.js"
+          );
+          const dl = await downloadTelegramFile({
+            botApiToken: token,
+            fileId,
+            proxyState: deps.proxyState ?? null,
+            fileName,
+            defaultExt,
+          });
+          if (dl) {
+            fileUrl = dl.storageKey;
+            if (!fileName) fileName = dl.fileName;
+          }
+        } catch {
+          /* download failed — save without fileUrl */
+        }
+      }
+    }
+
+    const text = typeof msg.text === "string" ? msg.text : msg.caption ?? null;
+    const saved = await repository.saveMessage({
+      userId,
+      chatId: msg.chat.id,
+      direction: "in",
+      text,
+      type,
+      fileUrl,
+      fileName,
+    });
+
+    // SSE broadcast.
+    try {
+      const { chatEventBus } = await import(
+        "../admin-telegram-chat/chat-events.bus.js"
+      );
+      chatEventBus.emitNewMessage({
+        userId,
+        message: {
+          id: saved.id,
+          direction: "in",
+          text: saved.text,
+          createdAt: saved.createdAt.toISOString(),
+        },
+      });
+    } catch {
+      /* admin-chat module не registered — OK */
+    }
+  } catch {
+    /* swallow */
+  }
+}
+
 interface WebhookOptions {
   readonly telegram: TelegramService;
   readonly getBotApiToken: () => string | undefined;
   readonly signup?: import("../auth-telegram-signup/signup.service.js").TelegramSignupService;
   readonly repository?: import("./telegram.repository.js").TelegramRepository;
+  readonly proxyState?: TelegramProxyState | null;
 }
 
 export async function telegramWebhookRoutes(
@@ -383,6 +502,8 @@ export async function telegramWebhookRoutes(
           telegram: opts.telegram,
           ...(opts.signup ? { signup: opts.signup } : {}),
           ...(opts.repository ? { repository: opts.repository } : {}),
+          getBotApiToken: opts.getBotApiToken,
+          proxyState: opts.proxyState ?? null,
         });
       } catch (e) {
         app.log.error(

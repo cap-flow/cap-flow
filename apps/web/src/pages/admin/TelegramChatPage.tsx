@@ -217,7 +217,48 @@ export function AdminTelegramChatPage(): JSX.Element {
                           : "bg-card border border-border",
                       )}
                     >
-                      {m.text || <em className="opacity-70">(media: {m.type})</em>}
+                      {/* Media render. fileUrl = storageKey, served через GET /files/:key. */}
+                      {m.fileUrl && (m.type === "photo" || m.type === "sticker") && (
+                        <a
+                          href={`/api/v1/admin/telegram-chat/files/${m.fileUrl}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <img
+                            src={`/api/v1/admin/telegram-chat/files/${m.fileUrl}`}
+                            alt={m.type}
+                            className="max-h-64 rounded my-1 block"
+                          />
+                        </a>
+                      )}
+                      {m.fileUrl && m.type === "video" && (
+                        <video
+                          src={`/api/v1/admin/telegram-chat/files/${m.fileUrl}`}
+                          controls
+                          className="max-h-64 rounded my-1 block"
+                        />
+                      )}
+                      {m.fileUrl && (m.type === "voice" || m.type === "audio") && (
+                        <audio
+                          src={`/api/v1/admin/telegram-chat/files/${m.fileUrl}`}
+                          controls
+                          className="my-1 block w-full"
+                        />
+                      )}
+                      {m.fileUrl && m.type === "document" && (
+                        <a
+                          href={`/api/v1/admin/telegram-chat/files/${m.fileUrl}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 underline text-xs"
+                        >
+                          📎 {m.fileName ?? "Документ"}
+                        </a>
+                      )}
+                      {!m.fileUrl && m.type !== "text" && (
+                        <em className="opacity-70">(media: {m.type}, скачивание не удалось)</em>
+                      )}
+                      {m.text && <div>{m.text}</div>}
                       <div
                         className={cn(
                           "text-[10px] mt-0.5",

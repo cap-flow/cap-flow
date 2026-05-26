@@ -784,6 +784,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         telegram: telegramService,
         signup: telegramSignupService,
         repository: telegramRepo,
+        proxyState: telegramProxyState,
         getBotApiToken: () =>
           process.env["TELEGRAM_BOT_API_TOKEN"]?.trim() ||
           env.TELEGRAM_BOT_API_TOKEN,
