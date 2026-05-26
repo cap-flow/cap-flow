@@ -75,7 +75,7 @@ function overrideOne(
   for (const t of k.currentTokens) {
     krystalBySym.set(t.symbol.toUpperCase(), t);
   }
-  const newSupply = base.supplyTokens.map((t) => {
+  const newSupplyPreStart = base.supplyTokens.map((t) => {
     const kt = krystalBySym.get(t.symbol.toUpperCase());
     if (!kt) return t;
     return {
@@ -89,6 +89,27 @@ function overrideOne(
   // только те что в supplyTokens — на случай если Krystal видит токены
   // которых нет в нашем supply list).
   const newCurrentUsd = k.currentUsd;
+
+  // 2026-05-25 (Derbent21 audit POS-002): rebalance supplyTokens.startUsd
+  // pro-rata по новому currentUsd. Раньше:
+  //   1) Phase J runs first, NFT at-range-boundary → amount0Current=0.27,
+  //      amount1Current=0 → rebalance: WETH start = $515, USDC start = $0
+  //   2) Krystal override runs later → corrects amount/currentUsd
+  //      (real-time 0.20 WETH + 159 USDC), но startUsd preserved → итог
+  //      WETH start $515 (100%), USDC start $0 (0%) — misleading split
+  // Теперь: используем новый currentUsd для rebalance — отражает реальную
+  // композицию позиции на момент Krystal data.
+  const totalNewCurrent = newSupplyPreStart.reduce(
+    (s, t) => s + (t.currentUsd ?? 0),
+    0,
+  );
+  const newSupply =
+    totalNewCurrent > 0 && base.startUsd > 0
+      ? newSupplyPreStart.map((t) => ({
+          ...t,
+          startUsd: ((t.currentUsd ?? 0) / totalNewCurrent) * base.startUsd,
+        }))
+      : newSupplyPreStart;
 
   // Pending fees — Krystal authoritative (real-time feeGrowth math
   // server-side, matches Uniswap UI). См. lex POS-001: UCB stale $13.84 →
