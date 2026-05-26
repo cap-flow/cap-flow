@@ -213,7 +213,10 @@ export function buildCostBasisTracker(
           nonStableOutCost += m.usd;
         }
       }
-      const totalCost = stableSum + nonStableOutCost;
+      // PR-G1 (2026-05-25): gas — реальный cost транзакции. Для buy side
+      // увеличивает break-even price (накопленный газ за все ops с purchases).
+      const gasUsd = op.gasUsd ?? 0;
+      const totalCost = stableSum + nonStableOutCost + gasUsd;
       if (totalCost > 0 && ins.length > 0) {
         // Делим оплату пропорционально между приходящими токенами по их amount.
         const totalIn = ins.reduce((s, m) => s + m.amount, 0);
@@ -233,9 +236,16 @@ export function buildCostBasisTracker(
     if (op.type === "lp_remove") {
       const attribution = lpCloseCost.get(op.hash);
       if (attribution) {
+        // PR-G1: газ unwind tx — distributed pro-rata по amount IN-токенов.
+        const gasUsd = op.gasUsd ?? 0;
+        const totalAmount = Array.from(attribution.values()).reduce(
+          (s, info) => s + info.amount,
+          0,
+        );
         for (const [sym, info] of attribution) {
           if (info.amount > 0 && info.costUsd > 0) {
-            tracker.buy(sym, info.amount, info.costUsd, op.time);
+            const gasShare = totalAmount > 0 ? gasUsd * (info.amount / totalAmount) : 0;
+            tracker.buy(sym, info.amount, info.costUsd + gasShare, op.time);
           }
         }
       }
@@ -292,9 +302,12 @@ export function buildCostBasisTracker(
           m.amount > 0,
       );
       if (recvProto.length > 0 && costUsd > 0) {
+        // PR-G1: газ deploy tx → в cost basis позиции receipt'а.
+        const gasUsd = op.gasUsd ?? 0;
+        const totalCostWithGas = costUsd + gasUsd;
         const totalRecv = recvProto.reduce((s, m) => s + m.amount, 0);
         for (const m of recvProto) {
-          const share = (m.amount / totalRecv) * costUsd;
+          const share = (m.amount / totalRecv) * totalCostWithGas;
           tracker.buy(m.symbol, m.amount, share, op.time);
         }
       }
