@@ -182,8 +182,6 @@ function overrideOne(
     // источник для current state. Если override применился, ⚠ "coverage
     // incomplete" badge становится бесполезным (current/fees уже корректные,
     // missing только historical mint date). Чистим флаг чтобы UX не пугал.
-    // openedAt/openHash остаются null если Etherscan не подгрузил — это
-    // отдельная UX-проблема (не относится к coverage флагу).
     coverageIncomplete: false,
     // Fallback path: если matchedV3TokenId не был установлен (Base chain
     // где Etherscan v2 unsupported / Alchemy 403) — проставляем его сейчас,
@@ -191,6 +189,24 @@ function overrideOne(
     ...(base.matchedV3TokenId
       ? {}
       : { matchedV3TokenId: k.tokenId }),
+    // 2026-05-26 (VolnyySanya POS-001 Base audit): если pair-match fallback
+    // сработал БЕЗ cb данных (нет Etherscan IncreaseLiquidity events —
+    // типично для Base без Alchemy Pro plan), reality openedAt/openHash
+    // из chain unknown. DeBank's earliest lp_add op попадает в position
+    // как «open» и daтa уезжает на месяцы вперёд (POS-001 system 05.03 vs
+    // real 18.04 — 44 дня). Лучше null → UI «—» чем misleading date.
+    //
+    // Условие: pair-match fallback (base.matchedV3TokenId был null), cb
+    // нет (мы знаем по тому что мы PRIMARY override path для этой
+    // позиции). Чистим openedAt/openHash/ageDays/openedInTokens.
+    ...(base.matchedV3TokenId
+      ? {}
+      : {
+          openedAt: null,
+          openHash: null,
+          ageDays: null,
+          openedInTokens: [],
+        }),
   };
 }
 
