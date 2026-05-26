@@ -499,6 +499,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       proxyState: telegramProxyState,
       telegram: telegramService,
       signup: telegramSignupService,
+      repository: telegramRepo,
       log: app.log,
     });
     poller.start();
