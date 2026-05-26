@@ -34,7 +34,7 @@ export function AdminApiUsagePage(): JSX.Element {
 
   const usersById = useMemo(() => {
     const m = new Map<string, { email: string | null; name: string | null }>();
-    users.data?.forEach((u) => m.set(u.id, { email: u.email, name: u.name }));
+    users.data?.items.forEach((u) => m.set(u.id, { email: u.email, name: u.name }));
     return m;
   }, [users.data]);
 
