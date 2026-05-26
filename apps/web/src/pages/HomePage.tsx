@@ -674,7 +674,7 @@ export function HomePage(): JSX.Element {
     <div className="mx-auto max-w-7xl space-y-4 sm:space-y-6">
       {/* Top: PageHeader (left) + compact Cap Wallet (right, на той же строке) */}
       <div className="flex flex-col items-start gap-4 lg:flex-row lg:gap-6">
-        <div className="flex-1 min-w-0">
+        <div className="w-full min-w-0 lg:flex-1">
           <PageHeader />
         </div>
         <div className="w-full shrink-0 lg:w-[300px]">
@@ -4260,8 +4260,12 @@ function ProtocolRow({
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-3 px-3 py-2.5 text-left"
+        className="flex w-full flex-col gap-2 px-3 py-2.5 text-left sm:flex-row sm:items-center sm:gap-3"
       >
+        {/* Верхняя группа: chevron + иконка + имя/мета/чипы.
+            На мобильном — отдельный ряд (со своим flex-row внутри),
+            на sm+ — часть общего горизонтального ряда. */}
+        <div className="flex min-w-0 flex-1 items-center gap-3">
         {/* Chevron + Иконка */}
         <ChevronDown
           className={cn(
@@ -4357,10 +4361,13 @@ function ProtocolRow({
             )}
           </div>
         </div>
+        </div>
 
         {/* Правая колонка: стоимость + PnL pill + дивиденды.
-            Чёткая иерархия: 18px primary value → 11px PnL pill → 11px sub. */}
-        <div className="flex shrink-0 flex-col items-end gap-1 text-right">
+            Чёткая иерархия: 18px primary value → 11px PnL pill → 11px sub.
+            На мобильном — отдельный ряд во всю ширину, прижатый вправо;
+            на sm+ — компактная боковая колонка справа. */}
+        <div className="flex w-full shrink-0 flex-row items-center justify-end gap-2 sm:w-auto sm:flex-col sm:items-end sm:gap-1 sm:text-right">
           <div className="text-lg font-bold tabular-nums leading-tight">
             {formatUsd(p.assetUsd, locale)}
           </div>
