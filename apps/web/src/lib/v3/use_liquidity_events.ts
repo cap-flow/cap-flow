@@ -154,7 +154,17 @@ export function useV3LiquidityEvents(
   etherscanKey?: string,
 ): State {
   const [data, setData] = useState<Map<string, V3CostBasisResult>>(EMPTY);
-  const [loading, setLoading] = useState(false);
+  // Bug E (2026-05-25 O_lll_ABC_lll_O audit): инициальный loading=true
+  // чтобы первый render показывал spinner вместо ⚠ badge на V3 LP позициях
+  // с coverageIncomplete. Раньше:
+  //   t0: loading=false → render → coverageIncomplete=true && loading=false → ⚠
+  //   t0+ε: useEffect → setLoading(true) async
+  //   t10s: fetch done → override → coverageIncomplete=false → ⚠ убирается
+  // Теперь:
+  //   t0: loading=true → render → spinner
+  //   t10s: setLoading(false) + override → spinner→nothing
+  // Early-return branch (no key / no targets) явно ставит loading=false.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // Найти deployment для каждой позиции (через protocolLabel + chain).
@@ -182,6 +192,7 @@ export function useV3LiquidityEvents(
     if (!alchemyKey || targets.length === 0) {
       console.log("[useV3LiquidityEvents] skipped: no key or no targets");
       setData(EMPTY);
+      setLoading(false);
       setError(null);
       return;
     }
