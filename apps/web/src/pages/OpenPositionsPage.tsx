@@ -978,7 +978,7 @@ function OpenPositionsPageInner(): JSX.Element {
                     )}
                   >
                     <Link
-                      to={`/position/${p.id}`}
+                      to={`/positions/${p.id}`}
                       className="block hover:bg-accent/30 -mx-4 px-4 py-1 -my-1"
                     >
                       <div className="flex items-start justify-between gap-2">
