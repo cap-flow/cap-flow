@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { adminTelegramChatApi } from "./api";
@@ -9,7 +10,12 @@ const KEYS = {
   unread: () => [...KEYS.all, "unread"] as const,
 };
 
-const POLL_MS = 5000;
+/**
+ * Polling — fallback на случай если SSE упал (network drop, прокси
+ * убил idle connection). 30s достаточно медленно чтобы не нагружать
+ * backend, но достаточно быстро чтобы catch'ить пропущенные events.
+ */
+const POLL_MS = 30_000;
 
 export function useConversations() {
   return useQuery({
@@ -64,4 +70,36 @@ export function useUnreadCount() {
     refetchInterval: POLL_MS * 2,
     staleTime: POLL_MS,
   });
+}
+
+/**
+ * SSE подписка на admin chat events. Открывает EventSource, при любом
+ * event'е инвалидирует react-query cache → данные перезагружаются.
+ *
+ * Browser автоматически reconnect'ится при разрыве — robust enough
+ * без custom retry. Polling из useConversations/useMessages — fallback
+ * на случай длительного outage.
+ *
+ * Вызывать ОДИН раз на admin shell mount (не в каждой странице) —
+ * иначе будут multiple SSE connections от одного browser tab'а.
+ */
+export function useChatEventStream(): void {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const es = new EventSource("/api/v1/admin/telegram-chat/stream", {
+      withCredentials: true,
+    });
+    const invalidateAll = (): void => {
+      qc.invalidateQueries({ queryKey: KEYS.all });
+    };
+    es.addEventListener("new-message", invalidateAll);
+    es.addEventListener("read", invalidateAll);
+    // `error` event при reconnect — EventSource сам пытается переподключиться.
+    es.addEventListener("error", () => {
+      // Молчим — это нормально (network blip, server restart).
+    });
+    return () => {
+      es.close();
+    };
+  }, [qc]);
 }

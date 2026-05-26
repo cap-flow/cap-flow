@@ -104,18 +104,37 @@ export async function processTelegramUpdate(
   const bareStart = msg.text.trim().match(/^\/start(?:@\S+)?\s*$/i);
   if (!withPayload && !bareStart) {
     // Admin chat: non-/start message от linked user — сохраняем в
-    // telegram_messages для отображения в admin panel.
+    // telegram_messages для отображения в admin panel + broadcast
+    // через SSE event bus для real-time updates.
     if (repository) {
       try {
         const userId = await repository.findUserIdByChatId(msg.chat.id);
         if (userId) {
-          await repository.saveMessage({
+          const saved = await repository.saveMessage({
             userId,
             chatId: msg.chat.id,
             direction: "in",
             text: msg.text,
             type: "text",
           });
+          // SSE broadcast — лениво подгружаем bus чтобы избежать
+          // циклической зависимости (telegram ← admin-chat).
+          try {
+            const { chatEventBus } = await import(
+              "../admin-telegram-chat/chat-events.bus.js"
+            );
+            chatEventBus.emitNewMessage({
+              userId,
+              message: {
+                id: saved.id,
+                direction: "in",
+                text: saved.text,
+                createdAt: saved.createdAt.toISOString(),
+              },
+            });
+          } catch {
+            /* admin-chat module не registered — OK, polling fallback */
+          }
           return true;
         }
       } catch {

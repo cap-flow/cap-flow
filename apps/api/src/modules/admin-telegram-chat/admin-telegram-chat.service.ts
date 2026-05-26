@@ -12,6 +12,7 @@ import type {
   TelegramMessageRow,
 } from "../telegram/telegram.repository.js";
 import type { TelegramService } from "../telegram/telegram.service.js";
+import { chatEventBus } from "./chat-events.bus.js";
 
 export interface ConversationSummary {
   userId: string;
@@ -44,8 +45,10 @@ export class AdminTelegramChatService {
     return this.repo.totalUnread();
   }
 
-  markRead(userId: string): Promise<number> {
-    return this.repo.markRead(userId);
+  async markRead(userId: string): Promise<number> {
+    const n = await this.repo.markRead(userId);
+    if (n > 0) chatEventBus.emitRead(userId);
+    return n;
   }
 
   /**
@@ -89,6 +92,15 @@ export class AdminTelegramChatService {
       payload: {
         targetUserId: args.userId,
         msgLength: trimmed.length,
+      },
+    });
+    chatEventBus.emitNewMessage({
+      userId: args.userId,
+      message: {
+        id: row.id,
+        direction: "out",
+        text: row.text,
+        createdAt: row.createdAt.toISOString(),
       },
     });
     return row;

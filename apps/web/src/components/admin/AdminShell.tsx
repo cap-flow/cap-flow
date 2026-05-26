@@ -23,7 +23,10 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { LogoLockup } from "@/components/brand/Logo";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/features/auth/AuthProvider";
-import { useUnreadCount } from "@/features/admin/telegram-chat/hooks";
+import {
+  useChatEventStream,
+  useUnreadCount,
+} from "@/features/admin/telegram-chat/hooks";
 import { cn } from "@/lib/utils";
 
 interface AdminNavItem {
@@ -83,6 +86,9 @@ const ADMIN_NAV: AdminNavGroup[] = [
 
 export function AdminShell({ children }: { readonly children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  // Open ONE SSE connection per admin session — все admin страницы
+  // получают real-time updates через react-query invalidation.
+  useChatEventStream();
 
   return (
     <div className="relative min-h-screen app-glow">
