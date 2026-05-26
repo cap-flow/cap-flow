@@ -21,6 +21,12 @@ const DISMISS_KEY = "capflow.emailVerifyBanner.dismissedUntil";
  * (5/hour/user). Local "sent" state shows a green check for 1.5s as
  * feedback that the email is queued.
  */
+/**
+ * 2026-05-25 (user request): temporarily disable email verification banner.
+ * Чтобы вернуть — изменить EMAIL_BANNER_ENABLED на true.
+ */
+const EMAIL_BANNER_ENABLED = false;
+
 export function EmailVerificationBanner(): JSX.Element | null {
   const { user } = useAuth();
   const [sending, setSending] = useState(false);
@@ -37,6 +43,7 @@ export function EmailVerificationBanner(): JSX.Element | null {
   //   - verified
   //   - dismissed within the 24h window
   //   - impersonation: showing it as an admin acting-as-user is misleading
+  if (!EMAIL_BANNER_ENABLED) return null;
   if (!user) return null;
   if (user.emailVerifiedAt) return null;
   if (user.impersonation) return null;

@@ -56,16 +56,18 @@ export function OnboardingChecklist(): JSX.Element | null {
   if (!user) return null;
 
   const steps: ChecklistStep[] = [
-    {
-      key: "verify",
-      label: "Подтвердите email",
-      description:
-        "Без подтверждения вы не сможете восстановить пароль или получать важные уведомления.",
-      done: !!user.emailVerifiedAt,
-      action: user.emailVerifiedAt
-        ? undefined
-        : { label: "Открыть Настройки", to: "/settings" },
-    },
+    // 2026-05-25 (user request): temporarily убираем "Подтвердите email"
+    // из onboarding checklist. Чтобы вернуть — раскомментировать.
+    // {
+    //   key: "verify",
+    //   label: "Подтвердите email",
+    //   description:
+    //     "Без подтверждения вы не сможете восстановить пароль или получать важные уведомления.",
+    //   done: !!user.emailVerifiedAt,
+    //   action: user.emailVerifiedAt
+    //     ? undefined
+    //     : { label: "Открыть Настройки", to: "/settings" },
+    // },
     {
       key: "wallet",
       label: "Добавьте первый кошелёк",
