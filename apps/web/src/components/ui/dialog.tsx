@@ -52,7 +52,7 @@ export function Dialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-stretch justify-stretch sm:items-center sm:justify-center sm:p-4"
       role="dialog"
       aria-modal="true"
     >
@@ -62,12 +62,14 @@ export function Dialog({
       />
       <div
         className={cn(
-          "relative z-10 w-full rounded-lg border border-border bg-card shadow-2xl",
+          "relative z-10 flex w-full flex-col border-border bg-card shadow-2xl",
+          "h-full sm:h-auto sm:rounded-lg sm:border",
+          "sm:max-h-[calc(100vh-2rem)]",
           SIZE[size],
         )}
       >
-        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
-          <div>
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-3 sm:px-5 sm:py-4">
+          <div className="min-w-0">
             {title && (
               <h2 className="text-base font-semibold tracking-tight">{title}</h2>
             )}
@@ -85,9 +87,11 @@ export function Dialog({
             <X />
           </Button>
         </div>
-        <div className="px-5 py-4">{children}</div>
+        <div className="min-h-0 overflow-y-auto px-4 py-3 sm:px-5 sm:py-4">
+          {children}
+        </div>
         {footer && (
-          <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
+          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border px-4 py-3 sm:px-5">
             {footer}
           </div>
         )}
