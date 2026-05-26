@@ -165,8 +165,8 @@ export class TelegramRepository {
       userId: string;
       lastText: string | null;
       lastDirection: "in" | "out";
-      lastAt: Date;
-      unreadCount: number;
+      lastAt: Date | string;
+      unreadCount: number | string;
     }>(sql`
       WITH last_msg AS (
         SELECT DISTINCT ON (user_id)
@@ -185,12 +185,24 @@ export class TelegramRepository {
         lm.text                AS "lastText",
         lm.direction::text     AS "lastDirection",
         lm.created_at          AS "lastAt",
-        COALESCE(u.unread_count, 0) AS "unreadCount"
+        COALESCE(u.unread_count, 0)::int AS "unreadCount"
       FROM last_msg lm
       LEFT JOIN unread u USING (user_id)
       ORDER BY lm.created_at DESC
     `);
-    return result.rows;
+    // node-pg может вернуть timestamp как string (если type-parser не
+    // навешен для raw SQL) и COUNT как string при больших значениях —
+    // нормализуем явно, чтобы fastify zod response schema не упала.
+    return result.rows.map((r) => ({
+      userId: r.userId,
+      lastText: r.lastText,
+      lastDirection: r.lastDirection,
+      lastAt: r.lastAt instanceof Date ? r.lastAt : new Date(r.lastAt),
+      unreadCount:
+        typeof r.unreadCount === "number"
+          ? r.unreadCount
+          : Number(r.unreadCount),
+    }));
   }
 
   async listMessages(args: {

@@ -68,12 +68,22 @@ export async function adminTelegramChatRoutes(
   route.get(
     "/conversations",
     { schema: { response: { 200: z.array(conversationSchema) } } },
-    async () => {
-      const list = await opts.service.listConversations();
-      return list.map((c) => ({
-        ...c,
-        lastAt: c.lastAt.toISOString(),
-      }));
+    async (req) => {
+      try {
+        const list = await opts.service.listConversations();
+        return list.map((c) => ({
+          ...c,
+          lastAt: c.lastAt.toISOString(),
+        }));
+      } catch (err) {
+        // Логируем полную ошибку — generic 500 в проде скрывал причину
+        // багов с .rows / типами строк (см. PR #76 history).
+        req.log.error(
+          { err: (err as Error).message, stack: (err as Error).stack },
+          "[admin-telegram-chat] listConversations failed",
+        );
+        throw err;
+      }
     },
   );
 
