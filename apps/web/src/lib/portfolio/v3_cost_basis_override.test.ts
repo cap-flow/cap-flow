@@ -273,7 +273,7 @@ describe("applyV3CostBasisOverride — orphan openedAt backfill (Fix #1)", () =>
     expect(p.matchedV3TokenId).toBe("1159873");
   });
 
-  it("non-orphan position: backfill noop (не трогает openedAt у нормальных)", () => {
+  it("non-orphan position: backfill UPDATES openedAt из cb (VolnyySanya POS-002 fix)", () => {
     const pos: OpenPosition = {
       ...orphanPos({
         id: "POS-NORMAL",
@@ -320,9 +320,13 @@ describe("applyV3CostBasisOverride — orphan openedAt backfill (Fix #1)", () =>
 
     const { positions } = applyV3CostBasisOverride([pos], v3PositionMap, v3CostBasis);
     const p = positions[0]!;
-    // openedAt / openHash НЕ должны быть перезаписаны для non-orphan
-    expect(p.openedAt).toBe(1700000000);
-    expect(p.openHash).toBe("0xoriginal");
+    // 2026-05-26 (VolnyySanya POS-002 fix): backfill теперь BREAKS noop для
+    // non-orphan и overrides openedAt из cb.mintBlockTime. Раньше DeBank's
+    // earliest lp_add op подбирался → дата на месяцы раньше реальной
+    // (старая burned NFT в том же пуле). Etherscan IncreaseLiquidity — single
+    // source of truth.
+    expect(p.openedAt).toBe(1766649719);
+    expect(p.openHash).toBe("0xnew");
     expect(p.coverageIncomplete).toBe(false);
   });
 });
