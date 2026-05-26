@@ -22,9 +22,30 @@ import { isStableSymbol } from "./protocols";
 import { isReceiptOfProtocol } from "./token_roles";
 import type { ClassifiedOp, TokenMovement } from "./types";
 
+/**
+ * Канонизация символа: убираем wrap-префиксы, чтобы `wXYZ` сматчился с `XYZ`.
+ *
+ * Bug 2 (O_lll_ABC_lll_O POS-003 wSPYx audit 2026-05-25): чейн-ops содержали
+ * `wSPYx` (wrapped Spotify tokenized stock), но Morpho receipt в UI был `SPYx`.
+ * Cost basis tracker keyед по `WSPYX` → popup lookup по `SPYX` → 0 matches.
+ *
+ * Strategy: explicit map для известных асимметричных пар (WETH→ETH сохранил
+ * совместимость) + generic strip-w-prefix для остальных wrapped-стилей
+ * (wSPYx, wMATIC если бы не был в map'е, etc).
+ *
+ * Стейблы (USDC, USDT, DAI, …) `w`-префикса не имеют — не затрагиваются.
+ * wstETH ≠ stETH (разные токены, не unwrap) — НЕ обрабатывается этим helper'ом:
+ * у него длина >1 буквы в lowercase префиксе. Strip только если первая буква
+ * lowercase 'w' + следующая буква ОДНА (uppercase) перед остальным upper-частью.
+ */
 function normalizeSymbol(s: string): string {
   const u = s.toUpperCase();
   if (u === "WETH") return "ETH";
+  // Generic w-prefix strip: wXYZ → XYZ если оригинал начинался с lowercase 'w'.
+  // Защищаем wstETH / wbETH / wstUSDT: lowercase prefix >1 → не trogан.
+  if (s.length > 1 && s[0] === "w" && s[1] === s[1]?.toUpperCase() && s[1] !== s[1]?.toLowerCase()) {
+    return s.slice(1).toUpperCase();
+  }
   return u;
 }
 
@@ -171,24 +192,40 @@ export function buildCostBasisTracker(
       const stableOuts = op.movement.filter(
         (m) => m.direction === "out" && m.isStable && m.amount > 0,
       );
+      const nonStableOuts = op.movement.filter(
+        (m) => m.direction === "out" && !m.isStable && m.amount > 0,
+      );
       const ins = op.movement.filter(
         (m) => m.direction === "in" && m.amount > 0,
       );
       const stableSum = stableOuts.reduce((s, m) => s + m.amount, 0);
-      if (stableSum > 0 && ins.length > 0) {
-        // Делим оплату пропорционально между приходящими токенами по их amount,
-        // если их несколько (редкий случай). Для единственного — просто всё.
+      // Bug 1 fix (O_lll_ABC_lll_O POS-003 audit 2026-05-25): non-stable→
+      // non-stable swap (ETH→wSPYx) раньше не регистрировал buy на IN-сайде,
+      // потому что stableSum=0. Теперь cost = stableSum + Σ(wacAt(out_nonstable))
+      // (наша WAC отдаваемого токена — propagates cost basis между активами).
+      // Fallback на m.usd если wacAt не известен (gap в истории).
+      let nonStableOutCost = 0;
+      for (const m of nonStableOuts) {
+        const wac = tracker.avgAt(m.symbol, op.time);
+        if (wac != null && wac > 0) {
+          nonStableOutCost += m.amount * wac;
+        } else if (m.usd != null && m.usd > 0) {
+          nonStableOutCost += m.usd;
+        }
+      }
+      const totalCost = stableSum + nonStableOutCost;
+      if (totalCost > 0 && ins.length > 0) {
+        // Делим оплату пропорционально между приходящими токенами по их amount.
         const totalIn = ins.reduce((s, m) => s + m.amount, 0);
         for (const m of ins) {
-          const sharePaid = stableSum * (m.amount / totalIn);
+          const sharePaid = totalCost * (m.amount / totalIn);
           tracker.buy(m.symbol, m.amount, sharePaid, op.time);
         }
       }
-      // Out non-stable (продажа актива за стейбл): уменьшаем баланс.
-      for (const m of op.movement) {
-        if (m.direction === "out" && !m.isStable && m.amount > 0) {
-          tracker.consume(m.symbol, m.amount, op.time);
-        }
+      // Out non-stable (продажа актива): уменьшаем баланс. ВАЖНО: вызываем
+      // ПОСЛЕ buy чтобы tracker.avgAt выше получил pre-consume WAC.
+      for (const m of nonStableOuts) {
+        tracker.consume(m.symbol, m.amount, op.time);
       }
       continue;
     }
