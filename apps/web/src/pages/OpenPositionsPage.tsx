@@ -682,7 +682,7 @@ function OpenPositionsPageInner(): JSX.Element {
     <div className="mx-auto max-w-7xl space-y-6">
       <Header
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {histLoading && (
               <span className="rounded-md border border-border bg-secondary/40 px-2 py-1 text-[11px] text-brand-cyan">
                 подтягиваю исторические цены V3…
