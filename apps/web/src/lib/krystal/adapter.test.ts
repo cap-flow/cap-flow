@@ -130,6 +130,7 @@ describe("summary type contract", () => {
       status: "IN_RANGE",
       ownerAddress: "0xowner",
       poolAddress: "0xpool",
+      npmAddress: "0xnpm",
       currentUsd: 1000,
       currentTokens: [{ symbol: "WETH", amount: 0.5, usd: 1000, address: "0x0" }],
       pendingFeeUsd: 0,

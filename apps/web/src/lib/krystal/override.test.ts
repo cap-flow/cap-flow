@@ -122,6 +122,7 @@ function summary(args: {
     status: args.status ?? "IN_RANGE",
     ownerAddress: (args.ownerAddress ?? "0xowner").toLowerCase(),
     poolAddress: "0xpool",
+    npmAddress: "0xnpm",
     currentUsd: args.currentUsd,
     currentTokens: args.current.map((t) => ({ ...t, address: "0x" })),
     pendingFeeUsd: args.pendingUsd,
@@ -429,11 +430,11 @@ describe("applyKrystalV3Override", () => {
       expect(p.feesUsd).toBeCloseTo(23.57, 1);
       // matchedV3TokenId backfilled (для downstream UI / overrides)
       expect(p.matchedV3TokenId).toBe("4911255");
-      // 2026-05-27 policy refinement (VolnyySanya POS-001 Base audit):
-      // на fallback path (matchedV3TokenId был null до override = Etherscan
-      // не дал) claimed fees тоже из Krystal — UCB+PR-2 split на Base chain
-      // не работает (нет DecreaseLiquidity events).
-      expect(p.feesClaimedUsd).toBe(55.4);
+      // 2026-05-27 (PR-K23 follow-up): claimed fees теперь идут через
+      // Krystal `/transactions` endpoint (новый параметр в applyKrystalV3Override).
+      // Когда transactionsByTokenId НЕ передан → fallback на base.feesClaimedUsd.
+      // Старая политика "fallback path → Krystal aggregated claimed" удалена.
+      expect(p.feesClaimedUsd).toBe(50);
     });
 
     it("canonical WETH↔ETH match: position.supplyTokens=[ETH,USDC], Krystal pair=[WETH,USDC]", () => {
@@ -740,11 +741,11 @@ describe("applyKrystalV3Override", () => {
       expect(p.supplyTokens[0]!.startUsd).toBeCloseTo(0, 1); // WETH provided=0
       expect(p.supplyTokens[1]!.startUsd).toBeCloseTo(2000.0, 1); // USDC provided=2000
 
-      // 2026-05-27 policy refinement: claimed → Krystal на fallback path
-      // (UCB+PR-2 broken на Base chain — нет Etherscan DecreaseLiquidity).
-      // UCB давал $1,943.53 inflated, Krystal дал $69.91 real.
-      expect(p.feesClaimedUsd).toBeCloseTo(69.91, 1);
-      expect(p.feesClaimedHistory).toEqual([]); // UCB history тоже broken — чистим
+      // 2026-05-27 (PR-K23): claimed fees теперь через /transactions endpoint.
+      // Без transactionsByTokenId param → fallback на base.feesClaimedUsd.
+      // (Real claim history populated через отдельный test ниже с txs map.)
+      expect(p.feesClaimedUsd).toBe(1979.94); // base UCB value preserved
+      expect(p.feesClaimedHistory).toEqual([]); // basePos default — empty
 
       // PnL пересчитан от нового startUsd
       expect(p.netPnlUsd).toBeCloseTo(1854.05 - 2000.0, 1);
@@ -853,6 +854,141 @@ describe("applyKrystalV3Override", () => {
       // Cost basis untouched — graceful degradation
       expect(p.startUsd).toBe(5000);
       expect(p.openedAt).toBe(1770000000); // base value preserved
+    });
+
+    it("PR-K23: Krystal /transactions → feesClaimedHistory + feesClaimedUsd", () => {
+      // VolnyySanya POS-001 BASE: реальные 4 collect events с user-confirmed
+      // числами. Endpoint /v1/positions/{chainId}/{nft}/transactions отдаёт
+      // historical USD prices at block time — authoritative.
+      const pos = basePos({
+        id: "POS-001",
+        matchedV3TokenId: "4987608",
+        startUsd: 2000,
+        currentUsd: 1854.05,
+        ageDays: 40,
+        supply: [
+          { symbol: "WETH", amount: 0.845, currentUsd: 1750.97, startUsd: 0 },
+          { symbol: "USDC", amount: 95.70, currentUsd: 95.70, startUsd: 2000 },
+        ],
+        feesUsd: 7.37,
+        feesClaimedUsd: 1979.94, // ⚠ UCB inflated raw value
+        feesClaimedHistory: [
+          // ⚠ UCB-derived inflated entries (13 entries в проде у VolnyySanya)
+          { time: 1770000000, hash: "0xUCB1", usd: 1500 },
+          { time: 1771000000, hash: "0xUCB2", usd: 479.94 },
+        ],
+      });
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["4987608", summary({
+          tokenId: "4987608", currentUsd: 1854.05,
+          current: [
+            { symbol: "WETH", amount: 0.845, usd: 1750.97 },
+            { symbol: "USDC", amount: 95.70, usd: 95.70 },
+          ],
+          pendingUsd: 7.37,
+          claimedUsd: 70, // aggregated (less reliable than /transactions)
+          chainCode: "base",
+          ownerAddress: "0xowner",
+          openedTime: 1776443737,
+          totalDepositValue: 2000,
+          provided: [
+            { symbol: "WETH", amount: 0, usd: 0 },
+            { symbol: "USDC", amount: 2000, usd: 2000 },
+          ],
+        })],
+      ]);
+      // Authoritative claim history from /transactions endpoint
+      const transactions = new Map<string, import("./adapter").KrystalTransactionsSummary>([
+        ["4987608", {
+          claimedHistory: [
+            { time: 1777215155, hash: "0x4195187e6f0d55fcf903e4783c602b1e6f52fadb011c7274309776f956d22c9c", usd: 21.68, tokensReceived: [{ symbol: "WETH", amount: 0.00489, usd: 11.49 }, { symbol: "USDC", amount: 10.19, usd: 10.19 }] },
+            { time: 1778349687, hash: "0x2d0a20f57a5e82c65c680e9b598e14cf11c51256b0a88d84ec9b19f1df1c187f", usd: 27.14, tokensReceived: [{ symbol: "WETH", amount: 0.00588, usd: 13.73 }, { symbol: "USDC", amount: 13.41, usd: 13.41 }] },
+            { time: 1778939611, hash: "0x2a8d531ea7dbe8eedb918810e4e4f57b8c373a28819c408b71a9a6d41abf6b45", usd: 12.32, tokensReceived: [{ symbol: "WETH", amount: 0.00320, usd: 6.97 }, { symbol: "USDC", amount: 5.35, usd: 5.35 }] },
+            { time: 1779541523, hash: "0x43268c01b951a50cbe070dd6fefe2973040b4ed27984633e0310863c8a9b3f72", usd: 12.00, tokensReceived: [{ symbol: "WETH", amount: 0.00326, usd: 6.65 }, { symbol: "USDC", amount: 5.35, usd: 5.35 }] },
+          ],
+          claimedTotalUsd: 73.14,
+          depositCount: 1,
+          withdrawCount: 0,
+          eventTypes: ["DEPOSIT", "COLLECT_FEE"],
+        }],
+      ]);
+
+      const out = applyKrystalV3Override([pos], krystal, undefined, transactions);
+      const p = out[0]!;
+
+      // feesClaimedHistory authoritative из /transactions, не UCB
+      expect(p.feesClaimedHistory).toHaveLength(4);
+      expect(p.feesClaimedHistory[0]!.hash).toBe("0x4195187e6f0d55fcf903e4783c602b1e6f52fadb011c7274309776f956d22c9c");
+      expect(p.feesClaimedHistory[0]!.usd).toBeCloseTo(21.68, 2);
+      expect(p.feesClaimedHistory[3]!.usd).toBeCloseTo(12.00, 2);
+      // Σ совпадает с user-confirmed $73.14, не UCB $1979 и не Krystal aggregated $70
+      expect(p.feesClaimedUsd).toBeCloseTo(73.14, 2);
+      // feesLifetimeUsd = newPending + newClaimed
+      expect(p.feesLifetimeUsd).toBeCloseTo(7.37 + 73.14, 2);
+      // feesClaimedByToken aggregated по символу через всю историю
+      const wethSum = p.feesClaimedByToken.find(t => t.symbol === "WETH");
+      expect(wethSum?.usd).toBeCloseTo(11.49 + 13.73 + 6.97 + 6.65, 1);
+    });
+
+    it("PR-K23: если /transactions не передан → fallback на base.feesClaimed*", () => {
+      const pos = basePos({
+        id: "POS-FALLBACK",
+        matchedV3TokenId: "999",
+        startUsd: 1000,
+        currentUsd: 1000,
+        supply: [{ symbol: "WETH", amount: 0.5, currentUsd: 1000, startUsd: 1000 }],
+        feesClaimedUsd: 100,
+        feesClaimedHistory: [
+          { time: 1770000000, hash: "0xa", usd: 60 },
+          { time: 1771000000, hash: "0xb", usd: 40 },
+        ],
+      });
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["999", summary({
+          tokenId: "999", currentUsd: 1000,
+          current: [{ symbol: "WETH", amount: 0.5, usd: 1000 }],
+          pendingUsd: 0, claimedUsd: 999, // Krystal aggregated — игнорируется
+        })],
+      ]);
+
+      // Без transactionsByTokenId
+      const out = applyKrystalV3Override([pos], krystal);
+      const p = out[0]!;
+      expect(p.feesClaimedUsd).toBe(100); // UCB preserved
+      expect(p.feesClaimedHistory).toHaveLength(2);
+    });
+
+    it("PR-K23: empty /transactions (no events) → 0 claimed, empty history", () => {
+      const pos = basePos({
+        id: "POS-NEW",
+        matchedV3TokenId: "888",
+        startUsd: 500,
+        currentUsd: 510,
+        supply: [{ symbol: "WETH", amount: 0.25, currentUsd: 510, startUsd: 500 }],
+        feesClaimedUsd: 999, // ⚠ UCB inflated
+      });
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["888", summary({
+          tokenId: "888", currentUsd: 510,
+          current: [{ symbol: "WETH", amount: 0.25, usd: 510 }],
+          pendingUsd: 0, claimedUsd: 0,
+        })],
+      ]);
+      // Krystal /transactions вернул empty (новая позиция, нет collect events)
+      const transactions = new Map<string, import("./adapter").KrystalTransactionsSummary>([
+        ["888", {
+          claimedHistory: [],
+          claimedTotalUsd: 0,
+          depositCount: 1,
+          withdrawCount: 0,
+          eventTypes: ["DEPOSIT"],
+        }],
+      ]);
+      const out = applyKrystalV3Override([pos], krystal, undefined, transactions);
+      const p = out[0]!;
+      // /transactions authoritative — empty означает 0 claimed
+      expect(p.feesClaimedUsd).toBe(0);
+      expect(p.feesClaimedHistory).toEqual([]);
     });
 
     it("netStartUsd учитывает withdrawValue (если Krystal знает обе стороны)", () => {
