@@ -137,7 +137,79 @@ describe("summary type contract", () => {
       claimedFeeUsd: 0,
       claimedFeeTokens: [],
       providedTokens: [],
+      openedTime: null,
+      totalDepositValue: null,
+      totalWithdrawValue: null,
     };
     expect(x.tokenId).toBe("1");
+  });
+});
+
+describe("cost-basis fields (2026-05-27 VolnyySanya: Krystal → startUsd)", () => {
+  it("maps performance.totalDepositValue + openedTime когда Krystal их вернул", () => {
+    const pos: KrystalPosition = {
+      chain: { id: 42161, name: "Arbitrum" },
+      pool: {
+        id: "0xpool",
+        poolAddress: "0xpool",
+        protocol: { key: "uniswapv3", name: "Uniswap V3" },
+      },
+      ownerAddress: "0xowner",
+      id: "0xnpm-5500786",
+      tokenId: "5500786",
+      currentPositionValue: 1763.44,
+      currentAmounts: [],
+      openedTime: 1779514625,
+      performance: {
+        totalDepositValue: 1752.96,
+        totalWithdrawValue: 0,
+        pnl: 10.48,
+      },
+    };
+    const s = krystalToV3Summary(pos);
+    expect(s.openedTime).toBe(1779514625);
+    expect(s.totalDepositValue).toBe(1752.96);
+    expect(s.totalWithdrawValue).toBe(0);
+  });
+
+  it("null если Krystal не отдал performance/openedTime (graceful)", () => {
+    const pos: KrystalPosition = {
+      chain: { id: 1, name: "Ethereum" },
+      pool: {
+        id: "0xpool",
+        poolAddress: "0xpool",
+        protocol: { key: "uniswapv3", name: "Uniswap V3" },
+      },
+      ownerAddress: "0xowner",
+      id: "0xnpm-1",
+      tokenId: "1",
+      currentPositionValue: 100,
+      currentAmounts: [],
+    };
+    const s = krystalToV3Summary(pos);
+    expect(s.openedTime).toBeNull();
+    expect(s.totalDepositValue).toBeNull();
+    expect(s.totalWithdrawValue).toBeNull();
+  });
+
+  it("totalDepositValue=0 / negative → null (защита от garbage)", () => {
+    const pos: KrystalPosition = {
+      chain: { id: 1, name: "Ethereum" },
+      pool: {
+        id: "0xpool",
+        poolAddress: "0xpool",
+        protocol: { key: "uniswapv3", name: "Uniswap V3" },
+      },
+      ownerAddress: "0xowner",
+      id: "0xnpm-2",
+      tokenId: "2",
+      currentPositionValue: 100,
+      currentAmounts: [],
+      openedTime: 0, // also bogus
+      performance: { totalDepositValue: 0 },
+    };
+    const s = krystalToV3Summary(pos);
+    expect(s.openedTime).toBeNull();
+    expect(s.totalDepositValue).toBeNull();
   });
 });
