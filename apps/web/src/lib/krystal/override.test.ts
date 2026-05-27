@@ -429,8 +429,11 @@ describe("applyKrystalV3Override", () => {
       expect(p.feesUsd).toBeCloseTo(23.57, 1);
       // matchedV3TokenId backfilled (для downstream UI / overrides)
       expect(p.matchedV3TokenId).toBe("4911255");
-      // claimed остаётся UCB
-      expect(p.feesClaimedUsd).toBe(50);
+      // 2026-05-27 policy refinement (VolnyySanya POS-001 Base audit):
+      // на fallback path (matchedV3TokenId был null до override = Etherscan
+      // не дал) claimed fees тоже из Krystal — UCB+PR-2 split на Base chain
+      // не работает (нет DecreaseLiquidity events).
+      expect(p.feesClaimedUsd).toBe(55.4);
     });
 
     it("canonical WETH↔ETH match: position.supplyTokens=[ETH,USDC], Krystal pair=[WETH,USDC]", () => {
@@ -678,7 +681,16 @@ describe("applyKrystalV3Override", () => {
           { symbol: "USDC", amount: 95.70, currentUsd: 95.70, startUsd: 89.34 },
         ],
         feesUsd: 7.37,
-        feesClaimedUsd: 1979.94, // UCB+PR-2 — корректно, оставляем
+        feesClaimedUsd: 1979.94, // ⚠ UCB+PR-2 inflated (real $69-80)
+        v3: {
+          // ⚠ UCB-derived garbage: real provided was 0 WETH + 2000 USDC
+          depositUsd: 1748.89,
+          hodlUsd: 1704.51,
+          currentLpUsd: 1854.05,
+          impermanentLossUsd: -149.54,
+          pnlUsd: 105.16,
+          pnlPct: 6.01,
+        },
       });
       const posBase: OpenPosition = { ...pos, chain: "base" };
 
@@ -694,7 +706,11 @@ describe("applyKrystalV3Override", () => {
               { symbol: "USDC", amount: 95.70, usd: 95.70 },
             ],
             pendingUsd: 7.37,
-            claimedUsd: 0, // Krystal врёт здесь — мы не используем
+            claimedUsd: 69.91, // real Krystal collect events ($35.61 WETH + $34.30 USDC)
+            claimed: [
+              { symbol: "WETH", amount: 0.017236, usd: 35.61 },
+              { symbol: "USDC", amount: 34.30, usd: 34.30 },
+            ],
             chainCode: "base",
             ownerAddress: "0xvolnyy",
             openedTime: 1745019300, // 18.04.2026 00:35 UTC примерно
@@ -724,14 +740,28 @@ describe("applyKrystalV3Override", () => {
       expect(p.supplyTokens[0]!.startUsd).toBeCloseTo(0, 1); // WETH provided=0
       expect(p.supplyTokens[1]!.startUsd).toBeCloseTo(2000.0, 1); // USDC provided=2000
 
-      // claimed остаётся UCB (это authoritative)
-      expect(p.feesClaimedUsd).toBe(1979.94);
+      // 2026-05-27 policy refinement: claimed → Krystal на fallback path
+      // (UCB+PR-2 broken на Base chain — нет Etherscan DecreaseLiquidity).
+      // UCB давал $1,943.53 inflated, Krystal дал $69.91 real.
+      expect(p.feesClaimedUsd).toBeCloseTo(69.91, 1);
+      expect(p.feesClaimedHistory).toEqual([]); // UCB history тоже broken — чистим
 
       // PnL пересчитан от нового startUsd
       expect(p.netPnlUsd).toBeCloseTo(1854.05 - 2000.0, 1);
 
       // matchedV3TokenId backfilled для UI
       expect(p.matchedV3TokenId).toBe("4987608");
+
+      // 2026-05-27 follow-up: v3.depositTokens из Krystal providedTokens
+      expect(p.v3?.depositUsd).toBeCloseTo(2000.0, 1);
+      expect(p.v3?.depositTokens).toEqual([
+        { symbol: "WETH", amount: 0, usdAtDeposit: 0 },
+        { symbol: "USDC", amount: 2000, usdAtDeposit: 2000 },
+      ]);
+
+      // supplyTokens.startAmount из Krystal providedTokens (UI «Внесено токенов»)
+      expect(p.supplyTokens[0]!.startAmount).toBe(0); // WETH
+      expect(p.supplyTokens[1]!.startAmount).toBe(2000); // USDC
     });
 
     it("ARB happy path: Krystal totalDepositValue=$1752 → корректирует netStartUsd ($880 был broken)", () => {
