@@ -85,6 +85,25 @@ const CHAIN_ID_TO_CODE: Record<number, string> = {
   43114: "avax",
 };
 
+/**
+ * Chains которые мы запрашиваем для CLOSED status. ETH/ARB занимают
+ * подавляющее большинство, но BASE/OP/Polygon/BSC/Avax тоже нужны для
+ * dust-фильтрации (POS-046 был именно на BASE).
+ *
+ * Krystal CLOSED endpoint без явного `chainIds` возвращает только одну
+ * самую активную chain'у для wallet'а — поэтому ОБЯЗАТЕЛЬНО iterate
+ * per chain (см. client.ts).
+ */
+const SUPPORTED_CHAINS_FOR_CLOSED: { chainId: number; code: string }[] = [
+  { chainId: 1, code: "eth" },
+  { chainId: 42161, code: "arb" },
+  { chainId: 8453, code: "base" },
+  { chainId: 10, code: "op" },
+  { chainId: 137, code: "matic" },
+  { chainId: 56, code: "bsc" },
+  { chainId: 43114, code: "avax" },
+];
+
 function positionsToPools(positions: readonly KrystalPosition[]): ClosedPool[] {
   const out: ClosedPool[] = [];
   for (const p of positions) {
@@ -156,11 +175,12 @@ export function useKrystalV3ClosedPools(
       const closedKeys = new Set<string>();
       const errors: string[] = [];
 
-      // Parallel fetch через Promise.allSettled чтобы одна ошибка
-      // не валила остальные wallet'ы.
+      // 2026-05-28 (MMaksimuk POS-046 follow-up): Krystal CLOSED endpoint
+      // отдаёт только одну chain без явного chainIds. Iterate per chain.
+      // Promise.allSettled — одна ошибка (chain) не валит остальные.
       const tasks = wallets.map(async (w) => {
         const walletLower = w.toLowerCase();
-        // Cache first
+        // Cache first — содержит pools со всех chains
         const cached = readCache(w);
         if (cached !== null) {
           for (const p of cached) {
@@ -168,23 +188,32 @@ export function useKrystalV3ClosedPools(
           }
           return { wallet: w, fromCache: true };
         }
-        try {
-          const { data } = await fetchKrystalClosedV3Positions(w, {
-            signal: controller.signal,
-          });
-          if (cancelled) return null;
-          const pools = positionsToPools(data);
-          writeCache(w, pools);
-          for (const p of pools) {
-            closedKeys.add(`${walletLower}|${p.chainCode}|${p.poolAddress}`);
+        // Fresh: parallel fetch per chain
+        const allPools: ClosedPool[] = [];
+        const chainResults = await Promise.allSettled(
+          SUPPORTED_CHAINS_FOR_CLOSED.map(async ({ chainId }) => {
+            const { data } = await fetchKrystalClosedV3Positions(w, {
+              signal: controller.signal,
+              chainId,
+            });
+            return positionsToPools(data);
+          }),
+        );
+        for (const r of chainResults) {
+          if (r.status === "fulfilled") {
+            allPools.push(...r.value);
+          } else if ((r.reason as Error)?.name !== "AbortError") {
+            errors.push(
+              `${w.slice(0, 6)}…: ${(r.reason as Error).message}`,
+            );
           }
-          return { wallet: w, fromCache: false };
-        } catch (e) {
-          if ((e as Error).name === "AbortError") return null;
-          // Fail-soft: log но не валим state
-          errors.push(`${w.slice(0, 6)}…: ${(e as Error).message}`);
-          return { wallet: w, error: true };
         }
+        if (cancelled) return null;
+        writeCache(w, allPools);
+        for (const p of allPools) {
+          closedKeys.add(`${walletLower}|${p.chainCode}|${p.poolAddress}`);
+        }
+        return { wallet: w, fromCache: false };
       });
       await Promise.allSettled(tasks);
 

@@ -88,16 +88,28 @@ export async function fetchKrystalUniswapV3Positions(
  */
 export async function fetchKrystalClosedV3Positions(
   wallet: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; chainId?: number },
 ): Promise<KrystalResult<KrystalPosition[]>> {
   if (!wallet || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) {
     throw new Error(`Invalid wallet address: ${wallet}`);
   }
-  const qs = new URLSearchParams({
+  // 2026-05-28 (MMaksimuk POS-046 follow-up): Krystal CLOSED endpoint без
+  // явного chainIds возвращает позиции только ОДНОЙ chain'и (видимо
+  // дефолтит на самую активную для wallet'а — для MMaksimuk это ARB).
+  // OPEN endpoint так не делает. Чтобы покрыть все chain'ы — ОБЯЗАТЕЛЬНО
+  // вызывать с `chainId` параметром per chain. Multiple chainIds в одном
+  // request'е (через repeated `chainIds=N`) тоже возвращает только 1
+  // chain — пробовал и не работает. Итог: hook делает Promise.allSettled
+  // по списку supported chains.
+  const qsParams: Record<string, string> = {
     wallet,
     positionStatus: "CLOSED",
     protocols: "uniswap",
-  });
+  };
+  if (options?.chainId != null) {
+    qsParams.chainIds = String(options.chainId);
+  }
+  const qs = new URLSearchParams(qsParams);
   const path = `/v1/upstream/krystal/v1/positions?${qs.toString()}`;
 
   const res = await apiFetch(path, {
