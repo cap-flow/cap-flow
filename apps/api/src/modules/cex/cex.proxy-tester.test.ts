@@ -66,12 +66,13 @@ describe("testProxy — validation", () => {
 });
 
 describe("PROXY_TEST_TARGETS — sanity", () => {
-  it("содержит 3 биржи: bybit/bingx/bitget", async () => {
+  it("содержит 4 биржи: bybit/bingx/bitget/binance", async () => {
     const { PROXY_TEST_TARGETS } = await import("./cex.proxy-tester.js");
     expect(PROXY_TEST_TARGETS.map((t) => t.exchange)).toEqual([
       "bybit",
       "bingx",
       "bitget",
+      "binance",
     ]);
   });
 
