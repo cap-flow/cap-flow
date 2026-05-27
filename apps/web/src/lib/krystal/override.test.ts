@@ -1006,6 +1006,143 @@ describe("applyKrystalV3Override", () => {
       expect(p.feesClaimedHistory).toEqual([]);
     });
 
+    it("PR-K24 (MMaksimuk POS-001 V4 ARB audit): startUsd из /transactions DEPOSIT, не /positions.totalDepositValue (2× inflation bug)", () => {
+      // POS-001 MMaksimuk V4 ARB NFT 147480:
+      //   - Krystal /positions.providedAmounts = 2× реального deposit (V4 indexer bug)
+      //   - /positions.performance.totalDepositValue = $3,499.69 (inflated)
+      //   - /transactions DEPOSIT events = 1 event на $1,749.14 (real, user-confirmed)
+      // Expected: startUsd = $1,749.14 (из /transactions), не $3,499.69.
+      const pos = basePos({
+        id: "POS-001",
+        matchedV3TokenId: "147480",
+        startUsd: 9999, // ⚠ UCB garbage (until override fires)
+        currentUsd: 1849,
+        supply: [
+          { symbol: "WBTC", amount: 0.0075, currentUsd: 567, startUsd: 0 },
+          { symbol: "USDC", amount: 1282, currentUsd: 1282, startUsd: 0 },
+        ],
+        feesUsd: 71.33,
+        feesClaimedUsd: 0,
+      });
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["147480", summary({
+          tokenId: "147480",
+          currentUsd: 1849,
+          current: [
+            { symbol: "WBTC", amount: 0.0075, usd: 567 },
+            { symbol: "USDC", amount: 1282, usd: 1282 },
+          ],
+          pendingUsd: 71.33,
+          claimedUsd: 0,
+          chainCode: "arb",
+          ownerAddress: "0xmm",
+          openedTime: 1772949680,
+          // ⚠ /positions inflated 2× (Krystal V4 ARB indexer bug)
+          totalDepositValue: 3499.69,
+          provided: [
+            { symbol: "WBTC", amount: 0.0313, usd: 2365 }, // 2× real
+            { symbol: "USDC", amount: 1405, usd: 1405 }, // 2× real
+          ],
+        })],
+      ]);
+      // /transactions authoritative — single DEPOSIT, $1,749.14
+      const transactions = new Map<string, import("./adapter").KrystalTransactionsSummary>([
+        ["147480", {
+          claimedHistory: [],
+          claimedTotalUsd: 0,
+          depositCount: 1,
+          withdrawCount: 0,
+          eventTypes: ["DEPOSIT"],
+          depositTotalUsd: 1749.14,
+          withdrawTotalUsd: 0,
+        }],
+      ]);
+      const out = applyKrystalV3Override([pos], krystal, undefined, transactions);
+      const p = out[0]!;
+
+      // Главный invariant: startUsd из /transactions, не /positions
+      expect(p.startUsd).toBeCloseTo(1749.14, 1);
+      expect(p.netStartUsd).toBeCloseTo(1749.14, 1);
+      // PnL пересчитан: (1849 - 1749) / 1749 = +5.7%, а не -47%
+      expect(p.netPnlUsd).toBeCloseTo(1849 - 1749.14, 1);
+      expect(p.netPnlPct).toBeCloseTo(((1849 - 1749.14) / 1749.14) * 100, 1);
+    });
+
+    it("PR-K24: WITHDRAW events вычитаются из netStartUsd", () => {
+      // Если user сделал partial decreaseLiquidity → /transactions WITHDRAW events
+      const pos = basePos({
+        id: "POS-PARTIAL",
+        matchedV3TokenId: "999",
+        startUsd: 2000,
+        currentUsd: 1200,
+        supply: [{ symbol: "WETH", amount: 0.5, currentUsd: 1200, startUsd: 0 }],
+        feesUsd: 50,
+      });
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["999", summary({
+          tokenId: "999", currentUsd: 1200,
+          current: [{ symbol: "WETH", amount: 0.5, usd: 1200 }],
+          pendingUsd: 50, claimedUsd: 0,
+          openedTime: 1770000000,
+          totalDepositValue: 2000, // /positions inflated by including withdraw?
+        })],
+      ]);
+      const transactions = new Map<string, import("./adapter").KrystalTransactionsSummary>([
+        ["999", {
+          claimedHistory: [],
+          claimedTotalUsd: 0,
+          depositCount: 1,
+          withdrawCount: 1,
+          eventTypes: ["DEPOSIT", "WITHDRAW"],
+          depositTotalUsd: 2000,
+          withdrawTotalUsd: 800, // вывел половину
+        }],
+      ]);
+      const out = applyKrystalV3Override([pos], krystal, undefined, transactions);
+      const p = out[0]!;
+
+      expect(p.startUsd).toBe(2000); // total ever deposited
+      expect(p.netStartUsd).toBe(1200); // net = 2000 − 800
+    });
+
+    it("PR-K24: если /transactions DEPOSIT events отсутствуют → fallback на /positions.totalDepositValue", () => {
+      // E.g., старая позиция, indexer не успел или endpoint не сработал.
+      const pos = basePos({
+        id: "POS-OLD",
+        matchedV3TokenId: "555",
+        startUsd: 9999,
+        currentUsd: 1000,
+        supply: [{ symbol: "WETH", amount: 0.4, currentUsd: 1000, startUsd: 0 }],
+      });
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["555", summary({
+          tokenId: "555", currentUsd: 1000,
+          current: [{ symbol: "WETH", amount: 0.4, usd: 1000 }],
+          pendingUsd: 0, claimedUsd: 0,
+          openedTime: 1770000000,
+          totalDepositValue: 950, // fallback source
+        })],
+      ]);
+      // /transactions returned no DEPOSIT events (only e.g. COLLECT_FEE)
+      const transactions = new Map<string, import("./adapter").KrystalTransactionsSummary>([
+        ["555", {
+          claimedHistory: [],
+          claimedTotalUsd: 0,
+          depositCount: 0,
+          withdrawCount: 0,
+          eventTypes: ["COLLECT_FEE"],
+          depositTotalUsd: 0,
+          withdrawTotalUsd: 0,
+        }],
+      ]);
+      const out = applyKrystalV3Override([pos], krystal, undefined, transactions);
+      const p = out[0]!;
+
+      // Fallback на k.totalDepositValue
+      expect(p.startUsd).toBe(950);
+      expect(p.netStartUsd).toBe(950);
+    });
+
     it("netStartUsd учитывает withdrawValue (если Krystal знает обе стороны)", () => {
       const pos = basePos({
         id: "POS-PARTIAL",
