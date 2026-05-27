@@ -1,10 +1,13 @@
 /**
- * PR-K3: Krystal V3 → OpenPosition override.
+ * Krystal V3 → OpenPosition override.
  *
- * Krystal authoritative ТОЛЬКО для real-time current state V3 NFT.
- * Claimed fees / history ОСТАЮТСЯ UCB + PR-2 split — потому что Krystal
- * `tradingFee.claimed` оказался ненадёжным (lex@ audit 2026-05-25:
- * POS-006/007 Krystal showed $107/$32, реальные Etherscan totals $271/$80).
+ * 2026-05-27 (VolnyySanya audit, policy change): Krystal становится PRIMARY
+ * для cost-basis side V3 LP — `startUsd`, `openedAt`, `supplyTokens[].startUsd`.
+ * Раньше эти поля шли через UCB lot tracker, что для новых кошельков без
+ * CEX-синка / cross-wallet связи давало мусор (silent fallback). Krystal
+ * индексирует IncreaseLiquidity events напрямую с RPC через `performance.
+ * totalDepositValue` и `openedTime` — это on-chain truth, не зависит от
+ * наличия CEX-данных или cross-wallet attribution.
  *
  *  | OpenPosition field         | Source                              |
  *  |----------------------------|-------------------------------------|
@@ -13,23 +16,30 @@
  *  | currentUsd                 | krystal.currentUsd                  |
  *  | feesUsd (pending)          | krystal.pendingFeeUsd               |
  *  | feesByToken (pending)      | krystal.pendingFeeTokens            |
+ *  | startUsd                   | krystal.totalDepositValue (NEW)     |
+ *  | netStartUsd                | krystal.totalDepositValue (NEW)     |
+ *  | openedAt / ageDays         | krystal.openedTime (NEW)            |
+ *  | supplyTokens[].startUsd    | pro-rata from krystal.providedTokens|
  *  | feesClaimedUsd             | **UCB+PR-2 (НЕ Krystal)**           |
  *  | feesClaimedByToken         | **UCB (НЕ Krystal)**                |
  *  | feesClaimedHistory         | **UCB+PR-2 (НЕ Krystal)**           |
  *  | feesLifetimeUsd            | new pending + UCB claimed           |
- *  | feeApr / feeAprLifetime    | recompute with new pending + UCB    |
- *  | netPnlUsd / netPnlPct      | currentUsd_krystal − startUsd_UCB   |
+ *  | feeApr / feeAprLifetime    | recompute with new startUsd         |
+ *  | netPnlUsd / netPnlPct      | krystal.currentUsd − krystal.start  |
  *
- * Cost-basis side (UCB authoritative для cross-protocol):
- *   startUsd, netStartUsd, openedAt, openHash, ageDays,
- *   supplyTokens[].startUsd, openedInTokens.
+ * Что НЕ override'им (нет on-chain analogue):
+ *   openHash (DeBank tx hash для UI deep-link), openedInTokens.
  *
- * **Pre-PR-K7 (revert)**: claimed override + Bug B history scaling сломали
- * корректные UCB entries (lex POS-007 real $80 → отображалось $32, POS-006
- * real $271 → $107). Krystal divisor оказался unreliable, и pro-rata scale
- * с ним амплифицировал ошибку. PR-2 split уже фиксит inflated UCB entries
- * через DecreaseLiquidity events — Krystal претендует на эту же роль но
- * хуже, поэтому полностью отказываемся.
+ * **Claimed fees ОСТАЮТСЯ UCB+PR-2** — Krystal `tradingFee.claimed` подтверждённо
+ * unreliable (lex@ audit 2026-05-25: POS-006/007 real $271/$80 vs Krystal
+ * $107/$32). PR-2 split через DecreaseLiquidity events авторитарен. Это
+ * разделение НЕ trivial: `totalDepositValue` ≠ `tradingFee.claimed`, разные
+ * данные с разной надёжностью — мы используем точную часть, отказываемся
+ * от кривой.
+ *
+ * **Fallback**: если Krystal не вернул `totalDepositValue` / `openedTime`
+ * (старые позиции, edge cases), сохраняем UCB значения base.* — `?? base.X`.
+ * Это бесшовное degradation, не silent fallback на мусор.
  */
 
 import type { OpenPosition } from "../portfolio/open_positions";
@@ -90,26 +100,95 @@ function overrideOne(
   // которых нет в нашем supply list).
   const newCurrentUsd = k.currentUsd;
 
-  // 2026-05-25 (Derbent21 audit POS-002): rebalance supplyTokens.startUsd
-  // pro-rata по новому currentUsd. Раньше:
-  //   1) Phase J runs first, NFT at-range-boundary → amount0Current=0.27,
-  //      amount1Current=0 → rebalance: WETH start = $515, USDC start = $0
-  //   2) Krystal override runs later → corrects amount/currentUsd
-  //      (real-time 0.20 WETH + 159 USDC), но startUsd preserved → итог
-  //      WETH start $515 (100%), USDC start $0 (0%) — misleading split
-  // Теперь: используем новый currentUsd для rebalance — отражает реальную
-  // композицию позиции на момент Krystal data.
-  const totalNewCurrent = newSupplyPreStart.reduce(
-    (s, t) => s + (t.currentUsd ?? 0),
+  // 2026-05-27 (VolnyySanya policy change): cost-basis side через Krystal.
+  // Krystal `performance.totalDepositValue` = Σ historical USD всех
+  // IncreaseLiquidity events (RPC-derived). Это on-chain truth, не зависит
+  // от UCB lot tracker / CEX sync.
+  //
+  // Fallback на base.* если Krystal не отдал (старые позиции / отсутствует
+  // performance bundle).
+  const newStartUsd = k.totalDepositValue ?? base.startUsd;
+  // net = deposit − withdraw (если Krystal знает обе стороны).
+  // Если withdrawValue не известен — берём net = deposit (никаких decrease).
+  const newNetStartUsd =
+    k.totalDepositValue != null
+      ? Math.max(0, k.totalDepositValue - (k.totalWithdrawValue ?? 0))
+      : base.netStartUsd;
+  // Fallback path: позиция попала сюда через pair-match (Base chain без
+  // Etherscan, etc.) — `base.openedAt` происходит от DeBank earliest lp_add
+  // op time, который уезжает на месяцы (POS-001 VolnyySanya: 05.03 vs real
+  // 18.04). Если Krystal openedTime есть — берём его. Если нет — null,
+  // лучше пусто чем misleading.
+  const fallbackPath = !base.matchedV3TokenId;
+  const newOpenedAt =
+    k.openedTime != null ? k.openedTime : fallbackPath ? null : base.openedAt;
+  // ageDays: пересчитываем только когда openedAt РЕАЛЬНО поменялся
+  // (Krystal дал новый openedTime или fallback path обнулил). Если openedAt
+  // не поменялся — сохраняем base.ageDays (тесты опираются на этот invariant).
+  const openedAtChanged = newOpenedAt !== base.openedAt;
+  const newAgeDays = !openedAtChanged
+    ? base.ageDays
+    : newOpenedAt != null
+      ? Math.max(0, (Date.now() / 1000 - newOpenedAt) / 86400)
+      : null;
+
+  // supplyTokens[].startUsd: предпочитаем pro-rata по Krystal providedTokens
+  // (исторические USD-amounts вошедших токенов). Если providedTokens нет —
+  // fallback на pro-rata по new currentUsd × newStartUsd (legacy behavior).
+  const providedBySym = new Map<string, TokenBreakdown>();
+  for (const t of k.providedTokens ?? []) {
+    if (t.usd > 0 || t.amount > 0) providedBySym.set(t.symbol.toUpperCase(), t);
+  }
+  const providedSumUsd = Array.from(providedBySym.values()).reduce(
+    (s, t) => s + t.usd,
     0,
   );
-  const newSupply =
-    totalNewCurrent > 0 && base.startUsd > 0
-      ? newSupplyPreStart.map((t) => ({
-          ...t,
-          startUsd: ((t.currentUsd ?? 0) / totalNewCurrent) * base.startUsd,
-        }))
-      : newSupplyPreStart;
+  let newSupply: typeof newSupplyPreStart;
+  if (providedSumUsd > 0 && newStartUsd > 0) {
+    // Krystal-driven per-token startUsd: каждой supply строке привязываем
+    // её provided.usd (canonical pair-match по symbol case-insensitive),
+    // потом масштабируем чтобы Σ = newStartUsd (на случай если Krystal
+    // providedTokens.usd суммой не равны totalDepositValue из-за rounding).
+    const rawByPos = newSupplyPreStart.map((t) => {
+      const pt = providedBySym.get(t.symbol.toUpperCase());
+      return pt ? pt.usd : 0;
+    });
+    const rawSum = rawByPos.reduce((s, x) => s + x, 0);
+    newSupply =
+      rawSum > 0
+        ? newSupplyPreStart.map((t, i) => ({
+            ...t,
+            startUsd: (rawByPos[i]! / rawSum) * newStartUsd,
+          }))
+        : // Нет mapping по symbols (canonicalization mismatch) — fallback
+          // на pro-rata от current.
+          (() => {
+            const totalCur = newSupplyPreStart.reduce(
+              (s, t) => s + (t.currentUsd ?? 0),
+              0,
+            );
+            return totalCur > 0
+              ? newSupplyPreStart.map((t) => ({
+                  ...t,
+                  startUsd: ((t.currentUsd ?? 0) / totalCur) * newStartUsd,
+                }))
+              : newSupplyPreStart;
+          })();
+  } else {
+    // Legacy fallback (Krystal не дал providedTokens.usd): pro-rata по
+    // current — сохраняем display invariant Σ startUsd ≈ position.startUsd.
+    const totalNewCurrent = newSupplyPreStart.reduce(
+      (s, t) => s + (t.currentUsd ?? 0),
+      0,
+    );
+    newSupply =
+      totalNewCurrent > 0 && newStartUsd > 0
+        ? newSupplyPreStart.map((t) => ({
+            ...t,
+            startUsd: ((t.currentUsd ?? 0) / totalNewCurrent) * newStartUsd,
+          }))
+        : newSupplyPreStart;
+  }
 
   // Pending fees — Krystal authoritative (real-time feeGrowth math
   // server-side, matches Uniswap UI). См. lex POS-001: UCB stale $13.84 →
@@ -125,19 +204,19 @@ function overrideOne(
   const newFeesLifetimeUsd = newFeesUsd + newFeesClaimedUsd;
 
   // PnL recompute (collateral-side, H6 invariant — debt не вычитаем).
-  const newPnlUsd = newCurrentUsd - base.startUsd;
+  // Считаем от НОВОГО startUsd (Krystal authoritative).
+  const newPnlUsd = newCurrentUsd - newStartUsd;
   const newPnlPct =
-    base.startUsd > 0 ? (newPnlUsd / base.startUsd) * 100 : 0;
+    newStartUsd > 0 ? (newPnlUsd / newStartUsd) * 100 : 0;
 
-  // Fee APR recompute с новыми числами (cost basis startUsd unchanged).
-  const ageDays = base.ageDays;
+  // Fee APR recompute от нового startUsd + нового ageDays.
   const feeApr =
-    ageDays && ageDays > 0 && base.startUsd > 0
-      ? (newFeesUsd / base.startUsd) * (365 / ageDays) * 100
+    newAgeDays != null && newAgeDays > 0 && newStartUsd > 0
+      ? (newFeesUsd / newStartUsd) * (365 / newAgeDays) * 100
       : null;
   const feeAprLifetime =
-    ageDays && ageDays > 0 && base.startUsd > 0 && newFeesLifetimeUsd > 0
-      ? (newFeesLifetimeUsd / base.startUsd) * (365 / ageDays) * 100
+    newAgeDays != null && newAgeDays > 0 && newStartUsd > 0 && newFeesLifetimeUsd > 0
+      ? (newFeesLifetimeUsd / newStartUsd) * (365 / newAgeDays) * 100
       : null;
 
   // Bug C fix (2026-05-25 lex@ V3-popup audit): после override
@@ -168,6 +247,12 @@ function overrideOne(
     ...base,
     supplyTokens: newSupply,
     currentUsd: newCurrentUsd,
+    // Cost-basis side: Krystal authoritative (если отдал totalDepositValue/
+    // openedTime), иначе оставляем UCB значения.
+    startUsd: newStartUsd,
+    netStartUsd: newNetStartUsd,
+    openedAt: newOpenedAt,
+    ageDays: newAgeDays,
     netPnlUsd: newPnlUsd,
     netPnlPct: newPnlPct,
     feesUsd: newFeesUsd,
@@ -178,10 +263,9 @@ function overrideOne(
     feeApr,
     feeAprLifetime,
     ...(newV3 && { v3: newV3 }),
-    // Bug F (O_lll_ABC_lll_O audit 2026-05-25): Krystal — authoritative
-    // источник для current state. Если override применился, ⚠ "coverage
-    // incomplete" badge становится бесполезным (current/fees уже корректные,
-    // missing только historical mint date). Чистим флаг чтобы UX не пугал.
+    // Krystal — authoritative источник для current state + cost basis V3 LP.
+    // После policy change (2026-05-27) coverage gate badge не нужен —
+    // Krystal закрывает и current и historical через RPC-derived данные.
     coverageIncomplete: false,
     // Fallback path: если matchedV3TokenId не был установлен (Base chain
     // где Etherscan v2 unsupported / Alchemy 403) — проставляем его сейчас,
@@ -189,24 +273,12 @@ function overrideOne(
     ...(base.matchedV3TokenId
       ? {}
       : { matchedV3TokenId: k.tokenId }),
-    // 2026-05-26 (VolnyySanya POS-001 Base audit): если pair-match fallback
-    // сработал БЕЗ cb данных (нет Etherscan IncreaseLiquidity events —
-    // типично для Base без Alchemy Pro plan), reality openedAt/openHash
-    // из chain unknown. DeBank's earliest lp_add op попадает в position
-    // как «open» и daтa уезжает на месяцы вперёд (POS-001 system 05.03 vs
-    // real 18.04 — 44 дня). Лучше null → UI «—» чем misleading date.
-    //
-    // Условие: pair-match fallback (base.matchedV3TokenId был null), cb
-    // нет (мы знаем по тому что мы PRIMARY override path для этой
-    // позиции). Чистим openedAt/openHash/ageDays/openedInTokens.
-    ...(base.matchedV3TokenId
-      ? {}
-      : {
-          openedAt: null,
-          openHash: null,
-          ageDays: null,
-          openedInTokens: [],
-        }),
+    // Fallback path без Krystal openedTime: чистим связанные historical
+    // поля (openHash, openedInTokens) — base.* из DeBank earliest lp_add
+    // op, которое уехало во времени.
+    ...(fallbackPath && k.openedTime == null
+      ? { openHash: null, openedInTokens: [] }
+      : {}),
   };
 }
 

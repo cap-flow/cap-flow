@@ -49,10 +49,13 @@ export interface TokenBreakdown {
  * Кладётся в Map keyed by tokenId. Capflow matching: OpenPosition с
  * `matchedV3TokenId === summary.tokenId` соответствует этому summary.
  *
- * Намеренно НЕ включаем cost-basis fields (totalDepositValue, providedAmounts
- * с current prices) — для startUsd мы используем UCB lots (более точно для
- * cross-wallet / cross-protocol attribution). Сохраняем `providedTokens`
- * только как cross-check.
+ * 2026-05-27 (VolnyySanya audit): включаем cost-basis fields
+ * (`totalDepositValue`, `openedTime`, `providedTokens`) — Krystal становится
+ * PRIMARY для startUsd / openedAt V3 LP. Причина: UCB cost basis на новых
+ * кошельках без CEX-синка / cross-wallet связи даёт мусор (silent fallback
+ * на lot tracker WAC). Krystal индексирует IncreaseLiquidity напрямую с RPC
+ * — supply/decrease/USD-at-block у него точные. Claimed fees ОСТАЮТСЯ UCB+PR-2
+ * (lex@ audit 2026-05-25: Krystal claimed unreliable, $271 real → $107 Krystal).
  */
 export interface KrystalV3Summary {
   tokenId: string;
@@ -73,8 +76,18 @@ export interface KrystalV3Summary {
   /** Lifetime collected fees (USD) — pool-level Collect events. */
   claimedFeeUsd: number;
   claimedFeeTokens: TokenBreakdown[];
-  /** Initial provided amounts (mint - withdraws) для cross-validation. */
+  /** Initial provided amounts (mint - withdraws) — cost-basis side. */
   providedTokens: TokenBreakdown[];
+  /** Unix seconds NFT mint event. `null` если Krystal не отдал. */
+  openedTime: number | null;
+  /**
+   * Σ historical USD всех IncreaseLiquidity events. `null` если Krystal
+   * не отдал. Это authoritative `startUsd` для V3 LP — не зависит от
+   * UCB lot tracker / CEX sync / cross-wallet.
+   */
+  totalDepositValue: number | null;
+  /** Σ historical USD всех DecreaseLiquidity events. `null` если не отдал. */
+  totalWithdrawValue: number | null;
 }
 
 function amountToHuman(raw: string, decimals: number): number {
@@ -131,6 +144,15 @@ export function krystalToV3Summary(p: KrystalPosition): KrystalV3Summary {
     claimedFeeUsd: sumUsd(p.tradingFee?.claimed),
     claimedFeeTokens: claimedTokens,
     providedTokens,
+    openedTime: typeof p.openedTime === "number" && p.openedTime > 0 ? p.openedTime : null,
+    totalDepositValue:
+      typeof p.performance?.totalDepositValue === "number" && p.performance.totalDepositValue > 0
+        ? p.performance.totalDepositValue
+        : null,
+    totalWithdrawValue:
+      typeof p.performance?.totalWithdrawValue === "number" && p.performance.totalWithdrawValue >= 0
+        ? p.performance.totalWithdrawValue
+        : null,
   };
 }
 

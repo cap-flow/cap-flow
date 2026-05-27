@@ -75,6 +75,16 @@ export interface KrystalPosition {
   feeApr?: number;
   /** PnL net в USD. */
   pnl?: number;
-  totalDepositValue?: number;
-  totalWithdrawValue?: number;
+  /** Unix seconds. Когда NFT впервые получила ликвидность (mint). */
+  openedTime?: number;
+  /** Performance bundle. Krystal считает на своей стороне. */
+  performance?: {
+    /** Σ historical USD всех IncreaseLiquidity (Krystal authoritative для V3). */
+    totalDepositValue?: number;
+    /** Σ historical USD всех DecreaseLiquidity (snято из позиции). */
+    totalWithdrawValue?: number;
+    pnl?: number;
+    impermanentLoss?: number;
+    returnOnInvestment?: number;
+  };
 }
