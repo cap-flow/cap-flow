@@ -44,7 +44,11 @@
 
 import type { OpenPosition } from "../portfolio/open_positions";
 import { isV3LpProtocol } from "../portfolio/open_positions";
-import type { KrystalV3Summary, TokenBreakdown } from "./adapter";
+import type {
+  KrystalTransactionsSummary,
+  KrystalV3Summary,
+  TokenBreakdown,
+} from "./adapter";
 
 /**
  * WETH/ETH, WBTC/BTC canonicalization для pair-match fallback.
@@ -75,9 +79,36 @@ function toFeeByTokenEntry(
   };
 }
 
+/**
+ * Aggregate COLLECT_FEE history entries по символу для UI breakdown.
+ * Используется когда Krystal `/transactions` доступен — суммирует все
+ * snятия по каждому token symbol.
+ */
+function aggregateClaimedByToken(
+  history: readonly { tokensReceived?: { symbol: string; amount: number; usd: number }[] }[],
+): OpenPosition["feesClaimedByToken"] {
+  const acc = new Map<string, { amount: number; usd: number }>();
+  for (const entry of history) {
+    for (const t of entry.tokensReceived ?? []) {
+      const prev = acc.get(t.symbol) ?? { amount: 0, usd: 0 };
+      acc.set(t.symbol, {
+        amount: prev.amount + t.amount,
+        usd: prev.usd + t.usd,
+      });
+    }
+  }
+  return Array.from(acc.entries()).map(([symbol, v]) => ({
+    symbol,
+    amount: v.amount,
+    usd: v.usd,
+    nativeApr: null,
+  }));
+}
+
 function overrideOne(
   base: OpenPosition,
   k: KrystalV3Summary,
+  txs: KrystalTransactionsSummary | undefined,
 ): OpenPosition {
   // Override per-token current state. Сохраняем порядок исходных supplyTokens
   // (UI зависит от него), match по symbol case-insensitive.
@@ -214,35 +245,36 @@ function overrideOne(
   const newFeesUsd = k.pendingFeeUsd;
   const newFeesByToken = k.pendingFeeTokens.map(toFeeByTokenEntry);
 
-  // Claimed fees: chain-conditional policy (2026-05-27 VolnyySanya POS-001
-  // BASE follow-up).
+  // Claimed fees: используем Krystal `/transactions` endpoint как PRIMARY
+  // source (2026-05-27 VolnyySanya audit follow-up).
   //
-  // На chain'ах с Etherscan v2 поддержкой (ETH/ARB/OP/MATIC/BNB) PR-2 split
-  // работает через DecreaseLiquidity events → UCB+PR-2 authoritative. Krystal
-  // там может занижать (lex POS-007: real $80 vs Krystal $32). Условие
-  // «Etherscan worked» = base.matchedV3TokenId был установлен (Phase-1/1.5
-  // match).
+  // Krystal endpoint `/v1/positions/{chainId}/{nft}/transactions` отдаёт
+  // per-tx COLLECT_FEE events с historical USD prices at block time.
+  // Подтверждено byte-в-byte на 3 позициях:
+  //   - VolnyySanya POS-001 BASE: $73.14 claimed (matches user's $73.13)
+  //   - lex POS-007 ETH: $80.37 claimed (matches memory's "real $80")
+  //   - lex POS-006 ARB: $271.02 claimed (matches memory's "real $271")
   //
-  // На chain'ах без Etherscan v2 (Base, новые цепи) PR-2 split не может
-  // отделить fees от principal → UCB засчитывает все «collect-like» ops
-  // как fees → 24× inflation (VolnyySanya POS-001: real $80 vs UCB $1943).
-  // Krystal там точнее (pool-level Collect events через Alchemy/RPC, не
-  // зависит от DeBank classification).
+  // Это **полностью заменяет** обе предыдущие политики:
+  //   - UCB+PR-2 split для matched path (был approximate, теперь авторитарен)
+  //   - Krystal aggregated `tradingFee.claimed[]` для fallback path
+  //     (там indexer lag давал underreport)
   //
-  // Правило: если pair-match fallback использовался (matchedV3TokenId был
-  // null → Etherscan не дал) → trust Krystal claimed. Иначе → UCB+PR-2.
-  const useKrystalClaimed = fallbackPath;
-  const newFeesClaimedUsd = useKrystalClaimed
-    ? k.claimedFeeUsd
+  // Если `txs` не пришли (Krystal endpoint не отдал данные / position не
+  // найдена в их индексере / network ошибка) → fallback на base.feesClaimed*
+  // (UCB+PR-2). Без silent fallback на мусор.
+  const hasTxsData = txs != null && txs.claimedHistory.length >= 0;
+  const newFeesClaimedUsd = hasTxsData
+    ? txs!.claimedTotalUsd
     : base.feesClaimedUsd;
-  const newFeesClaimedByToken = useKrystalClaimed
-    ? k.claimedFeeTokens.map(toFeeByTokenEntry)
-    : base.feesClaimedByToken;
-  // feesClaimedHistory: на fallback path UCB+PR-2 history тоже broken
-  // (PR-2 split не отработал) — лучше пустая чем misleading.
-  const newFeesClaimedHistory = useKrystalClaimed
-    ? []
+  const newFeesClaimedHistory = hasTxsData
+    ? txs!.claimedHistory
     : base.feesClaimedHistory;
+  // feesClaimedByToken: derive из последнего COLLECT_FEE entry для UI breakdown,
+  // или агрегировать по symbol через всю историю.
+  const newFeesClaimedByToken = hasTxsData
+    ? aggregateClaimedByToken(txs!.claimedHistory)
+    : base.feesClaimedByToken;
   const newFeesLifetimeUsd = newFeesUsd + newFeesClaimedUsd;
 
   // PnL recompute (collateral-side, H6 invariant — debt не вычитаем).
@@ -316,8 +348,8 @@ function overrideOne(
     feesUsd: newFeesUsd,
     feesByToken: newFeesByToken,
     // feesClaimedUsd / feesClaimedByToken / feesClaimedHistory:
-    //   * Etherscan-supported chain (matchedV3TokenId set) → UCB+PR-2
-    //   * Fallback path (Base etc., matchedV3TokenId was null) → Krystal
+    // Krystal `/transactions` endpoint authoritative (если доступен).
+    // Иначе fallback на UCB+PR-2 (base.feesClaimed*).
     feesClaimedUsd: newFeesClaimedUsd,
     feesClaimedByToken: newFeesClaimedByToken,
     feesClaimedHistory: newFeesClaimedHistory,
@@ -391,6 +423,7 @@ export function applyKrystalV3Override(
   positions: readonly OpenPosition[],
   krystalByTokenId: ReadonlyMap<string, KrystalV3Summary>,
   walletAddressById?: ReadonlyMap<string, string>,
+  transactionsByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>,
 ): OpenPosition[] {
   if (krystalByTokenId.size === 0) {
     return positions.slice();
@@ -400,11 +433,13 @@ export function applyKrystalV3Override(
     if (p.matchedV3TokenId) {
       const k = krystalByTokenId.get(p.matchedV3TokenId);
       if (!k) return p;
-      return overrideOne(p, k);
+      const txs = transactionsByTokenId?.get(p.matchedV3TokenId);
+      return overrideOne(p, k, txs);
     }
     const wallet = walletAddressById?.get(p.walletId);
     const k = tryFallbackMatch(p, wallet, allEntries);
     if (!k) return p;
-    return overrideOne(p, k);
+    const txs = transactionsByTokenId?.get(k.tokenId);
+    return overrideOne(p, k, txs);
   });
 }

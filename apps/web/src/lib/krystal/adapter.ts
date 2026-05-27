@@ -14,7 +14,11 @@
  *  - PR-K3 (future): primary V3 source за feature flag
  */
 
-import type { KrystalPosition, KrystalTokenAmount } from "./types";
+import type {
+  KrystalPosition,
+  KrystalTokenAmount,
+  KrystalTransaction,
+} from "./types";
 
 /**
  * Mapping Krystal chain.id → Capflow chain code. Если Krystal добавит
@@ -67,6 +71,12 @@ export interface KrystalV3Summary {
   ownerAddress: string;
   /** Lowercased V3 pool address — uniq идентификатор для disambiguation. */
   poolAddress: string;
+  /**
+   * NonfungiblePositionManager (NPM) address для этого NFT. Krystal даёт
+   * в `position.tokenAddress`. Используется для построения /transactions
+   * endpoint path: `/v1/positions/{chainId}/{npm}-{tokenId}/transactions`.
+   */
+  npmAddress: string;
   /** Live position value (USD), authoritative. */
   currentUsd: number;
   currentTokens: TokenBreakdown[];
@@ -137,6 +147,7 @@ export function krystalToV3Summary(p: KrystalPosition): KrystalV3Summary {
     status: p.status,
     ownerAddress: (p.ownerAddress ?? "").toLowerCase(),
     poolAddress: (p.pool.poolAddress ?? "").toLowerCase(),
+    npmAddress: (p.tokenAddress ?? "").toLowerCase(),
     currentUsd: p.currentPositionValue ?? 0,
     currentTokens,
     pendingFeeUsd: sumUsd(p.tradingFee?.pending),
@@ -169,4 +180,125 @@ export function buildKrystalSummaryMap(
     m.set(p.tokenId, krystalToV3Summary(p));
   }
   return m;
+}
+
+/* ─────────────────── Krystal transactions adapter ─────────────────── */
+
+/**
+ * Структура соответствующая `OpenPosition.feesClaimedHistory[]` element.
+ * Дублируем (а не импортируем из open_positions.ts) чтобы adapter
+ * оставался без зависимости от portfolio layer.
+ */
+export interface ClaimedFeeEntry {
+  time: number;
+  hash: string;
+  usd: number;
+  positionUsdAtClaim?: number;
+  daysSincePrev?: number;
+  aprPeriod?: number;
+  tokensReceived?: { symbol: string; amount: number; usd: number }[];
+}
+
+/**
+ * Суммарная сводка по transactions endpoint.
+ *
+ * 2026-05-27 (VolnyySanya audit): Krystal `/positions/{chainId}/{nft}/
+ * transactions` отдаёт authoritative per-tx breakdown с historical
+ * USD prices at block time. Используем для:
+ *   - `feesClaimedHistory[]` ← COLLECT_FEE events
+ *   - `feesClaimedUsd` ← Σ COLLECT_FEE.value
+ *   - cross-check `totalDepositValue` / `totalWithdrawValue` (опционально)
+ *
+ * Это **полностью заменяет** UCB+PR-2 split-механику для V3 LP (которая
+ * была approximate в matched-path и broken в fallback-path).
+ */
+export interface KrystalTransactionsSummary {
+  /** Per-tx COLLECT_FEE history, отсортирована oldest→newest. */
+  claimedHistory: ClaimedFeeEntry[];
+  /** Σ всех COLLECT_FEE.value (USD historical). */
+  claimedTotalUsd: number;
+  /** Кол-во DEPOSIT events (для debug / cross-check). */
+  depositCount: number;
+  /** Кол-во WITHDRAW events. */
+  withdrawCount: number;
+  /** Все типы events что встретились (для debug). */
+  eventTypes: string[];
+}
+
+function entryUsd(entries: KrystalTransaction["transactions"]): number {
+  if (!entries) return 0;
+  return entries.reduce((s, t) => s + (t.tokenWithValue?.value ?? 0), 0);
+}
+
+function entryTokens(
+  entries: KrystalTransaction["transactions"],
+): { symbol: string; amount: number; usd: number }[] {
+  if (!entries) return [];
+  return entries
+    .map((t) => {
+      const tok = t.tokenWithValue?.token;
+      const balance = t.tokenWithValue?.balance ?? "0";
+      const decimals = tok?.decimals ?? 18;
+      let amount = 0;
+      try {
+        amount = Number(BigInt(balance)) / 10 ** decimals;
+      } catch {
+        amount = 0;
+      }
+      return {
+        symbol: tok?.symbol ?? "?",
+        amount,
+        usd: t.tokenWithValue?.value ?? 0,
+      };
+    })
+    .filter((t) => t.amount > 0 || t.usd > 0);
+}
+
+/**
+ * Конвертировать Krystal transactions array → claimed fee history + summary.
+ *
+ * COLLECT_FEE events:
+ *   - sorted oldest → newest по blockTime
+ *   - aprPeriod / positionUsdAtClaim / daysSincePrev НЕ заполняем
+ *     (для этого нужна historical position USD value, которой у нас нет
+ *     без отдельных запросов). UI fallback'нется на «—» в этих полях,
+ *     основные usd/time/tokens — authoritative.
+ */
+export function krystalTransactionsToSummary(
+  txs: readonly KrystalTransaction[],
+): KrystalTransactionsSummary {
+  const collects: ClaimedFeeEntry[] = [];
+  let depositCount = 0;
+  let withdrawCount = 0;
+  const eventTypes = new Set<string>();
+  for (const tx of txs) {
+    eventTypes.add(tx.type);
+    if (tx.type === "COLLECT_FEE") {
+      collects.push({
+        time: tx.blockTime,
+        hash: tx.txHash,
+        usd: entryUsd(tx.transactions),
+        tokensReceived: entryTokens(tx.transactions),
+      });
+    } else if (tx.type === "DEPOSIT") {
+      depositCount++;
+    } else if (tx.type === "WITHDRAW") {
+      withdrawCount++;
+    }
+  }
+  // Sort oldest → newest (UI рендерит в хронологическом порядке).
+  collects.sort((a, b) => a.time - b.time);
+  // Recompute daysSincePrev для UI который ожидает это поле.
+  for (let i = 1; i < collects.length; i++) {
+    const prev = collects[i - 1]!;
+    const cur = collects[i]!;
+    cur.daysSincePrev = (cur.time - prev.time) / 86400;
+  }
+  return {
+    claimedHistory: collects,
+    claimedTotalUsd: collects.reduce((s, e) => s + e.usd, 0),
+    depositCount,
+    withdrawCount,
+    eventTypes: Array.from(eventTypes),
+  };
 }

@@ -30,6 +30,7 @@ import {
   isLendingAuditEnabled,
 } from "@/lib/portfolio/feature_flags";
 import { useKrystalV3Positions } from "@/lib/krystal/hook";
+import { useKrystalV3Transactions } from "@/lib/krystal/transactions_hook";
 import {
   findKrystalDivergences,
   logKrystalDivergences,
@@ -136,6 +137,25 @@ export function useComputedPositions(): ComputedPositions {
   );
   const v3MintPoolPrices = useV3HistoricalPoolPrices(loadedList, alchemyKey);
   const v3MintCgPrices = useV3CoinGeckoPrices(loadedList);
+
+  // PR-K23 (2026-05-27 VolnyySanya audit): Krystal `/v1/positions/{chainId}/
+  // {nft}/transactions` endpoint = authoritative per-tx fee claim history.
+  // Заменяет UCB+PR-2 split полностью. Один вызов на каждую V3 LP позицию,
+  // cache 24h. Используется в applyKrystalV3Override чтобы populate
+  // `feesClaimedHistory` + `feesClaimedUsd`.
+  const krystalTxTargets = useMemo(() => {
+    const out: { chainId: number; npmAddress: string; tokenId: string }[] = [];
+    const CHAIN_TO_ID: Record<string, number> = {
+      eth: 1, arb: 42161, op: 10, matic: 137, base: 8453, bsc: 56, avax: 43114, ron: 2020,
+    };
+    for (const [tokenId, summary] of krystalV3.data) {
+      const chainId = CHAIN_TO_ID[summary.chainCode.toLowerCase()];
+      if (chainId == null || !summary.npmAddress) continue;
+      out.push({ chainId, npmAddress: summary.npmAddress, tokenId });
+    }
+    return out;
+  }, [krystalV3.data]);
+  const krystalTxHook = useKrystalV3Transactions(krystalTxTargets, true);
 
   const lendingAuditHook = useLendingAudit(loadedList, alchemyKey, etherscanKey);
   const lendingAuditFlag = useResolvedFeatureFlag(
@@ -367,6 +387,7 @@ export function useComputedPositions(): ComputedPositions {
         working,
         krystalV3.data,
         walletAddressById,
+        krystalTxHook.data,
       );
     }
     // PR-K2: cross-validation log. В primary режиме diff'ы должны быть
@@ -389,6 +410,7 @@ export function useComputedPositions(): ComputedPositions {
     krystalCrossValidate,
     krystalPrimary,
     krystalV3.data,
+    krystalTxHook.data,
     loadedList,
   ]);
 

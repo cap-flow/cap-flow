@@ -48,6 +48,41 @@ export interface KrystalChain {
   explorer?: string;
 }
 
+/**
+ * Krystal `/v1/positions/{chainId}/{npm}-{tokenId}/transactions` event.
+ *
+ * Возвращается массив events отсортированный newest-first. Per-token amounts
+ * + USD value уже посчитаны Krystal'ом по slot0/oracle на момент блока
+ * (historical price, не current spot).
+ *
+ * Подтверждённые types:
+ *   - `DEPOSIT` — IncreaseLiquidity (mint или add). amount0/1 = вложенные tokens.
+ *   - `WITHDRAW` — DecreaseLiquidity. amount0/1 = снятые tokens (principal).
+ *   - `COLLECT_FEE` — pure Collect event. amount0/1 = снятые fees.
+ *   - могут быть и другие (BURN, REBALANCE) — обрабатываем через type filter.
+ */
+export interface KrystalTransactionTokenEntry {
+  /** Индекс в pool (0 или 1). */
+  tokenIndex: number;
+  tokenWithValue: {
+    token: KrystalToken;
+    /** Raw uint256 string. */
+    balance: string;
+    /** USD price per unit at block time (historical, не spot). */
+    price?: number;
+    /** USD value = (balance / 10^decimals) × price. */
+    value?: number;
+  };
+}
+
+export interface KrystalTransaction {
+  type: "DEPOSIT" | "WITHDRAW" | "COLLECT_FEE" | string;
+  txHash: string;
+  blockTime: number;
+  emitContractAddress?: string;
+  transactions?: KrystalTransactionTokenEntry[];
+}
+
 export interface KrystalPosition {
   chain: KrystalChain;
   pool: KrystalPool;
