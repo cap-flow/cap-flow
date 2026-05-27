@@ -49,6 +49,7 @@ import {
   type OpenPosition,
 } from "@/lib/portfolio/open_positions";
 import { applyV3CostBasisOverride } from "@/lib/portfolio/v3_cost_basis_override";
+import { dedupeMatchedV3TokenIds } from "@/lib/portfolio/v3_dedupe_matched";
 import { applyV3ClaimedFeesSplit } from "@/lib/portfolio/v3_claimed_fees_split";
 import { applyLendingCostBasisOverride } from "@/lib/portfolio/lending_cost_basis_override";
 import { applyCexInheritanceCostBasisOverride } from "@/lib/portfolio/cex_inheritance_cost_basis_override";
@@ -378,6 +379,20 @@ export function useComputedPositions(): ComputedPositions {
     // Если Krystal OFF / token нет в Krystal → этот fix остаётся authoritative.
     if (v3CostBasisHook.data.size > 0 && v3.data.size > 0) {
       working = applyV3ClaimedFeesSplit(working, v3.data, v3CostBasisHook.data);
+    }
+
+    // PR-K29 (MMaksimuk POS-019/020 audit): post-process dedup —
+    // если 2+ V3 LP позиции получили один и тот же matchedV3TokenId
+    // (artifact of v3_cost_basis_override Phase 1/1.5 ambiguity между
+    // nearly-identical NFT'ами в одном пуле), реассайним extras на
+    // sibling NFT'ы из Krystal Map. Pure function, no-op если sibling'ов
+    // нет. Применимо для любого юзера с 2+ NFT в одном V3 пуле.
+    if (krystalV3.data.size > 0) {
+      const dedupResult = dedupeMatchedV3TokenIds(working, krystalV3.data);
+      if (dedupResult.reassignedCount > 0) {
+        for (const w of dedupResult.warnings) console.warn(w);
+      }
+      working = dedupResult.positions;
     }
 
     // PR-K3: Krystal primary mode → override V3 current state + fees
