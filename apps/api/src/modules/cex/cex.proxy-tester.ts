@@ -23,6 +23,7 @@ export const PROXY_TEST_TARGETS = [
   { exchange: "bybit", url: "https://api.bybit.com/v5/market/time" },
   { exchange: "bingx", url: "https://api.bingx.com/openApi/spot/v1/server/time" },
   { exchange: "bitget", url: "https://api.bitget.com/api/v2/public/time" },
+  { exchange: "binance", url: "https://api.binance.com/api/v3/time" },
 ] as const;
 
 export type ProxyTestStatus =

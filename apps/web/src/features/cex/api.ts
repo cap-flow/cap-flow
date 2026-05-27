@@ -8,6 +8,7 @@ export const SUPPORTED_EXCHANGES = [
   "bitget",
   "mexc",
   "bingx",
+  "binance",
 ] as const;
 export type ExchangeId = (typeof SUPPORTED_EXCHANGES)[number];
 

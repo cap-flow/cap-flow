@@ -163,6 +163,37 @@ export const CEX_API_KEY_INSTRUCTIONS: Record<ExchangeId, CexApiKeyInstructions>
     ],
     tradeHistoryLimitDays: 180,
   },
+
+  binance: {
+    exchangeId: "binance",
+    displayName: "Binance",
+    apiKeyPageUrl: "https://www.binance.com/en/my/settings/api-management",
+    requiresPassphrase: false,
+    requiredPermissions: [
+      "Enable Reading",
+    ],
+    forbiddenPermissions: [
+      "Enable Spot & Margin Trading",
+      "Enable Futures",
+      "Enable Withdrawals",
+      "Permits Universal Transfer",
+    ],
+    steps: [
+      "Войдите в Binance → правый верхний угол → «Account» → «API Management»",
+      "Нажмите «Create API» → выберите «System generated»",
+      "Имя ключа: например «Capflow read-only»",
+      "Пройдите 2FA / email verification",
+      "В permissions оставьте ТОЛЬКО «Enable Reading». Снимите Spot Trading, Futures, Withdrawals и Universal Transfer.",
+      "IP restriction: можно оставить «Unrestricted» (или указать IP сервера если знаете)",
+      "Сохраните API Key и Secret — Secret показывается ОДИН РАЗ",
+    ],
+    notes: [
+      "Binance держит spot trade history бессрочно, но требует фильтр по symbol — Capflow итерирует по активам из вашего баланса.",
+      "Endpoint `/api/v3/myTrades` принимает диапазон не больше 24 часов за один запрос — поэтому глубокий бэкфилл идёт долго. Если нужна история глубже ~6 мес — выгрузите CSV из Binance и импортируйте.",
+      "Если ключ из РФ — может потребоваться VPN для probe (Binance геоблокирует часть IP-диапазонов).",
+    ],
+    tradeHistoryLimitDays: 200,
+  },
 };
 
 /**
@@ -215,5 +246,11 @@ export const ALL_EXCHANGES_LIST: readonly ExchangeListItem[] = [
     displayName: "BingX",
     requiresPassphrase: false,
     tagline: "6 месяцев истории",
+  },
+  {
+    id: "binance",
+    displayName: "Binance",
+    requiresPassphrase: false,
+    tagline: "Бессрочная история · per-symbol sync",
   },
 ];

@@ -72,6 +72,19 @@ const EXCHANGE_CONFIG: Record<
       fetchMarkets: ["spot"],
     },
   },
+  // Binance uses (apiKey, secret) — no passphrase. Read-only key из
+  // Binance → API Management с включёнными «Enable Reading» + (для
+  // /sapi/* endpoints — обязательно: «Permits Universal Transfer» НЕ
+  // включать, нужен только Read). Pin defaultType+fetchMarkets к spot,
+  // т.к. полный loadMarkets у Binance тянет ~25Mb (spot+margin+futures
+  // +options) — это легко 60s timeout.
+  binance: {
+    requiresPassphrase: false,
+    ccxtOptions: {
+      defaultType: "spot",
+      fetchMarkets: ["spot"],
+    },
+  },
 };
 
 /**

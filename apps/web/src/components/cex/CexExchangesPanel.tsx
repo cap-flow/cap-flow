@@ -104,6 +104,7 @@ const EXCHANGE_LABELS: Record<ExchangeId, string> = {
   bitget: "Bitget",
   mexc: "MEXC",
   bingx: "BingX",
+  binance: "Binance",
 };
 
 /**
@@ -143,6 +144,12 @@ const EXCHANGE_INSTRUCTIONS: Record<ExchangeId, string[]> = {
     "IP whitelist опционально.",
     "Сохраните apiKey и secret. Passphrase у BingX нет.",
   ],
+  binance: [
+    "Binance → Account → API Management → «Create API» → «System generated».",
+    "Permissions: только «Enable Reading». НЕ включайте Spot/Futures Trading, Withdrawals и Universal Transfer.",
+    "IP whitelist опционально (для повышенной безопасности укажите IP сервера).",
+    "Сохраните apiKey и secret. Passphrase у Binance нет. Из РФ может потребоваться VPN для подключения.",
+  ],
 };
 
 export function CexExchangesPanel(): JSX.Element {
@@ -181,8 +188,8 @@ export function CexExchangesPanel(): JSX.Element {
             Биржи (API-ключи)
           </CardTitle>
           <CardDescription>
-            Подключите Bybit, OKX, Bitget, MEXC через READ-ONLY ключ —
-            Capflow подтянет балансы и историю сделок.
+            Подключите Bybit, OKX, Bitget, MEXC, BingX, Binance через
+            READ-ONLY ключ — Capflow подтянет балансы и историю сделок.
           </CardDescription>
         </div>
         <div className="flex items-center gap-2">
@@ -556,6 +563,8 @@ const P2P_UNSUPPORTED_REASON: Partial<Record<ExchangeId, string>> = {
   okx: "OKX P2P API не реализован в Capflow (нужен отдельный HMAC-клиент).",
   mexc: "MEXC не публикует retail P2P API.",
   bingx: "BingX не публикует P2P API — записывайте сделки вручную.",
+  binance:
+    "Binance C2C API доступен только в части регионов — auto-sync ещё не реализован, записывайте P2P-сделки вручную.",
 };
 
 function CexP2pSubPanel({
