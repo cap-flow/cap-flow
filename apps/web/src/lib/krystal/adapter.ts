@@ -139,6 +139,18 @@ export function krystalToV3Summary(p: KrystalPosition): KrystalV3Summary {
   const sym0 = currentTokens[0]?.symbol ?? p.pool.token0?.symbol ?? "?";
   const sym1 = currentTokens[1]?.symbol ?? p.pool.token1?.symbol ?? "?";
 
+  // 2026-05-27 (lex@ audit): Krystal `currentPositionValue` = Σ token values
+  // + Σ pending fees (их «total position TVL including uncollected fees»).
+  // У нас в UI pending fees отдельной колонкой FEE → если использовать
+  // `currentPositionValue` как currentUsd, pending fees двойным счётом
+  // попадут и в «Текущая $» и в «FEE» → пользователь видит inflated
+  // currentUsd на ~1-2%.
+  //
+  // Поэтому currentUsd = Σ currentTokens.usd (just tokens in LP сейчас,
+  // без uncollected fees). Pending fees продолжают показываться отдельно
+  // через feesUsd (= summary.pendingFeeUsd).
+  const currentUsdFromTokens = currentTokens.reduce((s, t) => s + (t.usd ?? 0), 0);
+
   return {
     tokenId: p.tokenId,
     chainCode: chainCodeFor(p.chain),
@@ -148,7 +160,7 @@ export function krystalToV3Summary(p: KrystalPosition): KrystalV3Summary {
     ownerAddress: (p.ownerAddress ?? "").toLowerCase(),
     poolAddress: (p.pool.poolAddress ?? "").toLowerCase(),
     npmAddress: (p.tokenAddress ?? "").toLowerCase(),
-    currentUsd: p.currentPositionValue ?? 0,
+    currentUsd: currentUsdFromTokens,
     currentTokens,
     pendingFeeUsd: sumUsd(p.tradingFee?.pending),
     pendingFeeTokens: pendingTokens,

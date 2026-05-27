@@ -39,8 +39,13 @@ describe("krystalToV3Summary — Uniswap V3 LP", () => {
     expect(summary.pair).toEqual(["WETH", "USDC"]);
     expect(summary.status).toBe("IN_RANGE");
 
-    // Current value ≈ $15,109 (matches Uniswap UI / Revert)
-    expect(summary.currentUsd).toBeCloseTo(15109.43, 0);
+    // 2026-05-27 (lex@ audit): currentUsd теперь = Σ currentTokens.value
+    // (just tokens в LP), без pending fees. Krystal `currentPositionValue`
+    // включает pending fees ($251.44 для этой NFT) → раньше мы инфлировали
+    // currentUsd на сумму pending которые уже отображались в FEE колонке.
+    // Σ tokens = $13,295.59 WETH + $1,333.02 USDC = $14,628.61. Test fixture
+    // (from lex2 dump 2026-05-25) даёт чуть другое value — currentTokens.
+    expect(summary.currentUsd).toBeCloseTo(15109.43 - 251.44, 0);
     expect(summary.currentTokens).toHaveLength(2);
     const wethCur = summary.currentTokens.find((t) => t.symbol === "WETH")!;
     const usdcCur = summary.currentTokens.find((t) => t.symbol === "USDC")!;
@@ -67,7 +72,8 @@ describe("krystalToV3Summary — Uniswap V3 LP", () => {
   it("POS-003 #5404456 WETH/USDC arb: pending $14.67 (DeBank stale = $236.58)", () => {
     const summary = krystalToV3Summary(findByTokenId("5404456"));
     expect(summary.pair).toEqual(["WETH", "USDC"]);
-    expect(summary.currentUsd).toBeCloseTo(1901.96, 0);
+    // currentUsd = Σ tokens (no pending). $1901.96 - $14.67 pending = $1887.29
+    expect(summary.currentUsd).toBeCloseTo(1901.96 - 14.67, 0);
     expect(summary.pendingFeeUsd).toBeCloseTo(14.67, 1);
     expect(summary.claimedFeeUsd).toBeCloseTo(32.13, 1);
   });
@@ -76,7 +82,8 @@ describe("krystalToV3Summary — Uniswap V3 LP", () => {
     const summary = krystalToV3Summary(findByTokenId("1197028"));
     expect(summary.chainCode).toBe("eth");
     expect(summary.pair).toEqual(["WETH", "USDT"]);
-    expect(summary.currentUsd).toBeCloseTo(994.88, 0);
+    // currentUsd без pending fees: $994.88 - $9.15 = $985.73
+    expect(summary.currentUsd).toBeCloseTo(994.88 - 9.15, 0);
     expect(summary.pendingFeeUsd).toBeCloseTo(9.15, 1);
     // Krystal claimed: real value, без principal contamination от
     // decreaseLiquidity+collect multicall'а.
@@ -87,7 +94,8 @@ describe("krystalToV3Summary — Uniswap V3 LP", () => {
   it("POS-004 #4911255 WETH/USDC base: parity (наш движок уже верный, sanity check)", () => {
     const summary = krystalToV3Summary(findByTokenId("4911255"));
     expect(summary.chainCode).toBe("base");
-    expect(summary.currentUsd).toBeCloseTo(2064.92, 0);
+    // currentUsd без pending: $2064.92 - $23.57 = $2041.35
+    expect(summary.currentUsd).toBeCloseTo(2064.92 - 23.57, 0);
     expect(summary.pendingFeeUsd).toBeCloseTo(23.57, 1);
     expect(summary.claimedFeeUsd).toBeCloseTo(55.4, 1);
   });

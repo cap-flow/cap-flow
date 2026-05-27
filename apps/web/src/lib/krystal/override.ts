@@ -267,8 +267,24 @@ function overrideOne(
   const newFeesClaimedUsd = hasTxsData
     ? txs!.claimedTotalUsd
     : base.feesClaimedUsd;
+  // 2026-05-27 (PR-K23 follow-up): обогащаем каждый history entry полем
+  // `aprPeriod` + `positionUsdAtClaim`. Krystal `/transactions` не отдаёт
+  // per-time TVL, поэтому используем `newStartUsd` как аппроксимацию
+  // position value (для V3 LP без active rebalance это близко к правде).
+  // Formula совпадает с UCB+PR-2 split: (usd/positionUsd) × (365/days) × 100.
   const newFeesClaimedHistory = hasTxsData
-    ? txs!.claimedHistory
+    ? txs!.claimedHistory.map((entry) => {
+        const out: typeof entry = { ...entry };
+        if (newStartUsd > 0) out.positionUsdAtClaim = newStartUsd;
+        if (
+          entry.daysSincePrev != null &&
+          entry.daysSincePrev > 0 &&
+          newStartUsd > 0
+        ) {
+          out.aprPeriod = (entry.usd / newStartUsd) * (365 / entry.daysSincePrev) * 100;
+        }
+        return out;
+      })
     : base.feesClaimedHistory;
   // feesClaimedByToken: derive из последнего COLLECT_FEE entry для UI breakdown,
   // или агрегировать по symbol через всю историю.

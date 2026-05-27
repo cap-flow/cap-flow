@@ -897,14 +897,16 @@ describe("applyKrystalV3Override", () => {
           ],
         })],
       ]);
-      // Authoritative claim history from /transactions endpoint
+      // Authoritative claim history from /transactions endpoint.
+      // NOTE: daysSincePrev populated в реальном flow адаптером
+      // (krystalTransactionsToSummary). В моке передаём готовое значение.
       const transactions = new Map<string, import("./adapter").KrystalTransactionsSummary>([
         ["4987608", {
           claimedHistory: [
             { time: 1777215155, hash: "0x4195187e6f0d55fcf903e4783c602b1e6f52fadb011c7274309776f956d22c9c", usd: 21.68, tokensReceived: [{ symbol: "WETH", amount: 0.00489, usd: 11.49 }, { symbol: "USDC", amount: 10.19, usd: 10.19 }] },
-            { time: 1778349687, hash: "0x2d0a20f57a5e82c65c680e9b598e14cf11c51256b0a88d84ec9b19f1df1c187f", usd: 27.14, tokensReceived: [{ symbol: "WETH", amount: 0.00588, usd: 13.73 }, { symbol: "USDC", amount: 13.41, usd: 13.41 }] },
-            { time: 1778939611, hash: "0x2a8d531ea7dbe8eedb918810e4e4f57b8c373a28819c408b71a9a6d41abf6b45", usd: 12.32, tokensReceived: [{ symbol: "WETH", amount: 0.00320, usd: 6.97 }, { symbol: "USDC", amount: 5.35, usd: 5.35 }] },
-            { time: 1779541523, hash: "0x43268c01b951a50cbe070dd6fefe2973040b4ed27984633e0310863c8a9b3f72", usd: 12.00, tokensReceived: [{ symbol: "WETH", amount: 0.00326, usd: 6.65 }, { symbol: "USDC", amount: 5.35, usd: 5.35 }] },
+            { time: 1778349687, hash: "0x2d0a20f57a5e82c65c680e9b598e14cf11c51256b0a88d84ec9b19f1df1c187f", usd: 27.14, daysSincePrev: (1778349687 - 1777215155) / 86400, tokensReceived: [{ symbol: "WETH", amount: 0.00588, usd: 13.73 }, { symbol: "USDC", amount: 13.41, usd: 13.41 }] },
+            { time: 1778939611, hash: "0x2a8d531ea7dbe8eedb918810e4e4f57b8c373a28819c408b71a9a6d41abf6b45", usd: 12.32, daysSincePrev: (1778939611 - 1778349687) / 86400, tokensReceived: [{ symbol: "WETH", amount: 0.00320, usd: 6.97 }, { symbol: "USDC", amount: 5.35, usd: 5.35 }] },
+            { time: 1779541523, hash: "0x43268c01b951a50cbe070dd6fefe2973040b4ed27984633e0310863c8a9b3f72", usd: 12.00, daysSincePrev: (1779541523 - 1778939611) / 86400, tokensReceived: [{ symbol: "WETH", amount: 0.00326, usd: 6.65 }, { symbol: "USDC", amount: 5.35, usd: 5.35 }] },
           ],
           claimedTotalUsd: 73.14,
           depositCount: 1,
@@ -928,6 +930,19 @@ describe("applyKrystalV3Override", () => {
       // feesClaimedByToken aggregated по символу через всю историю
       const wethSum = p.feesClaimedByToken.find(t => t.symbol === "WETH");
       expect(wethSum?.usd).toBeCloseTo(11.49 + 13.73 + 6.97 + 6.65, 1);
+
+      // PR-K24 (2026-05-27 follow-up): aprPeriod вычисляется из usd/startUsd ×
+      // 365/daysSincePrev × 100. positionUsdAtClaim = startUsd как аппроксимация.
+      // First entry (i=0) не имеет daysSincePrev → aprPeriod undefined.
+      expect(p.feesClaimedHistory[0]!.aprPeriod).toBeUndefined();
+      // 10.05 (после 26.04): 13.12 дн (1778349687 - 1777215155) / 86400 = 13.13
+      // aprPeriod = (27.14 / 2000) × (365/13.13) × 100 ≈ 37.73%
+      expect(p.feesClaimedHistory[1]!.aprPeriod).toBeCloseTo(37.73, 0);
+      expect(p.feesClaimedHistory[1]!.positionUsdAtClaim).toBe(2000);
+      // 16.05: ~6.83 дн → (12.32 / 2000) × (365/6.83) × 100 ≈ 32.92%
+      expect(p.feesClaimedHistory[2]!.aprPeriod).toBeCloseTo(32.92, 0);
+      // 23.05: ~6.97 дн → (12.00 / 2000) × (365/6.97) × 100 ≈ 31.42%
+      expect(p.feesClaimedHistory[3]!.aprPeriod).toBeCloseTo(31.42, 0);
     });
 
     it("PR-K23: если /transactions не передан → fallback на base.feesClaimed*", () => {
