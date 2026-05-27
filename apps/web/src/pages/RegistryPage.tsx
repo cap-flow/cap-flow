@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Check,
   ChevronDown,
@@ -148,6 +149,40 @@ export function RegistryPage(): JSX.Element {
     if (wallets.list.length === 0) setFormOpen(true);
   }, [wallets.list.length]);
 
+  /**
+   * UX «кошелёк подключается» — единая видимая карточка статуса от
+   * submit'а формы до окончания первого DeBank/Helius pull'а. До этого
+   * фикса пользователи жаловались что «сервис висит» — на самом деле:
+   *   1. `registrySync.onAdd` (now invalidates queries) → hydration
+   *      refetch → новый кошелёк появляется в `wallets.list`
+   *   2. Эффект ниже автоматически делает его `selected`
+   *   3. Существующий `useEffect` для auto-load дёргает DeBank
+   *   4. Эта карточка с тех пор показывает прогресс (loaded ops, pages)
+   *   5. После того как кошелёк попадает в `loadedById` — карточка
+   *      исчезает (с лёгкой задержкой чтоб пользователь успел увидеть
+   *      «✓ готово»).
+   */
+  const [pendingAdd, setPendingAdd] = useState<
+    | {
+        startedAt: number;
+        name: string;
+        address: string;
+        chain: WalletChain;
+        /** Заполняется когда API уже вернул walletId — до этого момента
+         *  показываем «Сохраняем адрес на сервере…». */
+        apiWalletId?: string;
+        /** Локальный id (api:<wid>:<aid>) — заполняется когда hydration
+         *  привёл новый кошелёк в `wallets.list`. */
+        localId?: string;
+        /** Финальный статус: операции загружены → показываем «✓ готово»
+         *  пару секунд и убираем карточку. */
+        done?: boolean;
+        /** Текст ошибки если API упал. Карточка показывается красной. */
+        error?: string;
+      }
+    | null
+  >(null);
+
   const [filter, setFilter] = useState<string>("");
   const [hideSpam, setHideSpam] = useState<boolean>(true);
   // Multi-select фильтры: Set<value>. Пустой Set = «все».
@@ -201,6 +236,78 @@ export function RegistryPage(): JSX.Element {
     void load(selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id, debankKey, heliusKey]);
+
+  /* ────── pending-add lifecycle ────── */
+
+  // 1) Когда hydration привёл новый кошелёк в список — делаем его
+  //    `selected` (иначе авто-загрузка не дёрнется) и сохраняем
+  //    локальный id чтобы трекать состояние «загружен / в работе».
+  useEffect(() => {
+    if (!pendingAdd?.apiWalletId || pendingAdd.localId) return;
+    const prefix = `api:${pendingAdd.apiWalletId}:`;
+    const fresh = wallets.list.find((w) => w.id.startsWith(prefix));
+    if (!fresh) return;
+    setPendingAdd((p) => (p ? { ...p, localId: fresh.id } : p));
+    if (wallets.selectedId !== fresh.id) {
+      wallets.select(fresh.id);
+    }
+  }, [pendingAdd?.apiWalletId, pendingAdd?.localId, wallets.list, wallets.selectedId, wallets.select]);
+
+  // 2) Как только кошелёк попал в `loadedById` (т.е. DeBank/Helius
+  //    отработал) — помечаем done и через 3 секунды убираем карточку.
+  useEffect(() => {
+    if (!pendingAdd?.localId || pendingAdd.done) return;
+    if (!loadedById[pendingAdd.localId]) return;
+    if (busyId === pendingAdd.localId) return;
+    setPendingAdd((p) => (p ? { ...p, done: true } : p));
+    const t = window.setTimeout(() => setPendingAdd(null), 3000);
+    return () => window.clearTimeout(t);
+  }, [pendingAdd?.localId, pendingAdd?.done, loadedById, busyId]);
+
+  /**
+   * Обёртка над `registrySync.onAdd` которая ведёт `pendingAdd`-карточку
+   * (immediate feedback) и пробрасывает ошибки наружу — `AddWalletForm`
+   * сам решает закрывать форму или нет.
+   */
+  const handleAddWallet = useCallback(
+    async (input: {
+      name: string;
+      address: string;
+      chain: WalletChain;
+      connectionId?: string;
+    }) => {
+      // Сразу показываем «подключаем…» — без задержки. Главный фикс
+      // жалобы «после submit'а ничего не происходит».
+      setPendingAdd({
+        startedAt: Date.now(),
+        name: input.name.trim() || input.address,
+        address: input.address,
+        chain: input.chain,
+      });
+      try {
+        const result = await registrySync.onAdd(input);
+        if (result.kind === "api") {
+          setPendingAdd((p) =>
+            p ? { ...p, apiWalletId: result.apiWalletId } : p,
+          );
+        } else if (result.kind === "duplicate") {
+          // Дубль адреса — просто убираем карточку, ничего страшного.
+          setPendingAdd(null);
+        } else {
+          // Local-only fallback (no primary account). Hydration не будет
+          // — сразу пробуем загрузить и убираем карточку.
+          setPendingAdd((p) =>
+            p ? { ...p, localId: result.wallet.id } : p,
+          );
+        }
+      } catch (e) {
+        setPendingAdd((p) =>
+          p ? { ...p, error: (e as Error).message ?? "Не удалось подключить" } : p,
+        );
+      }
+    },
+    [registrySync],
+  );
 
   /* ----------------------- raw ops: чисто хронологически ------------------ */
 
@@ -479,6 +586,17 @@ export function RegistryPage(): JSX.Element {
         </div>
       </header>
 
+      {/* Заметная карточка статуса подключения. Появляется сразу при
+          submit AddWalletForm — пользователь видит что что-то происходит,
+          а не молчаливый «зависший» экран. */}
+      {pendingAdd && (
+        <PendingAddCard
+          pending={pendingAdd}
+          progress={progress}
+          onDismiss={() => setPendingAdd(null)}
+        />
+      )}
+
       <WalletList
         wallets={wallets}
         loadedById={loadedById}
@@ -487,6 +605,7 @@ export function RegistryPage(): JSX.Element {
         debankKeyOk={Boolean(debankKey)}
         heliusKeyOk={Boolean(heliusKey)}
         registrySync={registrySync}
+        onAddWallet={handleAddWallet}
       />
 
       <CexExchangesPanel />
@@ -1359,6 +1478,7 @@ function WalletList({
   debankKeyOk,
   heliusKeyOk,
   registrySync,
+  onAddWallet,
 }: {
   wallets: ReturnType<typeof useWallets>;
   loadedById: Record<string, Loaded>;
@@ -1367,6 +1487,14 @@ function WalletList({
   debankKeyOk: boolean;
   heliusKeyOk: boolean;
   registrySync: ReturnType<typeof useRegistryApiSync>;
+  /** Owned by parent (RegistryPage) — обёртка над `registrySync.onAdd`
+   *  которая управляет «подключаем…»-карточкой статуса. */
+  onAddWallet: (input: {
+    name: string;
+    address: string;
+    chain: WalletChain;
+    connectionId?: string;
+  }) => Promise<void>;
 }) {
   const t = useT();
   const { forget } = useLoadedWallets();
@@ -1442,7 +1570,11 @@ function WalletList({
               <AddWalletForm
                 existing={wallets.list}
                 onAdd={(input) => {
-                  void registrySync.onAdd(input);
+                  // Закрываем форму сразу — карточка статуса
+                  // (`PendingAddCard`) дальше показывает прогресс.
+                  // `onAddWallet` fire-and-forget потому что parent
+                  // page трекает результат через `pendingAdd`-state.
+                  void onAddWallet(input);
                   onToggleForm();
                 }}
               />
@@ -1851,6 +1983,139 @@ function CacheFreshness() {
   );
 }
 
+/* ============================ Pending-add status card ==================== */
+
+/**
+ * Видимая карточка «подключаем кошелёк / загружаем операции». До этого
+ * фикса юзеры жаловались что «сервис висит» после submit'а: форма
+ * закрывалась, а API + hydration + DeBank pull в сумме шли 5–60 секунд
+ * без какой-либо обратной связи. Карточка проходит 3 фазы:
+ *   1. «Сохраняем адрес на сервере…»        — пока `apiWalletId` не задан
+ *   2. «Загружаем операции — N ops / M pages» — пока кошелёк не появился в
+ *      `loadedById`. Прогресс реальный — приходит из LoadedWalletsProvider.
+ *   3. «✓ Готово — N операций загружено»     — `done=true`, через 3с
+ *      auto-dismiss.
+ *
+ * Ошибки (API упал) — красный вариант с кнопкой «Закрыть».
+ */
+function PendingAddCard({
+  pending,
+  progress,
+  onDismiss,
+}: {
+  pending: {
+    startedAt: number;
+    name: string;
+    address: string;
+    chain: WalletChain;
+    apiWalletId?: string;
+    localId?: string;
+    done?: boolean;
+    error?: string;
+  };
+  progress: { loaded: number; pages: number } | null;
+  onDismiss: () => void;
+}): JSX.Element {
+  const { error, done, apiWalletId, name, address } = pending;
+  const elapsedSec = Math.floor((Date.now() - pending.startedAt) / 1000);
+
+  const variantCls = error
+    ? "border-destructive/50 bg-destructive/10"
+    : done
+      ? "border-success/50 bg-success/10"
+      : "border-brand-cyan/50 bg-brand-cyan/5";
+
+  const iconCls = error
+    ? "text-destructive"
+    : done
+      ? "text-success"
+      : "text-brand-cyan";
+
+  return (
+    <Card className={cn("border-2", variantCls)}>
+      <CardContent className="flex items-start gap-3 py-4">
+        <div className={cn("mt-0.5 shrink-0", iconCls)}>
+          {error ? (
+            <X className="h-5 w-5" />
+          ) : done ? (
+            <Check className="h-5 w-5" />
+          ) : (
+            <Loader2 className="h-5 w-5 animate-spin" />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold">
+            {error
+              ? `Не удалось подключить «${name}»`
+              : done
+                ? `Кошелёк «${name}» подключён`
+                : `Подключаем кошелёк «${name}»…`}
+          </p>
+          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+            {shortAddress(address, 8, 6)}
+          </p>
+          {error ? (
+            <p className="mt-1.5 text-xs text-destructive">{error}</p>
+          ) : done ? (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Загружено {progress?.loaded ?? 0} операций
+              {progress?.pages
+                ? ` за ${progress.pages} страниц истории`
+                : ""}
+              . Подключите ещё кошелёк или биржу — или начните анализ внизу
+              страницы.
+            </p>
+          ) : !apiWalletId ? (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Сохраняем адрес на сервере…
+            </p>
+          ) : (
+            <>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                Загружаем историю операций с блокчейна — это может занять
+                30–60 секунд. <b>Не закрывайте страницу.</b>
+                {progress && (progress.loaded > 0 || progress.pages > 0) && (
+                  <>
+                    {" "}
+                    Уже подтянули{" "}
+                    <span className="font-mono text-foreground">
+                      {progress.loaded}
+                    </span>{" "}
+                    операций
+                    {progress.pages > 0 && (
+                      <>
+                        {" / "}
+                        <span className="font-mono text-foreground">
+                          {progress.pages}
+                        </span>{" "}
+                        стр.
+                      </>
+                    )}
+                  </>
+                )}
+              </p>
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                Прошло: {elapsedSec}с
+              </p>
+            </>
+          )}
+        </div>
+        {(error || done) && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            onClick={onDismiss}
+            aria-label="Закрыть"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 /* ============================ API sync hook ============================== */
 
 /**
@@ -1870,32 +2135,44 @@ function CacheFreshness() {
  * from localStorage and the hydration query reissues it as
  * `api:<walletId>:<addressId>`.
  */
+/**
+ * Result of an Add operation. Discriminated так чтобы UI мог различать
+ * «успех через API» (ждём hydration + load), «локально только»
+ * (нет primary account — degraded), «дубль» (адрес уже есть в списке).
+ */
+export type RegistryAddResult =
+  | { kind: "api"; apiWalletId: string }
+  | { kind: "local"; wallet: SavedWallet }
+  | { kind: "duplicate" };
+
 function useRegistryApiSync(
   wallets: ReturnType<typeof useWallets>,
 ): {
-  onAdd: (input: { name: string; address: string; chain: WalletChain; connectionId?: string }) => Promise<SavedWallet | null>;
+  onAdd: (input: { name: string; address: string; chain: WalletChain; connectionId?: string }) => Promise<RegistryAddResult>;
   onRemove: (localId: string) => Promise<void>;
   migrating: boolean;
 } {
   const primary = useActiveAccount();
+  const qc = useQueryClient();
   // Migration was a one-time bridge from pre-SaaS localStorage entries
   // to the API. After Hydration switched to server-only mode, legacy
   // entries are dropped on the next render, so the migration loop only
   // double-created. Removed.
 
   const onAdd = useCallback(
-    async (input: { name: string; address: string; chain: WalletChain; connectionId?: string }) => {
+    async (input: { name: string; address: string; chain: WalletChain; connectionId?: string }): Promise<RegistryAddResult> => {
       if (!primary) {
         // No primary account — degrade gracefully, the dashboard's
         // hydration will catch up when the account boot resolves.
-        return wallets.add(input);
+        const local = wallets.add(input);
+        return { kind: "local", wallet: local };
       }
       // Dedupe by address against current API-sourced entries before
       // creating to prevent double-add races (form submit + hydration
       // refetch arriving close together).
       const lower = input.address.trim().toLowerCase();
       if (wallets.list.some((w) => w.address.toLowerCase() === lower)) {
-        return null;
+        return { kind: "duplicate" };
       }
       try {
         const apiW = await walletsApi.create(primary.id, {
@@ -1907,13 +2184,23 @@ function useRegistryApiSync(
           type: walletChainToType(input.chain),
           chains: input.chain === "evm" ? EVM_DEFAULT_CHAINS : [],
         });
-        return null;
+        // Без инвалидации hydration query refetch'ит только через
+        // `staleTime: 30_000` — пользователь видит «пустоту» до 30
+        // секунд после submit'а. Это и было корневой причиной жалобы
+        // «всё висит после подключения кошелька».
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: ["wallets", "list", primary.id] }),
+          qc.invalidateQueries({
+            queryKey: ["wallets", "addresses", primary.id, apiW.id],
+          }),
+        ]);
+        return { kind: "api", apiWalletId: apiW.id };
       } catch (err) {
         console.error("[registry] api create failed", err);
         throw err;
       }
     },
-    [primary, wallets],
+    [primary, wallets, qc],
   );
 
   const onRemove = useCallback(
