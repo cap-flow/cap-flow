@@ -1143,6 +1143,97 @@ describe("applyKrystalV3Override", () => {
       expect(p.netStartUsd).toBe(950);
     });
 
+    it("PR-K26 (MMaksimuk POS-002 V4 ARB audit): protocolKey=uniswapv4 НЕ доверяет k.totalDepositValue (2× inflation bug)", () => {
+      // POS-002 ARB V4 #147480 на проде:
+      //   /positions.performance.totalDepositValue = $3,499.69 (broken 2×)
+      //   /transactions Σ DEPOSIT = $1,749.14 (real, byte-в-byte с on-chain)
+      // Без /tx fetch'а отображалось $3,499 — мы упирались в k.totalDepositValue.
+      // Fix: для V4 фолбэк на k.totalDepositValue ОТКЛЮЧЁН → используем base.startUsd
+      // (UCB) если /tx не пришёл. Лучше UCB-ish число чем заведомо 2× inflated.
+      const pos = basePos({
+        id: "POS-002",
+        matchedV3TokenId: "147480",
+        startUsd: 1800, // UCB-derived base — approx real
+        currentUsd: 1916,
+        supply: [
+          { symbol: "WBTC", amount: 0.00787, currentUsd: 591, startUsd: 1050 },
+          { symbol: "USDC", amount: 1253.62, currentUsd: 1253.62, startUsd: 750 },
+        ],
+      });
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["147480", {
+          ...summary({
+            tokenId: "147480",
+            currentUsd: 1916,
+            current: [
+              { symbol: "WBTC", amount: 0.00787, usd: 591 },
+              { symbol: "USDC", amount: 1253.62, usd: 1253.62 },
+            ],
+            pendingUsd: 0,
+            claimedUsd: 0,
+            openedTime: 1772949680,
+            totalDepositValue: 3499.69, // <-- INFLATED 2× by Krystal V4 indexer
+            totalWithdrawValue: 0,
+          }),
+          protocolKey: "uniswapv4", // <-- ключевое: помечает запись V4
+        }],
+      ]);
+      // /tx не передан — имитируем cache miss / fetch не успел
+      const out = applyKrystalV3Override([pos], krystal);
+      const p = out[0]!;
+
+      // V4: НЕ берём $3,499.69 (broken). Падаем на base.startUsd.
+      expect(p.startUsd).toBe(1800);
+      expect(p.netStartUsd).toBe(1800);
+    });
+
+    it("PR-K26: V4 С /transactions DEPOSIT — использует /tx число (не trustless k.totalDepositValue)", () => {
+      // Same V4 position, но /tx fetch завершился — должно работать как для V3.
+      const pos = basePos({
+        id: "POS-002",
+        matchedV3TokenId: "147480",
+        startUsd: 9999, // UCB мусор — должно быть перебито /tx
+        currentUsd: 1916,
+        supply: [
+          { symbol: "WBTC", amount: 0.00787, currentUsd: 591, startUsd: 0 },
+          { symbol: "USDC", amount: 1253.62, currentUsd: 1253.62, startUsd: 0 },
+        ],
+      });
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["147480", {
+          ...summary({
+            tokenId: "147480",
+            currentUsd: 1916,
+            current: [
+              { symbol: "WBTC", amount: 0.00787, usd: 591 },
+              { symbol: "USDC", amount: 1253.62, usd: 1253.62 },
+            ],
+            pendingUsd: 0,
+            claimedUsd: 0,
+            openedTime: 1772949680,
+            totalDepositValue: 3499.69, // <-- inflated, должно быть проигнорировано
+          }),
+          protocolKey: "uniswapv4",
+        }],
+      ]);
+      const transactions = new Map<string, import("./adapter").KrystalTransactionsSummary>([
+        ["147480", {
+          claimedHistory: [],
+          claimedTotalUsd: 0,
+          depositCount: 1,
+          withdrawCount: 0,
+          eventTypes: ["DEPOSIT"],
+          depositTotalUsd: 1749.14, // <-- real on-chain Σ
+          withdrawTotalUsd: 0,
+        }],
+      ]);
+      const out = applyKrystalV3Override([pos], krystal, undefined, transactions);
+      const p = out[0]!;
+
+      expect(p.startUsd).toBeCloseTo(1749.14, 2);
+      expect(p.netStartUsd).toBeCloseTo(1749.14, 2);
+    });
+
     it("netStartUsd учитывает withdrawValue (если Krystal знает обе стороны)", () => {
       const pos = basePos({
         id: "POS-PARTIAL",
