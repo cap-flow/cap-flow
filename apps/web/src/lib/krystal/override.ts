@@ -151,13 +151,25 @@ function overrideOne(
   //   1. Σ DEPOSIT events из /transactions (PRIMARY — historical, authoritative)
   //   2. k.totalDepositValue (backup — иногда inflated/deflated, но лучше чем ничего)
   //   3. base.startUsd (last resort — UCB lot tracker, может быть мусором)
+  //
+  // 2026-05-28 (MMaksimuk POS-002 follow-up): для Uniswap V4 фолбэк на
+  // `k.totalDepositValue` ОТКЛЮЧЁН. Krystal V4 indexer удваивает
+  // `performance.totalDepositValue` И `providedAmounts.balance` (видимо
+  // double-counts ModifyLiquidity events на pool + manager). Live probe
+  // POS-002 ARB #147480: /positions говорит $3,499, /transactions Σ
+  // DEPOSIT даёт правильные $1,749. Если /tx для V4 не пришёл (cache miss
+  // / fetch error) — лучше base.startUsd (UCB) чем заведомо inflated 2×.
   const txsHasDeposits = txs != null && txs.depositTotalUsd > 0;
+  const isUniswapV4 = (k.protocolKey ?? "").toLowerCase() === "uniswapv4";
+  const krystalTotalDepositTrustworthy = !isUniswapV4;
   const newStartUsd = txsHasDeposits
     ? txs!.depositTotalUsd
-    : (k.totalDepositValue ?? base.startUsd);
+    : (krystalTotalDepositTrustworthy && k.totalDepositValue != null
+        ? k.totalDepositValue
+        : base.startUsd);
   const newNetStartUsd = txsHasDeposits
     ? Math.max(0, txs!.depositTotalUsd - (txs!.withdrawTotalUsd ?? 0))
-    : (k.totalDepositValue != null
+    : (krystalTotalDepositTrustworthy && k.totalDepositValue != null
         ? Math.max(0, k.totalDepositValue - (k.totalWithdrawValue ?? 0))
         : base.netStartUsd);
   // Fallback path: позиция попала сюда через pair-match (Base chain без
