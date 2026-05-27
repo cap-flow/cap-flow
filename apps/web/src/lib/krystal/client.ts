@@ -36,23 +36,13 @@ function parseCreditHeaders(h: Headers): KrystalCreditMeter | undefined {
 }
 
 /**
- * Получить все Uniswap V3 / V4 LP позиции для одного wallet с указанным статусом.
+ * Получить все OPEN Uniswap V3 / V4 LP позиции для одного wallet.
  *
  * Note: protocol filter "uniswap" покрывает Uniswap V2/V3/V4. На нашей
  * стороне фильтруем дальше по `protocol.key === "uniswapv3"` в adapter.
- *
- * Status:
- *   - `OPEN` (default) — позиции с active ликвидностью
- *   - `CLOSED` — позиции без ликвидности (DecreaseLiquidity полный или burn).
- *     Используется для архива + матч UCB-derived UNMATCHED positions
- *     (MMaksimuk POS-015/016/040 audit 2026-05-27).
- *
- * Limit: 100. Default Krystal API = 20, для wallets с >20 closed positions
- * мы теряли данные (MMaksimuk: 97 closed total, default cutoff видел только 20).
  */
 export async function fetchKrystalUniswapV3Positions(
   wallet: string,
-  status: "OPEN" | "CLOSED" = "OPEN",
   options?: { signal?: AbortSignal },
 ): Promise<KrystalResult<KrystalPosition[]>> {
   if (!wallet || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) {
@@ -60,9 +50,8 @@ export async function fetchKrystalUniswapV3Positions(
   }
   const qs = new URLSearchParams({
     wallet,
-    positionStatus: status,
+    positionStatus: "OPEN",
     protocols: "uniswap",
-    limit: "100",
   });
   const path = `/v1/upstream/krystal/v1/positions?${qs.toString()}`;
 

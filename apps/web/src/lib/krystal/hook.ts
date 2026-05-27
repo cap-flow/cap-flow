@@ -72,7 +72,6 @@ export function useKrystalV3Positions(
       let creditsLeft: number | null = null;
       let cacheHits = 0;
       let fetched = 0;
-      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
       for (const w of wallets) {
         if (cancelled) return;
         // PR-K4: try 24h localStorage cache first.
@@ -82,84 +81,18 @@ export function useKrystalV3Positions(
           cacheHits++;
           continue;
         }
-        // PR-K27 (2026-05-27 urgent fix to PR-K26): cache OPEN immediately
-        // after success. Previous bug: AbortError / session expiration во
-        // время CLOSED fetch ВЫКИДЫВАЛ из async function через `return` —
-        // cache write block после CLOSED никогда не достигался → OPEN data
-        // также теряются → все positions UNMATCHED.
-        //
-        // Fix: commit OPEN to cache СРАЗУ после OPEN success. Если CLOSED
-        // потом fails/aborts — OPEN cache всё равно persisted, positions
-        // будут matched в текущем render'е и в next refresh'e.
-        //
-        // Cache invariant: запись по wallet всегда содержит ВСЕ позиции этого
-        // wallet'а (OPEN + CLOSED merged) — для PR-K26 это было true. Теперь:
-        //   • после OPEN success → cache содержит только OPEN
-        //   • после CLOSED success → cache rewritten с OPEN+CLOSED merged
-        // Если CLOSED fails — cache остается с OPEN only. На следующий
-        // refresh (24h позже или manual clear) hook попробует ещё раз.
-        let openPositions: KrystalPosition[] = [];
-        let walletHadAnyData = false;
-
         try {
-          const openResult = await fetchKrystalUniswapV3Positions(w, "OPEN", {
+          const { data, credits } = await fetchKrystalUniswapV3Positions(w, {
             signal: controller.signal,
           });
-          openPositions = openResult.data;
-          walletHadAnyData = true;
-          if (openResult.credits?.left != null) creditsLeft = openResult.credits.left;
-          // Cache immediately — protects against later CLOSED failure
-          if (!cancelled && openPositions.length > 0) {
-            writeKrystalCache(w, openPositions);
-            all.push(...openPositions);
-          }
+          all.push(...data);
+          writeKrystalCache(w, data);
+          fetched++;
+          if (credits?.left != null) creditsLeft = credits.left;
         } catch (e) {
           if ((e as Error).name === "AbortError") return;
-          errors.push(`${w.slice(0, 6)}… OPEN: ${(e as Error).message}`);
+          errors.push(`${w.slice(0, 6)}…: ${(e as Error).message}`);
         }
-        if (cancelled) return;
-        await sleep(400);
-
-        try {
-          const closedResult = await fetchKrystalUniswapV3Positions(w, "CLOSED", {
-            signal: controller.signal,
-          });
-          const closedPositions = closedResult.data;
-          if (closedResult.credits?.left != null) creditsLeft = closedResult.credits.left;
-          // Merge OPEN + CLOSED, rewrite cache
-          if (!cancelled && (openPositions.length > 0 || closedPositions.length > 0)) {
-            const seen = new Set<string>();
-            const merged: KrystalPosition[] = [];
-            for (const pos of [...openPositions, ...closedPositions]) {
-              const key = `${pos.chain?.id}-${pos.tokenAddress?.toLowerCase()}-${pos.tokenId}`;
-              if (seen.has(key)) continue;
-              seen.add(key);
-              merged.push(pos);
-            }
-            writeKrystalCache(w, merged);
-            // all уже содержит OPEN positions, добавляем CLOSED
-            for (const pos of closedPositions) {
-              const key = `${pos.chain?.id}-${pos.tokenAddress?.toLowerCase()}-${pos.tokenId}`;
-              if (!openPositions.some(o => `${o.chain?.id}-${o.tokenAddress?.toLowerCase()}-${o.tokenId}` === key)) {
-                all.push(pos);
-              }
-            }
-            walletHadAnyData = true;
-          }
-        } catch (e) {
-          if ((e as Error).name === "AbortError") {
-            // OPEN cache may already be written — это OK, не теряем данные.
-            return;
-          }
-          errors.push(`${w.slice(0, 6)}… CLOSED: ${(e as Error).message}`);
-        }
-
-        if (walletHadAnyData) {
-          fetched++;
-        }
-        if (cancelled) return;
-        // Throttle между wallets — снижает burst load на Krystal.
-        await sleep(300);
       }
       if (cancelled) return;
       setState({
@@ -169,12 +102,9 @@ export function useKrystalV3Positions(
         creditsLeft,
       });
       if (typeof window !== "undefined") {
-        const openCount = all.filter(p => p.status !== "CLOSED").length;
-        const closedCount = all.filter(p => p.status === "CLOSED").length;
         console.log(
           `[Krystal V3] ${all.length} positions ` +
-            `(${openCount} OPEN, ${closedCount} CLOSED; ` +
-            `${cacheHits} cache hits, ${fetched} fresh fetches) ` +
+            `(${cacheHits} cache hits, ${fetched} fresh fetches) ` +
             `from ${wallets.length} wallets` +
             (creditsLeft != null ? ` (credits left: ${creditsLeft})` : "") +
             (errors.length > 0 ? ` — errors: ${errors.join("; ")}` : ""),

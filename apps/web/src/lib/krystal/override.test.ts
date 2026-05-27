@@ -527,27 +527,20 @@ describe("applyKrystalV3Override", () => {
       expect(out[0]!.matchedV3TokenId).toBeUndefined();
     });
 
-    it("PR-K26: CLOSED Krystal position теперь матчится (раньше skip'илось)", () => {
-      // 2026-05-27 (MMaksimuk POS-019/020/046 audit): после PR #89 fetches
-      // CLOSED в map, UCB-derived UNMATCHED позиции должны matched к
-      // CLOSED Krystal entries. До этого skip блокировал.
+    it("CLOSED Krystal position не используется как match", () => {
       const pos = basePos({
         id: "POS-CL",
         startUsd: 1000, currentUsd: 1000,
         supply: [
-          { symbol: "WETH", amount: 0, currentUsd: 0, startUsd: 500 },
-          { symbol: "USDC", amount: 0, currentUsd: 0, startUsd: 500 },
+          { symbol: "WETH", amount: 0.5, currentUsd: 500, startUsd: 500 },
+          { symbol: "USDC", amount: 500, currentUsd: 500, startUsd: 500 },
         ],
       });
       const posBase: OpenPosition = { ...pos, chain: "base" };
       const krystal = new Map<string, KrystalV3Summary>([
         ["999", summary({
           tokenId: "999", currentUsd: 0,
-          current: [
-            { symbol: "WETH", amount: 0, usd: 0 },
-            { symbol: "USDC", amount: 0, usd: 0 },
-          ],
-          pendingUsd: 0, claimedUsd: 100,
+          current: [], pendingUsd: 0, claimedUsd: 100,
           chainCode: "base", ownerAddress: "0xw",
           status: "CLOSED",
         })],
@@ -555,9 +548,8 @@ describe("applyKrystalV3Override", () => {
       const out = applyKrystalV3Override(
         [posBase], krystal, new Map([["wallet-1", "0xw"]]),
       );
-      // Теперь match'ится — backfill tokenId + currentUsd → 0 (закрыта).
-      expect(out[0]!.matchedV3TokenId).toBe("999");
-      expect(out[0]!.currentUsd).toBe(0);
+      expect(out[0]!.matchedV3TokenId).toBeUndefined();
+      expect(out[0]!.currentUsd).toBe(1000);
     });
 
     it("wrong wallet — не матчит", () => {
