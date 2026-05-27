@@ -35,6 +35,10 @@ import {
   findKrystalDivergences,
   logKrystalDivergences,
 } from "@/lib/krystal/validate";
+import {
+  filterClosedDustPositions,
+  useKrystalV3ClosedPools,
+} from "@/lib/krystal/closed_pools_hook";
 import { applyKrystalV3Override } from "@/lib/krystal/override";
 import { useLotMethodology } from "@/lib/lot_methodology";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
@@ -156,6 +160,12 @@ export function useComputedPositions(): ComputedPositions {
     return out;
   }, [krystalV3.data]);
   const krystalTxHook = useKrystalV3Transactions(krystalTxTargets, true);
+
+  // 2026-05-28 (Option B' MMaksimuk POS-046 audit): отдельный hook на
+  // CLOSED Krystal позиции — нужен чтобы отфильтровать dust-фантомы
+  // от закрытых NFT'ов которые DeBank ещё показывает (residual $0.5-$5).
+  // Полностью fail-soft: ошибка fetch'а → пустой Set → фильтр no-op.
+  const krystalClosedHook = useKrystalV3ClosedPools(loadedList, true);
 
   const lendingAuditHook = useLendingAudit(loadedList, alchemyKey, etherscanKey);
   const lendingAuditFlag = useResolvedFeatureFlag(
@@ -397,6 +407,25 @@ export function useComputedPositions(): ComputedPositions {
       const divergences = findKrystalDivergences(working, krystalV3.data);
       logKrystalDivergences(divergences);
     }
+    // PR-K27 (Option B' MMaksimuk POS-046): filter V3 LP dust phantoms —
+    // позиции в пулах где Krystal знает что NFT уже CLOSED (liquidity=0)
+    // но DeBank продолжает показывать $0.5-$5 residual. Защитные guards
+    // (isV3LpProtocol AND no matchedV3TokenId AND lpTokenId set AND
+    // currentUsd < $50) гарантируют что мы не скроем активные позиции.
+    if (krystalClosedHook.closedKeys.size > 0) {
+      const walletAddressById = new Map<string, string>();
+      for (const l of loadedList) {
+        if (l.wallet.chain === "evm") {
+          walletAddressById.set(l.wallet.id, l.wallet.address);
+        }
+      }
+      working = filterClosedDustPositions(
+        working,
+        walletAddressById,
+        krystalClosedHook.closedKeys,
+        isV3LpProtocol,
+      );
+    }
     return working;
   }, [
     positionsRaw,
@@ -411,6 +440,7 @@ export function useComputedPositions(): ComputedPositions {
     krystalPrimary,
     krystalV3.data,
     krystalTxHook.data,
+    krystalClosedHook.closedKeys,
     loadedList,
   ]);
 
