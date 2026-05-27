@@ -125,69 +125,87 @@ function overrideOne(
   // ageDays: пересчитываем только когда openedAt РЕАЛЬНО поменялся
   // (Krystal дал новый openedTime или fallback path обнулил). Если openedAt
   // не поменялся — сохраняем base.ageDays (тесты опираются на этот invariant).
+  // Округляем до 0.1 чтобы UI не показывал "39.52128643518521 дн.".
   const openedAtChanged = newOpenedAt !== base.openedAt;
   const newAgeDays = !openedAtChanged
     ? base.ageDays
     : newOpenedAt != null
-      ? Math.max(0, (Date.now() / 1000 - newOpenedAt) / 86400)
+      ? Math.round(Math.max(0, (Date.now() / 1000 - newOpenedAt) / 86400) * 10) / 10
       : null;
 
-  // supplyTokens[].startUsd: предпочитаем pro-rata по Krystal providedTokens
-  // (исторические USD-amounts вошедших токенов). Если providedTokens нет —
-  // fallback на pro-rata по new currentUsd × newStartUsd (legacy behavior).
+  // supplyTokens[].startUsd + startAmount: предпочитаем Krystal providedTokens
+  // (исторические amounts/USD вошедших токенов). UI колонка «ВНЕСЕНО ТОКЕНОВ»
+  // = `startAmount`. UCB lot tracker для нового кошелька даёт мусор (POS-001
+  // VolnyySanya: 0.861 WETH + 63.72 USDC вместо реальных 0 WETH + 2000 USDC).
   const providedBySym = new Map<string, TokenBreakdown>();
   for (const t of k.providedTokens ?? []) {
-    if (t.usd > 0 || t.amount > 0) providedBySym.set(t.symbol.toUpperCase(), t);
+    // NOTE: для providedTokens НЕ фильтруем zero — реальный 0 amount
+    // (USDC-only deposit → WETH provided=0) — это валидная информация
+    // для UI «Внесено токенов».
+    providedBySym.set(t.symbol.toUpperCase(), t);
   }
   const providedSumUsd = Array.from(providedBySym.values()).reduce(
     (s, t) => s + t.usd,
     0,
   );
+  // newSupplyWithProvided: переносит startAmount из Krystal providedTokens
+  // (net deposit). UCB lot tracker для нового кошелька даёт накопленные
+  // amount'ы cross-protocol — не то что реально лежит в позиции. UI колонка
+  // «Внесено токенов» = `startAmount`, должна показывать what's deposited
+  // into THIS NFT, не cross-aggregate.
+  const newSupplyWithProvided = newSupplyPreStart.map((t) => {
+    const pt = providedBySym.get(t.symbol.toUpperCase());
+    if (!pt) return t;
+    return {
+      ...t,
+      startAmount: pt.amount,
+    };
+  });
   let newSupply: typeof newSupplyPreStart;
   if (providedSumUsd > 0 && newStartUsd > 0) {
     // Krystal-driven per-token startUsd: каждой supply строке привязываем
     // её provided.usd (canonical pair-match по symbol case-insensitive),
     // потом масштабируем чтобы Σ = newStartUsd (на случай если Krystal
     // providedTokens.usd суммой не равны totalDepositValue из-за rounding).
-    const rawByPos = newSupplyPreStart.map((t) => {
+    const rawByPos = newSupplyWithProvided.map((t) => {
       const pt = providedBySym.get(t.symbol.toUpperCase());
       return pt ? pt.usd : 0;
     });
     const rawSum = rawByPos.reduce((s, x) => s + x, 0);
     newSupply =
       rawSum > 0
-        ? newSupplyPreStart.map((t, i) => ({
+        ? newSupplyWithProvided.map((t, i) => ({
             ...t,
             startUsd: (rawByPos[i]! / rawSum) * newStartUsd,
           }))
         : // Нет mapping по symbols (canonicalization mismatch) — fallback
           // на pro-rata от current.
           (() => {
-            const totalCur = newSupplyPreStart.reduce(
+            const totalCur = newSupplyWithProvided.reduce(
               (s, t) => s + (t.currentUsd ?? 0),
               0,
             );
             return totalCur > 0
-              ? newSupplyPreStart.map((t) => ({
+              ? newSupplyWithProvided.map((t) => ({
                   ...t,
                   startUsd: ((t.currentUsd ?? 0) / totalCur) * newStartUsd,
                 }))
-              : newSupplyPreStart;
+              : newSupplyWithProvided;
           })();
   } else {
     // Legacy fallback (Krystal не дал providedTokens.usd): pro-rata по
     // current — сохраняем display invariant Σ startUsd ≈ position.startUsd.
-    const totalNewCurrent = newSupplyPreStart.reduce(
+    const totalNewCurrent = newSupplyWithProvided.reduce(
       (s, t) => s + (t.currentUsd ?? 0),
       0,
     );
     newSupply =
       totalNewCurrent > 0 && newStartUsd > 0
-        ? newSupplyPreStart.map((t) => ({
+        ? newSupplyWithProvided.map((t) => ({
             ...t,
             startUsd: ((t.currentUsd ?? 0) / totalNewCurrent) * newStartUsd,
           }))
-        : newSupplyPreStart;
+        : newSupplyWithProvided;
   }
 
   // Pending fees — Krystal authoritative (real-time feeGrowth math
@@ -196,11 +214,35 @@ function overrideOne(
   const newFeesUsd = k.pendingFeeUsd;
   const newFeesByToken = k.pendingFeeTokens.map(toFeeByTokenEntry);
 
-  // Claimed fees + history — KEEP UCB+PR-2 значения. Krystal оказался
-  // unreliable для claimed total (lex POS-007 real $80 vs Krystal $32,
-  // POS-006 real $271 vs Krystal $107). PR-2 split через DecreaseLiquidity
-  // events уже фиксит inflated UCB entries.
-  const newFeesClaimedUsd = base.feesClaimedUsd;
+  // Claimed fees: chain-conditional policy (2026-05-27 VolnyySanya POS-001
+  // BASE follow-up).
+  //
+  // На chain'ах с Etherscan v2 поддержкой (ETH/ARB/OP/MATIC/BNB) PR-2 split
+  // работает через DecreaseLiquidity events → UCB+PR-2 authoritative. Krystal
+  // там может занижать (lex POS-007: real $80 vs Krystal $32). Условие
+  // «Etherscan worked» = base.matchedV3TokenId был установлен (Phase-1/1.5
+  // match).
+  //
+  // На chain'ах без Etherscan v2 (Base, новые цепи) PR-2 split не может
+  // отделить fees от principal → UCB засчитывает все «collect-like» ops
+  // как fees → 24× inflation (VolnyySanya POS-001: real $80 vs UCB $1943).
+  // Krystal там точнее (pool-level Collect events через Alchemy/RPC, не
+  // зависит от DeBank classification).
+  //
+  // Правило: если pair-match fallback использовался (matchedV3TokenId был
+  // null → Etherscan не дал) → trust Krystal claimed. Иначе → UCB+PR-2.
+  const useKrystalClaimed = fallbackPath;
+  const newFeesClaimedUsd = useKrystalClaimed
+    ? k.claimedFeeUsd
+    : base.feesClaimedUsd;
+  const newFeesClaimedByToken = useKrystalClaimed
+    ? k.claimedFeeTokens.map(toFeeByTokenEntry)
+    : base.feesClaimedByToken;
+  // feesClaimedHistory: на fallback path UCB+PR-2 history тоже broken
+  // (PR-2 split не отработал) — лучше пустая чем misleading.
+  const newFeesClaimedHistory = useKrystalClaimed
+    ? []
+    : base.feesClaimedHistory;
   const newFeesLifetimeUsd = newFeesUsd + newFeesClaimedUsd;
 
   // PnL recompute (collateral-side, H6 invariant — debt не вычитаем).
@@ -222,19 +264,35 @@ function overrideOne(
   // Bug C fix (2026-05-25 lex@ V3-popup audit): после override
   // `supplyTokens.amount/currentUsd` и `currentUsd` пересчитываем
   // `v3.currentLpUsd`/`impermanentLossUsd`/`pnlUsd`/`pnlPct`.
-  // hodlUsd НЕ трогаем — depositTokens × currentPrices, не зависит
-  // от Krystal-override.
+  //
+  // 2026-05-27 (VolnyySanya follow-up): также синхронизируем
+  // `v3.depositTokens` и `v3.depositUsd` из Krystal providedTokens +
+  // totalDepositValue. UI колонка «Открыто в» = `v3.depositTokens`.
+  // Без этого UI показывает старые UCB-derived токены (POS-001 BASE:
+  // ETH 0.36 + USDC 951 вместо реальных 0 WETH + 2000 USDC).
+  const newV3DepositTokens =
+    k.providedTokens.length > 0 && newStartUsd > 0
+      ? k.providedTokens.map((t) => ({
+          symbol: t.symbol,
+          amount: t.amount,
+          usdAtDeposit: t.usd,
+        }))
+      : base.v3?.depositTokens ?? [];
+  const newV3DepositUsd = k.totalDepositValue ?? base.v3?.depositUsd ?? 0;
+
   const newV3 = base.v3
     ? (() => {
         const newCurrentLpUsd = newCurrentUsd;
         const newImpermanentLossUsd = base.v3.hodlUsd - newCurrentLpUsd;
-        const newV3PnlUsd = newCurrentLpUsd - base.v3.depositUsd;
+        const newV3PnlUsd = newCurrentLpUsd - newV3DepositUsd;
         const newV3PnlPct =
-          base.v3.depositUsd > 0
-            ? (newV3PnlUsd / base.v3.depositUsd) * 100
+          newV3DepositUsd > 0
+            ? (newV3PnlUsd / newV3DepositUsd) * 100
             : 0;
         return {
           ...base.v3,
+          depositTokens: newV3DepositTokens,
+          depositUsd: newV3DepositUsd,
           currentLpUsd: newCurrentLpUsd,
           impermanentLossUsd: newImpermanentLossUsd,
           pnlUsd: newV3PnlUsd,
@@ -257,8 +315,12 @@ function overrideOne(
     netPnlPct: newPnlPct,
     feesUsd: newFeesUsd,
     feesByToken: newFeesByToken,
-    // feesClaimedUsd / feesClaimedByToken / feesClaimedHistory — НЕ trump
-    // UCB. Оставляем base.* как есть.
+    // feesClaimedUsd / feesClaimedByToken / feesClaimedHistory:
+    //   * Etherscan-supported chain (matchedV3TokenId set) → UCB+PR-2
+    //   * Fallback path (Base etc., matchedV3TokenId was null) → Krystal
+    feesClaimedUsd: newFeesClaimedUsd,
+    feesClaimedByToken: newFeesClaimedByToken,
+    feesClaimedHistory: newFeesClaimedHistory,
     feesLifetimeUsd: newFeesLifetimeUsd,
     feeApr,
     feeAprLifetime,
