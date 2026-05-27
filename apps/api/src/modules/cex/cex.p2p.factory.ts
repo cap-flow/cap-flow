@@ -28,12 +28,15 @@ export const createP2pClient: IP2pClientFactory = (
     case "okx":
     case "mexc":
     case "bingx":
+    case "binance":
       // TODO: implement per-exchange P2P clients. Each exchange has
       // its own auth scheme and endpoint structure:
-      //   - Bybit:  /v5/otc/buy-history, /v5/otc/sell-history (HMAC v3)
-      //   - OKX:    /api/v5/c2c/... (OK-ACCESS-* headers)
-      //   - MEXC:   public P2P API not stably documented for retail
-      //   - BingX:  P2P API not publicly documented (skip for now)
+      //   - Bybit:   /v5/otc/buy-history, /v5/otc/sell-history (HMAC v3)
+      //   - OKX:     /api/v5/c2c/... (OK-ACCESS-* headers)
+      //   - MEXC:    public P2P API not stably documented for retail
+      //   - BingX:   P2P API not publicly documented (skip for now)
+      //   - Binance: /sapi/v1/c2c/orderMatch/listUserOrderHistory (HMAC,
+      //              retail; gated по региону, не везде доступен)
       return null;
     default:
       return null;

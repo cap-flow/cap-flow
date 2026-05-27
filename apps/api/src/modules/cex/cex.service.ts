@@ -169,7 +169,7 @@ export class CexService {
   async connect(input: ConnectInput): Promise<CexAccountPublic> {
     if (!isSupportedExchange(input.exchange)) {
       throw new ValidationError(
-        `Unsupported exchange '${input.exchange}'. Supported: bybit, okx, bitget, mexc, bingx.`
+        `Unsupported exchange '${input.exchange}'. Supported: bybit, okx, bitget, mexc, bingx, binance.`
       );
     }
 

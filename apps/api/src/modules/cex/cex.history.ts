@@ -47,6 +47,11 @@ export const TRADE_WINDOW_DAYS: Record<ExchangeId, number | null> = {
   okx: 90,
   mexc: 30,
   bitget: null, // bitget tax endpoint самостоятельно chunks
+  // Binance /api/v3/myTrades: при передаче ОБОИХ startTime+endTime
+  // диапазон не должен превышать 24 часа. Используем 1-day окно.
+  // requires-symbol — fetchTradesPerSymbol fallback в cex.service сам
+  // ходит per-asset, поэтому depth ограничена maxIterations × 1 day.
+  binance: 1,
 };
 
 /**
@@ -72,6 +77,10 @@ export const TRADE_MAX_LOOKBACK_DAYS: Record<ExchangeId, number> = {
   okx: 2555, // ~7 лет
   mexc: 90,
   bitget: 90,
+  // Binance keeps spot trade history без ограничений, но при 1-day окне
+  // и default maxIterations=200 фактически возьмём только последние
+  // ~200 дней через API. Для глубокой истории — CSV-импорт.
+  binance: 200,
 };
 
 /**
@@ -84,6 +93,9 @@ export const TRANSFER_WINDOW_DAYS: Record<ExchangeId, number | null> = {
   okx: 90,
   mexc: 90,
   bitget: 90,
+  // Binance /sapi/v1/capital/deposit/hisrec и /sapi/v1/capital/withdraw/history
+  // строго лимитят startTime/endTime окном в 90 дней per request.
+  binance: 90,
 };
 
 /**
@@ -97,6 +109,10 @@ export const TRANSFER_MAX_LOOKBACK_DAYS: Record<ExchangeId, number> = {
   okx: 2555, // OKX bills-archive до 7 лет
   mexc: 365, // MEXC withdraw/deposit ~1 год
   bitget: 365,
+  // Binance хранит deposit/withdrawal history бессрочно. Запрашиваем
+  // последние 3 года для разумного баланса между coverage и числом
+  // 90-дневных окон.
+  binance: 1080,
 };
 
 /**
@@ -114,6 +130,9 @@ export const TRANSFER_REQUIRES_COIN_FILTER: Record<ExchangeId, boolean> = {
   okx: false, // OKX отдаёт без filter
   mexc: false,
   bitget: false,
+  // Binance отдаёт всю историю без coin-filter'а: `/sapi/v1/capital/
+  // deposit/hisrec` возвращает все монеты если `coin` не передан.
+  binance: false,
 };
 
 export interface ChunkedFetchOptions {
