@@ -503,6 +503,133 @@ describe("applyKrystalV3Override", () => {
       expect(out[0]!.matchedV3TokenId).toBeUndefined();
     });
 
+    it("PR-K28 (MMaksimuk POS-011/012): 2 NFT в одном пуле — disambiguate через currentUsd-proximity", () => {
+      // POS-011 currentUsd $1716 vs NFT #5292019 (1812, 5%) vs NFT #5299587 (9091, 430%)
+      // → выбираем #5292019 (clear closest within 10%, secondClosest > 1.5× от closest)
+      const pos011 = basePos({
+        id: "POS-011",
+        startUsd: 4000, currentUsd: 1716, // current $1716
+        supply: [
+          { symbol: "WETH", amount: 0.299, currentUsd: 614, startUsd: 2000 },
+          { symbol: "USDT", amount: 1102, currentUsd: 1102, startUsd: 2000 },
+        ],
+        feesUsd: 96,
+      });
+      pos011.chain = "arb";
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["5292019", summary({
+          tokenId: "5292019", currentUsd: 1812,
+          current: [
+            { symbol: "WETH", amount: 0.3, usd: 612 },
+            { symbol: "USDT", amount: 1200, usd: 1200 },
+          ],
+          pendingUsd: 96, claimedUsd: 196,
+          chainCode: "arb", ownerAddress: "0xmaks", pair: ["WETH","USDT"] as [string,string],
+          openedTime: 1733900000, totalDepositValue: 1724,
+        })],
+        ["5299587", summary({
+          tokenId: "5299587", currentUsd: 9091,
+          current: [
+            { symbol: "WETH", amount: 3.27, usd: 6700 },
+            { symbol: "USDT", amount: 2400, usd: 2400 },
+          ],
+          pendingUsd: 542, claimedUsd: 624,
+          chainCode: "arb", ownerAddress: "0xmaks", pair: ["WETH","USDT"] as [string,string],
+          openedTime: 1732700000, totalDepositValue: 8157,
+        })],
+      ]);
+      const out = applyKrystalV3Override(
+        [pos011], krystal, new Map([["wallet-1", "0xmaks"]]),
+      );
+      expect(out[0]!.matchedV3TokenId).toBe("5292019");
+      expect(out[0]!.currentUsd).toBeCloseTo(1812, 0);
+      expect(out[0]!.startUsd).toBe(1724);
+    });
+
+    it("PR-K28: POS-012 (current $8557) выбирает #5299587, не #5292019", () => {
+      const pos012 = basePos({
+        id: "POS-012",
+        startUsd: 1216, currentUsd: 8557,
+        supply: [
+          { symbol: "WETH", amount: 3.26, currentUsd: 6700, startUsd: 600 },
+          { symbol: "USDT", amount: 1857, currentUsd: 1857, startUsd: 616 },
+        ],
+        feesUsd: 542,
+      });
+      pos012.chain = "arb";
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["5292019", summary({
+          tokenId: "5292019", currentUsd: 1812,
+          current: [{ symbol: "WETH", amount: 0.3, usd: 612 }, { symbol: "USDT", amount: 1200, usd: 1200 }],
+          pendingUsd: 96, claimedUsd: 0,
+          chainCode: "arb", ownerAddress: "0xmaks", pair: ["WETH","USDT"] as [string,string],
+          openedTime: 1733900000, totalDepositValue: 1724,
+        })],
+        ["5299587", summary({
+          tokenId: "5299587", currentUsd: 9091,
+          current: [{ symbol: "WETH", amount: 3.27, usd: 6700 }, { symbol: "USDT", amount: 2400, usd: 2400 }],
+          pendingUsd: 542, claimedUsd: 0,
+          chainCode: "arb", ownerAddress: "0xmaks", pair: ["WETH","USDT"] as [string,string],
+          openedTime: 1732700000, totalDepositValue: 8157,
+        })],
+      ]);
+      const out = applyKrystalV3Override(
+        [pos012], krystal, new Map([["wallet-1", "0xmaks"]]),
+      );
+      expect(out[0]!.matchedV3TokenId).toBe("5299587");
+      expect(out[0]!.startUsd).toBe(8157);
+    });
+
+    it("PR-K28: ни один кандидат не ближе 10% → bail (защита от ложного match'а)", () => {
+      const pos = basePos({
+        id: "POS-FAR", startUsd: 5000, currentUsd: 5000,
+        supply: [
+          { symbol: "WETH", amount: 1, currentUsd: 2500, startUsd: 2500 },
+          { symbol: "USDC", amount: 2500, currentUsd: 2500, startUsd: 2500 },
+        ],
+        feesUsd: 0,
+      });
+      pos.chain = "arb";
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["A", summary({ tokenId: "A", currentUsd: 1000,
+          current: [{ symbol: "WETH", amount: 0.5, usd: 500 }, { symbol: "USDC", amount: 500, usd: 500 }],
+          pendingUsd: 0, claimedUsd: 0, chainCode: "arb", ownerAddress: "0xw",
+        })],
+        ["B", summary({ tokenId: "B", currentUsd: 9000,
+          current: [{ symbol: "WETH", amount: 1.8, usd: 4500 }, { symbol: "USDC", amount: 4500, usd: 4500 }],
+          pendingUsd: 0, claimedUsd: 0, chainCode: "arb", ownerAddress: "0xw",
+        })],
+      ]);
+      const out = applyKrystalV3Override([pos], krystal, new Map([["wallet-1", "0xw"]]));
+      // Pos = 5000, A = 1000 (80% off), B = 9000 (80% off). Ни один не ≤10%.
+      expect(out[0]!.matchedV3TokenId).toBeUndefined();
+    });
+
+    it("PR-K28: closest within 10% но secondClosest близко (<1.5× distance) → bail (ambiguous)", () => {
+      const pos = basePos({
+        id: "POS-AMB", startUsd: 1000, currentUsd: 1000,
+        supply: [
+          { symbol: "WETH", amount: 0.5, currentUsd: 500, startUsd: 500 },
+          { symbol: "USDC", amount: 500, currentUsd: 500, startUsd: 500 },
+        ],
+        feesUsd: 0,
+      });
+      pos.chain = "arb";
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["A", summary({ tokenId: "A", currentUsd: 1050,
+          current: [{ symbol: "WETH", amount: 0.52, usd: 525 }, { symbol: "USDC", amount: 525, usd: 525 }],
+          pendingUsd: 0, claimedUsd: 0, chainCode: "arb", ownerAddress: "0xw",
+        })],
+        ["B", summary({ tokenId: "B", currentUsd: 1060,
+          current: [{ symbol: "WETH", amount: 0.53, usd: 530 }, { symbol: "USDC", amount: 530, usd: 530 }],
+          pendingUsd: 0, claimedUsd: 0, chainCode: "arb", ownerAddress: "0xw",
+        })],
+      ]);
+      const out = applyKrystalV3Override([pos], krystal, new Map([["wallet-1", "0xw"]]));
+      // A=1050 (5% off), B=1060 (6% off). 6/5=1.2 < 1.5 → ambiguous → bail.
+      expect(out[0]!.matchedV3TokenId).toBeUndefined();
+    });
+
     it("walletAddressById не передан — fallback выключен (legacy callers)", () => {
       const pos = basePos({
         id: "POS-LEG",
