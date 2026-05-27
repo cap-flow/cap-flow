@@ -431,17 +431,10 @@ function tryFallbackMatch(
     p.supplyTokens[0]!.symbol,
     p.supplyTokens[1]!.symbol,
   );
-  // 2026-05-27 (PR-K26): allow CLOSED matches. До PR #89 мы fetched only
-  // OPEN из Krystal — CLOSED был не доступен, skip имел смысл. После PR #89
-  // CLOSED тоже в map'е, и UCB-derived UNMATCHED positions (типа MMaksimuk
-  // POS-019/020/046) часто соответствуют ЗАКРЫТЫМ Krystal entries. Skip
-  // CLOSED здесь блокировал их matching → они оставались без openedAt /
-  // accurate startUsd / claim history. Allow CLOSED match — `applyKrystalV3-
-  // Override` properly handles closed: currentUsd → 0 (всё выведено), claim
-  // history populated.
   const matches = krystalEntries.filter((k) => {
     if (k.ownerAddress !== owner) return false;
     if (k.chainCode.toLowerCase() !== wantChain) return false;
+    if (k.status === "CLOSED") return false;
     return sortedCanonPair(k.pair[0], k.pair[1]) === wantPair;
   });
   if (matches.length !== 1) return null;
