@@ -64,7 +64,30 @@ export function useKrystalV3Positions(
     }
     const controller = new AbortController();
     let cancelled = false;
-    setState((s) => ({ ...s, loading: true, error: null }));
+
+    // PR-K28 (2026-05-27): synchronous cache hydration ДО fetch loop.
+    // Раньше state populated только после loop completion → если loop
+    // aborts посередине (re-render / cleanup), state остаётся EMPTY
+    // несмотря на presence cache в localStorage. Это вызывало 0/21
+    // matched даже когда cache был полным.
+    //
+    // Теперь: setState с cached data сразу в начале effect → applyKrystalV3-
+    // Override fires с актуальными данными даже если fetch loop не успеет.
+    const initialFromCache: KrystalPosition[] = [];
+    for (const w of wallets) {
+      const cached = readKrystalCache(w);
+      if (cached !== null) initialFromCache.push(...cached);
+    }
+    if (initialFromCache.length > 0) {
+      setState({
+        data: buildKrystalSummaryMap(initialFromCache),
+        loading: true,
+        error: null,
+        creditsLeft: null,
+      });
+    } else {
+      setState((s) => ({ ...s, loading: true, error: null }));
+    }
 
     (async () => {
       const all: KrystalPosition[] = [];
@@ -112,6 +135,17 @@ export function useKrystalV3Positions(
           if (!cancelled && openPositions.length > 0) {
             writeKrystalCache(w, openPositions);
             all.push(...openPositions);
+            // PR-K28: also setState immediately — UI получает данные раньше
+            // чем CLOSED завершится (или fails). Без этого CLOSED abort
+            // exit'нула функцию до setState → cache есть, state пустой.
+            if (!cancelled) {
+              setState({
+                data: buildKrystalSummaryMap(all),
+                loading: true,
+                error: null,
+                creditsLeft,
+              });
+            }
           }
         } catch (e) {
           if ((e as Error).name === "AbortError") return;
