@@ -81,14 +81,36 @@ export function useKrystalV3Positions(
           cacheHits++;
           continue;
         }
+        // PR-K25 (2026-05-27 MMaksimuk audit): fetch BOTH OPEN + CLOSED.
+        // OPEN — active positions (UI «Лист»). CLOSED — для match'а UCB-
+        // derived UNMATCHED positions (которые DeBank ops создали но
+        // Krystal /positions?status=OPEN не вернул потому что они уже
+        // закрыты). MMaksimuk: 12 OPEN + 97 CLOSED → previously we missed
+        // 97 positions worth of authoritative data.
         try {
-          const { data, credits } = await fetchKrystalUniswapV3Positions(w, {
-            signal: controller.signal,
-          });
-          all.push(...data);
-          writeKrystalCache(w, data);
+          const [openResult, closedResult] = await Promise.all([
+            fetchKrystalUniswapV3Positions(w, "OPEN", {
+              signal: controller.signal,
+            }),
+            fetchKrystalUniswapV3Positions(w, "CLOSED", {
+              signal: controller.signal,
+            }),
+          ]);
+          // Merge: deduplicate by tokenId (just in case — tokenId уникален
+          // в пределах NPM contract, OPEN/CLOSED не пересекаются).
+          const seen = new Set<string>();
+          const merged: KrystalPosition[] = [];
+          for (const pos of [...openResult.data, ...closedResult.data]) {
+            const key = `${pos.chain?.id}-${pos.tokenAddress?.toLowerCase()}-${pos.tokenId}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(pos);
+          }
+          all.push(...merged);
+          writeKrystalCache(w, merged);
           fetched++;
-          if (credits?.left != null) creditsLeft = credits.left;
+          if (openResult.credits?.left != null) creditsLeft = openResult.credits.left;
+          else if (closedResult.credits?.left != null) creditsLeft = closedResult.credits.left;
         } catch (e) {
           if ((e as Error).name === "AbortError") return;
           errors.push(`${w.slice(0, 6)}…: ${(e as Error).message}`);
@@ -102,9 +124,12 @@ export function useKrystalV3Positions(
         creditsLeft,
       });
       if (typeof window !== "undefined") {
+        const openCount = all.filter(p => p.status !== "CLOSED").length;
+        const closedCount = all.filter(p => p.status === "CLOSED").length;
         console.log(
           `[Krystal V3] ${all.length} positions ` +
-            `(${cacheHits} cache hits, ${fetched} fresh fetches) ` +
+            `(${openCount} OPEN, ${closedCount} CLOSED; ` +
+            `${cacheHits} cache hits, ${fetched} fresh fetches) ` +
             `from ${wallets.length} wallets` +
             (creditsLeft != null ? ` (credits left: ${creditsLeft})` : "") +
             (errors.length > 0 ? ` — errors: ${errors.join("; ")}` : ""),
