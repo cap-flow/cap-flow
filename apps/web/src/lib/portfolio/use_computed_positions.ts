@@ -111,10 +111,28 @@ export function useComputedPositions(): ComputedPositions {
     for (const arr of v3.data.values()) for (const p of arr) out.push(p);
     return out;
   }, [v3.data]);
+  // PR-K11 (2026-05-25): Krystal V3 primary mode теперь always-on (был за
+  // feature flag, но это давало per-browser inconsistency — fees зависели от
+  // localStorage конкретного браузера). Cross-validation (debug warnings)
+  // остаётся за флагом для dev/diagnostic режима.
+  // API key инжектится server-side через upstream-proxy
+  // (см. `apps/api/.../upstream-proxy.service.ts` — `KRYSTAL_API_KEY`).
+  // NOTE: useKrystalV3Positions запускается раньше useV3LiquidityEvents
+  // чтобы передать `openedTime` lookup → enable BASE chain Alchemy chunked
+  // fetch с правильным fromBlock (2026-05-27 follow-up к VolnyySanya fix).
+  const krystalV3 = useKrystalV3Positions(loadedList, true);
+  const krystalOpenedTimeByTokenId = useMemo<Map<string, number | null>>(() => {
+    const m = new Map<string, number | null>();
+    for (const [tokenId, s] of krystalV3.data) {
+      m.set(tokenId, s.openedTime);
+    }
+    return m;
+  }, [krystalV3.data]);
   const v3CostBasisHook = useV3LiquidityEvents(
     v3PositionsFlat,
     alchemyKey,
     etherscanKey,
+    krystalOpenedTimeByTokenId,
   );
   const v3MintPoolPrices = useV3HistoricalPoolPrices(loadedList, alchemyKey);
   const v3MintCgPrices = useV3CoinGeckoPrices(loadedList);
@@ -125,20 +143,14 @@ export function useComputedPositions(): ComputedPositions {
   );
   const lendingAuditOn = lendingAuditFlag.enabled || isLendingAuditEnabled();
 
-  // PR-K11 (2026-05-25): Krystal V3 primary mode теперь always-on (был за
-  // feature flag, но это давало per-browser inconsistency — fees зависели от
-  // localStorage конкретного браузера). Cross-validation (debug warnings)
-  // остаётся за флагом для dev/diagnostic режима.
-  // API key инжектится server-side через upstream-proxy
-  // (см. `apps/api/.../upstream-proxy.service.ts` — `KRYSTAL_API_KEY`).
+  // Cross-validation (debug warnings) остаётся за флагом для dev/diagnostic
+  // режима. (Сам `krystalV3` fetch вынесен наверх — см. выше.)
   const krystalFlag = useResolvedFeatureFlag(
     "capflow.feature.krystalV3CrossValidation",
   );
   const krystalCrossValidate =
     krystalFlag.enabled || isKrystalV3CrossValidationEnabled();
   const krystalPrimary = true;
-  // Hook fetches всегда (primary всегда on).
-  const krystalV3 = useKrystalV3Positions(loadedList, true);
 
   const walletHistPrices = useWalletHistPrices(loadedList);
   const [lotMethodology, setLotMethodology] = useLotMethodology();

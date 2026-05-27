@@ -38,6 +38,10 @@ import {
   type V3LiquidityEvent,
 } from "./liquidity_events";
 import { fetchPoolMintPrice, type FetchPoolMintPriceArgs } from "./historical_pool_price";
+import {
+  estimateBlockAtTimestamp,
+  getCurrentBlockNumber,
+} from "./block_estimation";
 import type { V3Position } from "./positions";
 import type { V3Deployment } from "./chains";
 import { findV3Deployments } from "./chains";
@@ -148,10 +152,54 @@ interface Target {
   position: V3Position;
 }
 
+/**
+ * Когда Etherscan не покрывает chain (BASE etc.) и нужен Alchemy
+ * fallback с chunked queries — выводим `fromBlock` из Krystal
+ * `openedTime`. Без этого chunked-сканирование от earliest = millions
+ * of requests → skip → empty result.
+ *
+ * Logic:
+ *   1. Lookup Krystal openedTime для tokenId
+ *   2. Если нет — return undefined (старое поведение)
+ *   3. Получить current block (cached 1m)
+ *   4. estimateBlockAtTimestamp(openedTime → block с safety margin)
+ */
+async function deriveFromBlockFromKrystal(
+  t: Target,
+  krystalOpenedTimeByTokenId: KrystalOpenedTimeLookup | undefined,
+  alchemyKey: string,
+): Promise<bigint | null> {
+  if (!krystalOpenedTimeByTokenId) return null;
+  const openedTime = krystalOpenedTimeByTokenId.get(t.tokenId.toString());
+  if (!openedTime || openedTime <= 0) return null;
+  const currentBlock = await getCurrentBlockNumber(t.deployment, alchemyKey);
+  if (currentBlock == null) return null;
+  const estimated = estimateBlockAtTimestamp({
+    chainCode: t.position.chain,
+    currentBlock,
+    targetTimestampSec: openedTime,
+  });
+  if (estimated != null && typeof window !== "undefined") {
+    console.log(
+      `[useV3LiquidityEvents] fromBlock=${estimated} for NFT ${t.tokenId} (chain ${t.position.chain}, opened ${new Date(openedTime * 1000).toISOString().slice(0, 10)})`,
+    );
+  }
+  return estimated;
+}
+
+/**
+ * Optional Krystal data lookup для fromBlock estimation на chain'ах
+ * где Etherscan free tier не работает (BASE). Key = tokenId, value =
+ * Krystal `openedTime` (Unix sec). Передаётся из useComputedPositions
+ * после useKrystalV3Positions hook.
+ */
+export type KrystalOpenedTimeLookup = ReadonlyMap<string, number | null>;
+
 export function useV3LiquidityEvents(
   v3Positions: V3Position[],
   alchemyKey: string,
   etherscanKey?: string,
+  krystalOpenedTimeByTokenId?: KrystalOpenedTimeLookup,
 ): State {
   const [data, setData] = useState<Map<string, V3CostBasisResult>>(EMPTY);
   // Bug E (2026-05-25 O_lll_ABC_lll_O audit): инициальный loading=true
@@ -330,10 +378,16 @@ export function useV3LiquidityEvents(
                 console.warn(
                   `[useV3LiquidityEvents] Etherscan unsupported for chain=${t.position.chain}, falling back to Alchemy`,
                 );
+                const fromBlock = await deriveFromBlockFromKrystal(
+                  t,
+                  krystalOpenedTimeByTokenId,
+                  alchemyKey,
+                );
                 const events = await fetchV3LiquidityEvents(
                   t.deployment,
                   t.tokenId,
                   alchemyKey,
+                  fromBlock != null ? { fromBlock } : undefined,
                 );
                 const [inc, dec] = await Promise.all([
                   attachBlockTimes(t.deployment, alchemyKey, events.increases),
@@ -347,10 +401,16 @@ export function useV3LiquidityEvents(
             }
           } else {
             // Etherscan не используется ИЛИ сеть не поддерживается — Alchemy.
+            const fromBlock = await deriveFromBlockFromKrystal(
+              t,
+              krystalOpenedTimeByTokenId,
+              alchemyKey,
+            );
             const events = await fetchV3LiquidityEvents(
               t.deployment,
               t.tokenId,
               alchemyKey,
+              fromBlock != null ? { fromBlock } : undefined,
             );
             const [inc, dec] = await Promise.all([
               attachBlockTimes(t.deployment, alchemyKey, events.increases),
@@ -719,7 +779,11 @@ export function useV3LiquidityEvents(
     return () => {
       cancelled = true;
     };
-  }, [alchemyKey, targets]);
+    // krystalOpenedTimeByTokenId как dep: когда Krystal данные приходят
+    // позже useV3LiquidityEvents first run (типичная race), effect
+    // re-run с newly available openedTime → fromBlock → success on BASE.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [alchemyKey, targets, krystalOpenedTimeByTokenId]);
 
   return { data, loading, error };
 }
