@@ -386,6 +386,15 @@ export interface OpenPosition {
    * UI показывает «⚠ Cost basis incomplete» badge.
    */
   coverageIncomplete?: boolean;
+  /**
+   * `lp.lpTokenId` (для V3 LP = pool address) пробрасывается сюда из
+   * live-snapshot чтобы downstream filter мог матчить позицию против
+   * Krystal CLOSED pool list (см. useKrystalV3ClosedPools).
+   *
+   * 2026-05-28 (MMaksimuk POS-046 audit): нужно чтобы фильтровать dust
+   * остатки от закрытых NFT'ов которые DeBank продолжает показывать.
+   */
+  lpTokenId?: string;
 }
 
 /**
@@ -2988,6 +2997,7 @@ function buildOne(
     creditFundedUsd: 0,
     ...(v3 ? { v3 } : {}),
     ...(coverageIncomplete ? { coverageIncomplete: true } : {}),
+    ...(lp.lpTokenId ? { lpTokenId: lp.lpTokenId } : {}),
   };
 }
 

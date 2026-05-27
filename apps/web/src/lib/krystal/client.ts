@@ -71,6 +71,51 @@ export async function fetchKrystalUniswapV3Positions(
 }
 
 /**
+ * Получить все CLOSED Uniswap V3/V4 LP позиции для одного wallet.
+ *
+ * Krystal /positions с `positionStatus=CLOSED` отдаёт NFT'ы у которых
+ * `liquidity = "0"` — пользователь полностью вывел ликвидность. На стороне
+ * нашего pipeline нужны для **точечной фильтрации dust-фантомов**:
+ * DeBank live snapshot иногда продолжает показывать $0.50-$5 остатков
+ * (uncollected fees / pricing residual) в пулах, где NFT уже закрыт.
+ * Без CLOSED-знания эти dust строки идут в /performance как обычные
+ * open positions с -90%+ PnL display.
+ *
+ * 2026-05-28 (MMaksimuk POS-046 audit, Option B'): отдельный fetch path
+ * с safe Promise.allSettled в hook — НЕ объединяем с OPEN flow (тот баг
+ * #89 показал что Promise.all rejected кладёт OPEN data). При любой
+ * ошибке CLOSED fetch'а — пустой результат, фильтр просто не применяется.
+ */
+export async function fetchKrystalClosedV3Positions(
+  wallet: string,
+  options?: { signal?: AbortSignal },
+): Promise<KrystalResult<KrystalPosition[]>> {
+  if (!wallet || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) {
+    throw new Error(`Invalid wallet address: ${wallet}`);
+  }
+  const qs = new URLSearchParams({
+    wallet,
+    positionStatus: "CLOSED",
+    protocols: "uniswap",
+  });
+  const path = `/v1/upstream/krystal/v1/positions?${qs.toString()}`;
+
+  const res = await apiFetch(path, {
+    method: "GET",
+    ...(options?.signal && { signal: options.signal }),
+  });
+
+  if (res.status === 401) throw new Error("Krystal proxy: unauthorized");
+  if (res.status === 402) throw new Error("Krystal: out of credits");
+  if (res.status === 429) throw new Error("Krystal: rate limited");
+  if (!res.ok) throw new Error(`Krystal proxy: HTTP ${res.status}`);
+
+  const data = (await res.json()) as KrystalPosition[];
+  const credits = parseCreditHeaders(res.headers);
+  return credits ? { data, credits } : { data };
+}
+
+/**
  * Получить per-tx историю событий (DEPOSIT / WITHDRAW / COLLECT_FEE) для
  * конкретного V3/V4 NFT.
  *
