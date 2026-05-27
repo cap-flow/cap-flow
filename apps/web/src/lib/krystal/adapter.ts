@@ -235,6 +235,24 @@ export interface KrystalTransactionsSummary {
   withdrawCount: number;
   /** Все типы events что встретились (для debug). */
   eventTypes: string[];
+  /**
+   * Σ всех DEPOSIT events' USD value at block time (historical pricing).
+   * 2026-05-27 (MMaksimuk POS-001/002 audit): это **authoritative startUsd**
+   * для V3/V4 LP — то что user реально заплатил в USD на момент каждого
+   * deposit'а. Krystal `/positions.performance.totalDepositValue` оказался
+   * unreliable:
+   *   - V4 ARB indexer удваивает providedAmounts (POS-001: real $1,749 →
+   *     /positions $3,499)
+   *   - providedAmounts.value использует current spot × current balance, а
+   *     не historical at-deposit, что для volatile tokens даёт mismatch
+   *     (POS-002 COPXon: real $425 → /positions $373).
+   *
+   * `/transactions DEPOSIT.totalUsd` использует block-time pricing (oracle/
+   * slot0 на момент tx) — это **istorical cost basis byte-в-byte**.
+   */
+  depositTotalUsd: number;
+  /** Σ всех WITHDRAW events' USD value at block time (для net cost basis). */
+  withdrawTotalUsd: number;
 }
 
 function entryUsd(entries: KrystalTransaction["transactions"]): number {
@@ -282,6 +300,8 @@ export function krystalTransactionsToSummary(
   const collects: ClaimedFeeEntry[] = [];
   let depositCount = 0;
   let withdrawCount = 0;
+  let depositTotalUsd = 0;
+  let withdrawTotalUsd = 0;
   const eventTypes = new Set<string>();
   for (const tx of txs) {
     eventTypes.add(tx.type);
@@ -294,8 +314,10 @@ export function krystalTransactionsToSummary(
       });
     } else if (tx.type === "DEPOSIT") {
       depositCount++;
+      depositTotalUsd += entryUsd(tx.transactions);
     } else if (tx.type === "WITHDRAW") {
       withdrawCount++;
+      withdrawTotalUsd += entryUsd(tx.transactions);
     }
   }
   // Sort oldest → newest (UI рендерит в хронологическом порядке).
@@ -312,5 +334,7 @@ export function krystalTransactionsToSummary(
     depositCount,
     withdrawCount,
     eventTypes: Array.from(eventTypes),
+    depositTotalUsd,
+    withdrawTotalUsd,
   };
 }

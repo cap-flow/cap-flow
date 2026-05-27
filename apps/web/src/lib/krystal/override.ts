@@ -131,20 +131,35 @@ function overrideOne(
   // которых нет в нашем supply list).
   const newCurrentUsd = k.currentUsd;
 
-  // 2026-05-27 (VolnyySanya policy change): cost-basis side через Krystal.
-  // Krystal `performance.totalDepositValue` = Σ historical USD всех
-  // IncreaseLiquidity events (RPC-derived). Это on-chain truth, не зависит
-  // от UCB lot tracker / CEX sync.
+  // 2026-05-27 (MMaksimuk POS-001/002 audit follow-up): startUsd идёт из
+  // Krystal `/transactions` Σ DEPOSIT events (historical at-block USD).
   //
-  // Fallback на base.* если Krystal не отдал (старые позиции / отсутствует
-  // performance bundle).
-  const newStartUsd = k.totalDepositValue ?? base.startUsd;
-  // net = deposit − withdraw (если Krystal знает обе стороны).
-  // Если withdrawValue не известен — берём net = deposit (никаких decrease).
-  const newNetStartUsd =
-    k.totalDepositValue != null
-      ? Math.max(0, k.totalDepositValue - (k.totalWithdrawValue ?? 0))
-      : base.netStartUsd;
+  // Старый источник `k.totalDepositValue` (= /positions.performance.
+  // totalDepositValue) оказался unreliable в 2 случаях:
+  //   - V4 ARB indexer удваивает providedAmounts (MMaksimuk POS-001 V4:
+  //     /positions $3,499 vs /transactions $1,749 = real deposit)
+  //   - providedAmounts.value использует CURRENT spot × current balance,
+  //     а не historical at-deposit, что для volatile tokens даёт mismatch
+  //     (POS-002 COPXon: /positions $373 vs /transactions $425 historical)
+  //
+  // `/transactions DEPOSIT.totalUsd` использует block-time pricing
+  // (oracle/slot0 на момент tx) — это **what user actually paid** byte-в-byte.
+  // Подтверждено: MMaksimuk POS-001 single DEPOSIT $1,749 совпадает с
+  // user-confirmed DeBank history.
+  //
+  // Hierarchy:
+  //   1. Σ DEPOSIT events из /transactions (PRIMARY — historical, authoritative)
+  //   2. k.totalDepositValue (backup — иногда inflated/deflated, но лучше чем ничего)
+  //   3. base.startUsd (last resort — UCB lot tracker, может быть мусором)
+  const txsHasDeposits = txs != null && txs.depositTotalUsd > 0;
+  const newStartUsd = txsHasDeposits
+    ? txs!.depositTotalUsd
+    : (k.totalDepositValue ?? base.startUsd);
+  const newNetStartUsd = txsHasDeposits
+    ? Math.max(0, txs!.depositTotalUsd - (txs!.withdrawTotalUsd ?? 0))
+    : (k.totalDepositValue != null
+        ? Math.max(0, k.totalDepositValue - (k.totalWithdrawValue ?? 0))
+        : base.netStartUsd);
   // Fallback path: позиция попала сюда через pair-match (Base chain без
   // Etherscan, etc.) — `base.openedAt` происходит от DeBank earliest lp_add
   // op time, который уезжает на месяцы (POS-001 VolnyySanya: 05.03 vs real
