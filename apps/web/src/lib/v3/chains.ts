@@ -233,10 +233,33 @@ const SUSHI_V3: V3Deployment[] = [
   },
 ];
 
+/* =============================== Velodrome V3 ============================= */
+
+// Velodrome Slipstream (CL pools) на Optimism — fork Uniswap V3 с тем же ABI
+// (IncreaseLiquidity / DecreaseLiquidity / Collect events совпадают).
+// NPM address publicly documented в Velodrome docs.
+// 2026-05-27 (MMaksimuk POS-010 audit): Krystal не индексирует Velodrome →
+// добавляем в chains.ts чтобы useV3LiquidityEvents мог fetch'нуть events
+// через Alchemy eth_getLogs. Then PR-2 split / startUsd computation работает.
+
+const VELODROME_V3: V3Deployment[] = [
+  {
+    id: "velodrome-v3-op",
+    label: "Velodrome V3",
+    protocolMatch: /velodrome(?:\s|-)*v3|velodrome(?:\s|-)*slipstream/i,
+    chainCode: "op",
+    chain: optimism,
+    alchemySubdomain: "opt-mainnet",
+    npm: "0x416b433906b1B72FA758e166e239c43d68dC6F29",
+    factory: "0xCc0bDDB707055e04e497aB22a59c2aF4391cd12F",
+  },
+];
+
 export const V3_DEPLOYMENTS: V3Deployment[] = [
   ...UNISWAP_V3,
   ...PANCAKE_V3,
   ...SUSHI_V3,
+  ...VELODROME_V3,
 ];
 
 /**
