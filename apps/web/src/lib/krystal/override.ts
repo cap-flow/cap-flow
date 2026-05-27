@@ -423,11 +423,21 @@ function overrideOne(
  * Pair-match fallback: для V3 LP позиций без matchedV3TokenId (Base chain,
  * где Etherscan v2 не поддерживает chain и Alchemy V3 cost-basis path
  * 403'ит) пытаемся найти Krystal-запись по (ownerAddress, chainCode,
- * sortedCanonPair). Применяем override только если match уникальный.
+ * sortedCanonPair).
  *
  * Без owner address (legacy callers без map'а) фоллбэк выключается —
  * pair alone слишком ambiguous (несколько wallet'ов могут держать тот же
  * пул на той же цепи).
+ *
+ * 2026-05-28 (MMaksimuk POS-011/012 audit): 2 NFT в одном пуле — раньше
+ * `matches.length !== 1` → bail (никогда не матчили). Теперь
+ * disambiguate через **currentUsd-proximity**: если есть кандидат у
+ * которого относительная разница `|krystal.currentUsd - p.currentUsd|`
+ * < UNIQUE_THRESHOLD (10%) И значительно ближе остальных
+ * (`secondClosest / closest > AMBIGUITY_THRESHOLD` = 1.5×), берём
+ * ближайший. Иначе bail (fallback в Phase1.5 amount-match выше по
+ * pipeline). На MMaksimuk: POS-011 $1716 vs #5292019 $1812 (5%, clear)
+ * vs #5299587 $9091 (430%, far) → выбираем 5292019.
  */
 function tryFallbackMatch(
   p: OpenPosition,
@@ -449,8 +459,30 @@ function tryFallbackMatch(
     if (k.status === "CLOSED") return false;
     return sortedCanonPair(k.pair[0], k.pair[1]) === wantPair;
   });
-  if (matches.length !== 1) return null;
-  return matches[0]!;
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0]!;
+
+  // Multiple candidates (2+ NFTs in same pool). Disambiguate via
+  // currentUsd-proximity. Requires:
+  //  - p.currentUsd > 0 (без anchor нечего сравнивать)
+  //  - closest match within 10% of p.currentUsd
+  //  - secondClosest distance / closest distance > 1.5 (ambiguity guard)
+  if (p.currentUsd <= 0) return null;
+  const UNIQUE_THRESHOLD = 0.1;
+  const AMBIGUITY_THRESHOLD = 1.5;
+  const ranked = matches
+    .map((k) => ({
+      k,
+      distance: Math.abs(k.currentUsd - p.currentUsd) / Math.max(p.currentUsd, 1),
+    }))
+    .sort((a, b) => a.distance - b.distance);
+  const best = ranked[0]!;
+  const second = ranked[1]!;
+  if (best.distance > UNIQUE_THRESHOLD) return null;
+  if (second.distance / Math.max(best.distance, 0.001) < AMBIGUITY_THRESHOLD) {
+    return null;
+  }
+  return best.k;
 }
 
 /**
