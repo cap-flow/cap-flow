@@ -72,6 +72,7 @@ export function useKrystalV3Positions(
       let creditsLeft: number | null = null;
       let cacheHits = 0;
       let fetched = 0;
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
       for (const w of wallets) {
         if (cancelled) return;
         // PR-K4: try 24h localStorage cache first.
@@ -81,26 +82,48 @@ export function useKrystalV3Positions(
           cacheHits++;
           continue;
         }
-        // PR-K25 (2026-05-27 MMaksimuk audit): fetch BOTH OPEN + CLOSED.
-        // OPEN — active positions (UI «Лист»). CLOSED — для match'а UCB-
-        // derived UNMATCHED positions (которые DeBank ops создали но
-        // Krystal /positions?status=OPEN не вернул потому что они уже
-        // закрыты). MMaksimuk: 12 OPEN + 97 CLOSED → previously we missed
-        // 97 positions worth of authoritative data.
+        // PR-K26 (2026-05-27 urgent fix to PR-K25): SEQUENTIAL fetch OPEN
+        // then CLOSED (was Promise.all → reject whole batch on 429 → cache
+        // write skipped → ALL positions become UNMATCHED across all wallets).
+        // Throttle 400ms между OPEN/CLOSED калls для одного wallet — снижает
+        // вероятность Krystal rate-limit. Используем Promise.allSettled-like
+        // independent error handling: если CLOSED fails (e.g. 429), всё равно
+        // сохраняем OPEN.
+        let openPositions: KrystalPosition[] = [];
+        let closedPositions: KrystalPosition[] = [];
+        let walletHadAnyData = false;
+
         try {
-          const [openResult, closedResult] = await Promise.all([
-            fetchKrystalUniswapV3Positions(w, "OPEN", {
-              signal: controller.signal,
-            }),
-            fetchKrystalUniswapV3Positions(w, "CLOSED", {
-              signal: controller.signal,
-            }),
-          ]);
-          // Merge: deduplicate by tokenId (just in case — tokenId уникален
-          // в пределах NPM contract, OPEN/CLOSED не пересекаются).
+          const openResult = await fetchKrystalUniswapV3Positions(w, "OPEN", {
+            signal: controller.signal,
+          });
+          openPositions = openResult.data;
+          walletHadAnyData = true;
+          if (openResult.credits?.left != null) creditsLeft = openResult.credits.left;
+        } catch (e) {
+          if ((e as Error).name === "AbortError") return;
+          errors.push(`${w.slice(0, 6)}… OPEN: ${(e as Error).message}`);
+        }
+        await sleep(400);
+
+        try {
+          const closedResult = await fetchKrystalUniswapV3Positions(w, "CLOSED", {
+            signal: controller.signal,
+          });
+          closedPositions = closedResult.data;
+          walletHadAnyData = true;
+          if (closedResult.credits?.left != null) creditsLeft = closedResult.credits.left;
+        } catch (e) {
+          if ((e as Error).name === "AbortError") return;
+          // Soft fail — OPEN may have succeeded, ещё сохраним cache.
+          errors.push(`${w.slice(0, 6)}… CLOSED: ${(e as Error).message}`);
+        }
+
+        if (walletHadAnyData) {
+          // Merge: deduplicate by (chain.id, tokenAddress, tokenId).
           const seen = new Set<string>();
           const merged: KrystalPosition[] = [];
-          for (const pos of [...openResult.data, ...closedResult.data]) {
+          for (const pos of [...openPositions, ...closedPositions]) {
             const key = `${pos.chain?.id}-${pos.tokenAddress?.toLowerCase()}-${pos.tokenId}`;
             if (seen.has(key)) continue;
             seen.add(key);
@@ -109,12 +132,9 @@ export function useKrystalV3Positions(
           all.push(...merged);
           writeKrystalCache(w, merged);
           fetched++;
-          if (openResult.credits?.left != null) creditsLeft = openResult.credits.left;
-          else if (closedResult.credits?.left != null) creditsLeft = closedResult.credits.left;
-        } catch (e) {
-          if ((e as Error).name === "AbortError") return;
-          errors.push(`${w.slice(0, 6)}…: ${(e as Error).message}`);
         }
+        // Throttle между wallets — снижает burst load на Krystal.
+        await sleep(300);
       }
       if (cancelled) return;
       setState({
