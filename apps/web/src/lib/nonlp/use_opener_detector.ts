@@ -24,7 +24,9 @@ import {
   type NonLpOpener,
 } from "./opener_detector";
 
-const CACHE_KEY = "capflow.cache.nonlp.opener.v1";
+// v2: NonLpOpener расширен openedInTokens + startUsd (Stage 2a). v1 entries
+// без этих полей → bump чтобы refetch с OUT-side данными.
+const CACHE_KEY = "capflow.cache.nonlp.opener.v2";
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface NonLpOpenerTarget {

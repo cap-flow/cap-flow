@@ -53,13 +53,29 @@ function pos(args: {
   } as OpenPosition;
 }
 
-function opener(openedAt: number): NonLpOpener {
-  return { openedAt, openBlock: 23589271, txHash: "0x9de7baf4", receiptAmount: 0.00696635 };
+function opener(openedAt: number, startUsd: number | null = null): NonLpOpener {
+  return {
+    openedAt,
+    openBlock: 23589271,
+    txHash: "0x9de7baf4",
+    receiptAmount: 0.00696635,
+    openedInTokens: [],
+    startUsd,
+  };
 }
 
 /** Build opener Map keyed by stable key (chain=eth, RECEIPT, WALLET). */
 function openerMap(openedAt: number): Map<string, NonLpOpener> {
   return new Map([[nonLpOpenerKey("eth", RECEIPT, WALLET), opener(openedAt)]]);
+}
+
+function openerMapWithStart(
+  openedAt: number,
+  startUsd: number,
+): Map<string, NonLpOpener> {
+  return new Map([
+    [nonLpOpenerKey("eth", RECEIPT, WALLET), opener(openedAt, startUsd)],
+  ]);
 }
 
 describe("applyNonLpOpenerOverride", () => {
@@ -127,13 +143,38 @@ describe("applyNonLpOpenerOverride", () => {
     expect(p.feeAprLifetime).toBeCloseTo(5, 0);
   });
 
-  it("startUsd НЕ меняется (Stage 1 scope)", () => {
+  it("startUsd НЕ меняется когда opener.startUsd=null (Stage 1 path)", () => {
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-S", openedAt: null, startUsd: 522.74 })],
-      openerMap(OCT_2025),
+      openerMap(OCT_2025), // startUsd=null
       WALLET_MAP,
     );
     expect(out.positions[0]!.startUsd).toBe(522.74);
+  });
+
+  it("Stage 2a: opener.startUsd (OUT-side stable) → перетирает startUsd + PnL", () => {
+    // IPOR-like: position fallback startUsd=104.44 (=current), opener даёт
+    // реальные $100 из OUT-side USDC.
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-IPOR", openedAt: null, startUsd: 104.44 })],
+      openerMapWithStart(OCT_2025, 100),
+      WALLET_MAP,
+    );
+    const p = out.positions[0]!;
+    expect(p.startUsd).toBe(100);
+    expect(p.netStartUsd).toBe(100);
+    // currentUsd в pos() = 522.74 (default). netPnl = 522.74 − 100.
+    expect(p.netPnlUsd).toBeCloseTo(522.74 - 100, 2);
+    expect(p.netPnlPct).toBeCloseTo(((522.74 - 100) / 100) * 100, 1);
+  });
+
+  it("Stage 2a: opener.startUsd=0 → НЕ перетирает (защита от валидного нуля)", () => {
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-Z2", openedAt: null, startUsd: 50 })],
+      openerMapWithStart(OCT_2025, 0),
+      WALLET_MAP,
+    );
+    expect(out.positions[0]!.startUsd).toBe(50);
   });
 
   it("отклоняет невалидный timestamp (в будущем)", () => {

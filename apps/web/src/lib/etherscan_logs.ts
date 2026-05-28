@@ -275,7 +275,16 @@ export async function fetchEtherscanTokenTransfers(
 export async function fetchEtherscanWalletTokenTransfers(
   chainCode: string,
   walletAddress: string,
-): Promise<Array<EtherscanTokenTransfer & { from: string; to: string; contractAddress: string }>> {
+): Promise<
+  Array<
+    EtherscanTokenTransfer & {
+      from: string;
+      to: string;
+      contractAddress: string;
+      tokenSymbol: string;
+    }
+  >
+> {
   const chainId = CHAIN_TO_ID[chainCode.toLowerCase()];
   if (!chainId) throw new Error(`Etherscan: unknown chain ${chainCode}`);
 
@@ -307,6 +316,7 @@ export async function fetchEtherscanWalletTokenTransfers(
           contractAddress: string;
           value: string;
           tokenDecimal: string;
+          tokenSymbol: string;
         }>;
   };
   if (json.status !== "1") {
@@ -332,6 +342,7 @@ export async function fetchEtherscanWalletTokenTransfers(
     contractAddress: r.contractAddress.toLowerCase(),
     value: r.value,
     tokenDecimal: Number(r.tokenDecimal),
+    tokenSymbol: r.tokenSymbol ?? "",
   }));
 }
 

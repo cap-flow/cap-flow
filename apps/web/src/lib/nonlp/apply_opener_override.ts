@@ -62,32 +62,54 @@ export function applyNonLpOpenerOverride(
     if (!(opener.openedAt > 0) || opener.openedAt > nowSec) return p;
 
     const ageDays = round1(Math.max(0, (nowSec - opener.openedAt) / 86400));
-    // Пересчёт APR теперь когда есть ageDays. startUsd НЕ меняем (Stage 2).
-    const start = p.startUsd;
+
+    // Stage 2a: startUsd из OUT-side стейблов (opener.startUsd != null).
+    // Только если получили валидную сумму — иначе оставляем base.startUsd
+    // (current fallback / UCB). НЕ перетираем валидным нулём.
+    const newStartUsd =
+      opener.startUsd != null && opener.startUsd > 0
+        ? opener.startUsd
+        : p.startUsd;
+    const startUsdChanged = newStartUsd !== p.startUsd;
+
+    // APR считаем на актуальном startUsd + ageDays.
     const feeApr =
-      start > 0 && ageDays > 0 && p.feesUsd != null
-        ? (p.feesUsd / start) * (365 / ageDays) * 100
+      newStartUsd > 0 && ageDays > 0 && p.feesUsd != null
+        ? (p.feesUsd / newStartUsd) * (365 / ageDays) * 100
         : p.feeApr;
     const feeAprLifetime =
-      start > 0 && ageDays > 0
-        ? (p.feesLifetimeUsd / start) * (365 / ageDays) * 100
+      newStartUsd > 0 && ageDays > 0
+        ? (p.feesLifetimeUsd / newStartUsd) * (365 / ageDays) * 100
         : p.feeAprLifetime;
 
-    overriddenCount++;
-    warnings.push(
-      `[NonLP opener] ${p.id} (${p.protocol.name} ${p.chain}): openedAt → ` +
-        `${new Date(opener.openedAt * 1000).toISOString().slice(0, 10)} ` +
-        `(${ageDays}d, tx ${opener.txHash.slice(0, 10)}…)`,
-    );
-
-    return {
-      ...p,
+    // PnL пересчитываем только если startUsd реально поменялся (OUT-side
+    // дал точную cost basis). netPnl = currentUsd − startUsd.
+    const patch: Partial<OpenPosition> = {
       openedAt: opener.openedAt,
       openHash: p.openHash ?? opener.txHash,
       ageDays,
       feeApr,
       feeAprLifetime,
     };
+    if (startUsdChanged) {
+      patch.startUsd = newStartUsd;
+      patch.netStartUsd = newStartUsd;
+      patch.netPnlUsd = p.currentUsd - newStartUsd;
+      patch.netPnlPct =
+        newStartUsd > 0 ? ((p.currentUsd - newStartUsd) / newStartUsd) * 100 : 0;
+    }
+
+    overriddenCount++;
+    warnings.push(
+      `[NonLP opener] ${p.id} (${p.protocol.name} ${p.chain}): openedAt → ` +
+        `${new Date(opener.openedAt * 1000).toISOString().slice(0, 10)} ` +
+        `(${ageDays}d, tx ${opener.txHash.slice(0, 10)}…)` +
+        (startUsdChanged
+          ? ` · startUsd → $${newStartUsd.toFixed(2)} (OUT-side stable)`
+          : ""),
+    );
+
+    return { ...p, ...patch };
   });
 
   return { positions: out, overriddenCount, warnings };
