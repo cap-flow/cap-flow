@@ -4,30 +4,16 @@ import { z } from "zod";
 
 import type { AdminOperationsService } from "./admin-operations.service.js";
 
-const opTypeEnum = z.enum([
-  "buy",
-  "sell",
-  "swap",
-  "transfer",
-  "deposit",
-  "withdraw",
-  "fee",
-  "open",
-  "close",
-  "loan",
-  "loan_repay",
-  "loan_take",
-  "div",
-  "other",
-]);
-
 const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
 
 const listQuery = z.object({
   userId: z.string().uuid().optional(),
   accountId: z.string().uuid().optional(),
-  type: opTypeEnum.optional(),
-  network: z.string().max(60).optional(),
+  walletId: z.string().uuid().optional(),
+  // op_type / chain are free-form text (machine-classified), not a fixed enum.
+  type: z.string().max(60).optional(),
+  chain: z.string().max(60).optional(),
+  status: z.string().max(40).optional(),
   from: dateOnly.optional(),
   to: dateOnly.optional(),
   search: z.string().max(200).optional(),
@@ -35,25 +21,33 @@ const listQuery = z.object({
   offset: z.coerce.number().int().min(0).optional(),
 });
 
+const movementSchema = z.object({
+  symbol: z.string(),
+  amount: z.number(),
+  usd: z.number().nullable(),
+  direction: z.enum(["in", "out"]),
+});
+
 const operationRowSchema = z.object({
   id: z.string().uuid(),
+  walletId: z.string().uuid(),
+  walletName: z.string(),
   accountId: z.string().uuid(),
   accountName: z.string(),
   ownerId: z.string().uuid(),
   ownerEmail: z.string().nullable(),
   ownerName: z.string().nullable(),
-  date: z.string(),
-  type: opTypeEnum,
-  source: z.string(),
-  fromName: z.string().nullable(),
-  toName: z.string().nullable(),
-  cur1: z.string().nullable(),
-  amount1: z.string().nullable(),
-  cur2: z.string().nullable(),
-  amount2: z.string().nullable(),
-  priceUsd: z.string().nullable(),
-  network: z.string().nullable(),
-  comment: z.string(),
+  opTime: z.string().datetime(),
+  opType: z.string(),
+  chain: z.string(),
+  status: z.string(),
+  txHash: z.string(),
+  protocol: z.string().nullable(),
+  counterparty: z.string().nullable(),
+  netUsd: z.number().nullable(),
+  gasUsd: z.number().nullable(),
+  movements: z.array(movementSchema),
+  notes: z.array(z.string()),
   createdAt: z.string().datetime(),
 });
 
@@ -65,7 +59,8 @@ const listResponse = z.object({
 });
 
 const facetsResponse = z.object({
-  networks: z.array(z.string()),
+  chains: z.array(z.string()),
+  opTypes: z.array(z.string()),
 });
 
 interface AdminOperationsRoutesOptions {
@@ -87,8 +82,10 @@ export async function adminOperationsRoutes(
       const page = await opts.service.list({
         userId: q.userId,
         accountId: q.accountId,
-        type: q.type,
-        network: q.network,
+        walletId: q.walletId,
+        opType: q.type,
+        chain: q.chain,
+        status: q.status,
         from: q.from,
         to: q.to,
         search: q.search,

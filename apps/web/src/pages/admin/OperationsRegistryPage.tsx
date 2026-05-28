@@ -8,28 +8,15 @@ import {
   useAdminOperationFacets,
   useAdminOperations,
 } from "@/features/admin/operations/hooks";
-import type { AdminOperationsParams } from "@/features/admin/operations/api";
+import type {
+  AdminOperationMovement,
+  AdminOperationRow,
+  AdminOperationsParams,
+} from "@/features/admin/operations/api";
 
 import { PageHeader } from "./_PageHeader";
 
 const PAGE_SIZE = 100;
-
-const OP_TYPES = [
-  "buy",
-  "sell",
-  "swap",
-  "transfer",
-  "deposit",
-  "withdraw",
-  "fee",
-  "open",
-  "close",
-  "loan",
-  "loan_repay",
-  "loan_take",
-  "div",
-  "other",
-] as const;
 
 const selectClass =
   "h-10 rounded-md border border-border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
@@ -38,7 +25,7 @@ interface Filters {
   userId: string;
   accountId: string;
   type: string;
-  network: string;
+  chain: string;
   from: string;
   to: string;
   search: string;
@@ -48,7 +35,7 @@ const EMPTY_FILTERS: Filters = {
   userId: "",
   accountId: "",
   type: "",
-  network: "",
+  chain: "",
   from: "",
   to: "",
   search: "",
@@ -86,7 +73,7 @@ export function AdminOperationsRegistryPage(): JSX.Element {
     userId: filters.userId || undefined,
     accountId: filters.accountId || undefined,
     type: filters.type || undefined,
-    network: filters.network || undefined,
+    chain: filters.chain || undefined,
     from: filters.from || undefined,
     to: filters.to || undefined,
     search: filters.search || undefined,
@@ -111,7 +98,7 @@ export function AdminOperationsRegistryPage(): JSX.Element {
     <div>
       <PageHeader
         title="Реестр операций"
-        description="Единое окно: операции всех аккаунтов всех пользователей. Идентификация по владельцу, аккаунту и кошельку — без переключения между аккаунтами."
+        description="Единое окно: on-chain операции всех кошельков всех пользователей. Идентификация по владельцу, аккаунту и кошельку — без переключения между аккаунтами."
         actions={
           <Button
             variant="outline"
@@ -161,7 +148,7 @@ export function AdminOperationsRegistryPage(): JSX.Element {
           aria-label="Тип операции"
         >
           <option value="">Все типы</option>
-          {OP_TYPES.map((t) => (
+          {(facets.data?.opTypes ?? []).map((t) => (
             <option key={t} value={t}>
               {t}
             </option>
@@ -170,14 +157,14 @@ export function AdminOperationsRegistryPage(): JSX.Element {
 
         <select
           className={selectClass}
-          value={filters.network}
-          onChange={(e) => patch({ network: e.target.value })}
+          value={filters.chain}
+          onChange={(e) => patch({ chain: e.target.value })}
           aria-label="Сеть"
         >
           <option value="">Все сети</option>
-          {(facets.data?.networks ?? []).map((n) => (
-            <option key={n} value={n}>
-              {n}
+          {(facets.data?.chains ?? []).map((c) => (
+            <option key={c} value={c}>
+              {c}
             </option>
           ))}
         </select>
@@ -196,7 +183,7 @@ export function AdminOperationsRegistryPage(): JSX.Element {
         />
         <Input
           type="search"
-          placeholder="Поиск: кошелёк, токен, комментарий…"
+          placeholder="Поиск: кошелёк, токен, протокол, tx hash…"
           value={filters.search}
           onChange={(e) => patch({ search: e.target.value })}
           className="lg:col-span-2"
@@ -239,12 +226,12 @@ export function AdminOperationsRegistryPage(): JSX.Element {
               <th className="px-3 py-3 font-medium">Дата</th>
               <th className="px-3 py-3 font-medium">Владелец</th>
               <th className="px-3 py-3 font-medium">Аккаунт</th>
+              <th className="px-3 py-3 font-medium">Кошелёк</th>
               <th className="px-3 py-3 font-medium">Тип</th>
-              <th className="px-3 py-3 font-medium">Откуда → Куда</th>
-              <th className="px-3 py-3 font-medium text-right">Сумма 1</th>
-              <th className="px-3 py-3 font-medium text-right">Сумма 2</th>
+              <th className="px-3 py-3 font-medium">Движение</th>
+              <th className="px-3 py-3 font-medium text-right">USD</th>
               <th className="px-3 py-3 font-medium">Сеть</th>
-              <th className="px-3 py-3 font-medium">Источник</th>
+              <th className="px-3 py-3 font-medium">Протокол</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -259,43 +246,7 @@ export function AdminOperationsRegistryPage(): JSX.Element {
               </tr>
             )}
             {items.map((op) => (
-              <tr key={op.id} className="hover:bg-card/60">
-                <td className="whitespace-nowrap px-3 py-2.5 text-muted-foreground tabular-nums">
-                  {op.date}
-                </td>
-                <td className="px-3 py-2.5">
-                  <div className="text-foreground">{op.ownerName ?? "—"}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {op.ownerEmail ?? "—"}
-                  </div>
-                </td>
-                <td className="px-3 py-2.5 text-foreground">{op.accountName}</td>
-                <td className="px-3 py-2.5">
-                  <Badge variant="muted">{op.type}</Badge>
-                </td>
-                <td className="px-3 py-2.5 text-foreground">
-                  <span>{op.fromName ?? "—"}</span>
-                  <span className="text-muted-foreground"> → </span>
-                  <span>{op.toName ?? "—"}</span>
-                  {op.comment && (
-                    <div className="truncate text-xs text-muted-foreground max-w-[280px]">
-                      {op.comment}
-                    </div>
-                  )}
-                </td>
-                <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">
-                  {fmtAmount(op.amount1)} {op.cur1 ?? ""}
-                </td>
-                <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">
-                  {fmtAmount(op.amount2)} {op.cur2 ?? ""}
-                </td>
-                <td className="px-3 py-2.5 text-muted-foreground">
-                  {op.network ?? "—"}
-                </td>
-                <td className="px-3 py-2.5">
-                  <Badge variant="outline">{op.source}</Badge>
-                </td>
-              </tr>
+              <OperationRow key={op.id} op={op} />
             ))}
           </tbody>
         </table>
@@ -324,9 +275,93 @@ export function AdminOperationsRegistryPage(): JSX.Element {
   );
 }
 
-function fmtAmount(v: string | null): string {
-  if (v === null) return "—";
-  const n = Number(v);
-  if (Number.isNaN(n)) return v;
+function OperationRow({ op }: { readonly op: AdminOperationRow }): JSX.Element {
+  return (
+    <tr className="hover:bg-card/60">
+      <td className="whitespace-nowrap px-3 py-2.5 text-muted-foreground tabular-nums">
+        {fmtDate(op.opTime)}
+      </td>
+      <td className="px-3 py-2.5">
+        <div className="text-foreground">{op.ownerName ?? "—"}</div>
+        <div className="text-xs text-muted-foreground">
+          {op.ownerEmail ?? "—"}
+        </div>
+      </td>
+      <td className="px-3 py-2.5 text-foreground">{op.accountName}</td>
+      <td className="px-3 py-2.5 text-foreground">{op.walletName}</td>
+      <td className="px-3 py-2.5">
+        <Badge variant="muted">{op.opType}</Badge>
+        {op.status !== "ok" && (
+          <Badge variant="outline" className="ml-1 text-destructive">
+            {op.status}
+          </Badge>
+        )}
+      </td>
+      <td className="px-3 py-2.5">
+        <div className="flex flex-col gap-0.5">
+          {op.movements.length === 0 && (
+            <span className="text-muted-foreground">—</span>
+          )}
+          {op.movements.map((m, i) => (
+            <Movement key={i} m={m} />
+          ))}
+          {op.notes.length > 0 && (
+            <div className="truncate text-xs text-muted-foreground max-w-[280px]">
+              {op.notes.join(" · ")}
+            </div>
+          )}
+        </div>
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">
+        {fmtUsd(op.netUsd)}
+      </td>
+      <td className="px-3 py-2.5 text-muted-foreground">{op.chain}</td>
+      <td className="px-3 py-2.5">
+        {op.protocol ? (
+          <Badge variant="outline">{op.protocol}</Badge>
+        ) : (
+          <span className="text-muted-foreground">on-chain</span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function Movement({ m }: { readonly m: AdminOperationMovement }): JSX.Element {
+  const sign = m.direction === "out" ? "−" : "+";
+  const color =
+    m.direction === "out" ? "text-destructive" : "text-emerald-500";
+  return (
+    <span className="whitespace-nowrap tabular-nums">
+      <span className={color}>
+        {sign}
+        {fmtAmount(m.amount)}
+      </span>{" "}
+      <span className="text-foreground">{m.symbol}</span>
+    </span>
+  );
+}
+
+function fmtDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("ru-RU", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
+function fmtAmount(n: number): string {
+  if (!Number.isFinite(n)) return "—";
   return n.toLocaleString("ru-RU", { maximumFractionDigits: 8 });
+}
+
+function fmtUsd(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return "—";
+  return v.toLocaleString("ru-RU", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  });
 }
