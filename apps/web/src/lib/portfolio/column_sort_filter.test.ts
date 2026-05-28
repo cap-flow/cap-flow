@@ -149,9 +149,9 @@ describe("applyColumnSortFilter — value-фильтр", () => {
     expect(ids(out)).toEqual(["POS-1"]);
   });
 
-  it("пустой фильтр [] → не проходит ни одна строка", () => {
+  it("пустой фильтр [] → НЕ активен (все проходят, таблица не опустошается)", () => {
     const out = applyColumnSortFilter(data, { sortCol: null, sortDir: "desc", valueFilters: { chain: [] } }, CTX);
-    expect(out).toHaveLength(0);
+    expect(ids(out)).toEqual(["POS-1", "POS-2", "POS-3"]);
   });
 
   it("несколько столбцов = AND между столбцами", () => {
@@ -166,6 +166,49 @@ describe("applyColumnSortFilter — value-фильтр", () => {
   it("отсутствие ключа = фильтр не активен", () => {
     const out = applyColumnSortFilter(data, { sortCol: null, sortDir: "desc", valueFilters: {} }, CTX);
     expect(ids(out)).toEqual(["POS-1", "POS-2", "POS-3"]);
+  });
+});
+
+describe("applyColumnSortFilter — range-фильтр (числа/даты)", () => {
+  const data = [
+    pos({ id: "POS-1", currentUsd: 50 }),
+    pos({ id: "POS-2", currentUsd: 300 }),
+    pos({ id: "POS-3", currentUsd: 100 }),
+  ];
+
+  it("min: только ≥ порога", () => {
+    const out = applyColumnSortFilter(data, { sortCol: null, sortDir: "desc", valueFilters: {}, rangeFilters: { currentUsd: { min: 100, max: null } } }, CTX);
+    expect(ids(out).sort()).toEqual(["POS-2", "POS-3"]);
+  });
+
+  it("max: только ≤ порога", () => {
+    const out = applyColumnSortFilter(data, { sortCol: null, sortDir: "desc", valueFilters: {}, rangeFilters: { currentUsd: { min: null, max: 100 } } }, CTX);
+    expect(ids(out).sort()).toEqual(["POS-1", "POS-3"]);
+  });
+
+  it("min+max: внутри диапазона включительно", () => {
+    const out = applyColumnSortFilter(data, { sortCol: null, sortDir: "desc", valueFilters: {}, rangeFilters: { currentUsd: { min: 100, max: 100 } } }, CTX);
+    expect(ids(out)).toEqual(["POS-3"]);
+  });
+
+  it("даты от/до по openedAt (unix sec)", () => {
+    const d = [
+      pos({ id: "POS-1", openedAt: 1_700_000_000 }),
+      pos({ id: "POS-2", openedAt: 1_750_000_000 }),
+      pos({ id: "POS-3", openedAt: null }),
+    ];
+    const out = applyColumnSortFilter(d, { sortCol: null, sortDir: "desc", valueFilters: {}, rangeFilters: { openedAt: { min: 1_710_000_000, max: 1_760_000_000 } } }, CTX);
+    expect(ids(out)).toEqual(["POS-2"]); // POS-1 раньше min, POS-3 без даты — исключены
+  });
+
+  it("range с обоими null = не активен", () => {
+    const out = applyColumnSortFilter(data, { sortCol: null, sortDir: "desc", valueFilters: {}, rangeFilters: { currentUsd: { min: null, max: null } } }, CTX);
+    expect(ids(out)).toEqual(["POS-1", "POS-2", "POS-3"]);
+  });
+
+  it("range без поля rangeFilters (legacy state) не падает", () => {
+    const out = applyColumnSortFilter(data, { sortCol: "currentUsd", sortDir: "asc", valueFilters: {} }, CTX);
+    expect(ids(out)).toEqual(["POS-1", "POS-3", "POS-2"]);
   });
 });
 
