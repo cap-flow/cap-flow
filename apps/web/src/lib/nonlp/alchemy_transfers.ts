@@ -44,9 +44,11 @@ async function alchemyRpc(
 ): Promise<unknown> {
   const sub = CHAIN_TO_SUBDOMAIN[chainCode.toLowerCase()];
   if (!sub) throw new Error(`Alchemy: unknown chain ${chainCode}`);
+  // apiFetch сам делает JSON.stringify(opts.body) — передаём СЫРОЙ объект,
+  // иначе double-stringify → proxy получит строку вместо JSON-RPC объекта.
   const res = await apiFetch(`/v1/upstream/alchemy/${sub}`, {
     method: "POST",
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    body: { jsonrpc: "2.0", id: 1, method, params },
   });
   if (!res.ok) {
     throw new Error(`Alchemy HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`);
