@@ -92,11 +92,36 @@ describe("applyNonLpOpenerOverride", () => {
     expect(out.positions[0]!.openHash).toBe("0x9de7baf4");
   });
 
-  it("НЕ перетирает существующую дату (guard)", () => {
-    const existing = 1700000000;
+  it("перетирает дату когда detector ПОЗЖЕ >1д (Pendle DeBank-конфляция)", () => {
+    // DeBank навесил раннюю дату (2023), но on-chain receipt-токен впервые
+    // появился позже (OCT_2025) → on-chain дата authoritative, перетираем.
+    const existing = 1700000000; // 2023
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-X", openedAt: existing })],
       openerMap(OCT_2025),
+      WALLET_MAP,
+    );
+    expect(out.overriddenCount).toBe(1);
+    expect(out.positions[0]!.openedAt).toBe(OCT_2025);
+    expect(out.positions[0]!.openHash).toBe("0x9de7baf4");
+  });
+
+  it("НЕ перетирает когда detector РАНЬШЕ существующей (re-open guard)", () => {
+    const existing = NOW - 10 * 86400; // позиция открыта 10 дней назад
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-RO", openedAt: existing })],
+      openerMap(NOW - 400 * 86400), // старый mint receipt'а (раньше)
+      WALLET_MAP,
+    );
+    expect(out.overriddenCount).toBe(0);
+    expect(out.positions[0]!.openedAt).toBe(existing);
+  });
+
+  it("НЕ перетирает когда detector в пределах 1 дня (тот же день)", () => {
+    const existing = OCT_2025;
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-SD", openedAt: existing })],
+      openerMap(OCT_2025 + 3600), // +1 час
       WALLET_MAP,
     );
     expect(out.overriddenCount).toBe(0);
@@ -221,8 +246,8 @@ describe("applyNonLpOpenerOverride", () => {
   });
 
   it("Stage 2c: startUsd+openedInTokens перетираются даже когда дата УЖЕ есть (GLV)", () => {
-    // GMX V2 GLV: UCB дал дату + wrong startUsd $42.57. OUT-side даёт $1000.
-    const existing = 1700000000;
+    // UCB дал дату (тот же день) + wrong startUsd $42.57. OUT-side даёт $1000.
+    const existing = OCT_2025; // совпадает с opener → дата не перетирается
     const op: NonLpOpener = {
       openedAt: OCT_2025,
       openBlock: 1,
@@ -266,8 +291,8 @@ describe("applyNonLpOpenerOverride", () => {
     expect(p.startUsd).toBe(522.74); // startUsd НЕ тронут (volatile → null)
   });
 
-  it("Stage 2c: дата есть + opener без OUT-side → no-op", () => {
-    const existing = 1700000000;
+  it("Stage 2c: дата есть (тот же день) + opener без OUT-side → no-op", () => {
+    const existing = OCT_2025; // совпадает с opener → дата не перетирается
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-NOOP", openedAt: existing, startUsd: 50 })],
       openerMap(OCT_2025), // startUsd null, openedInTokens []
@@ -297,7 +322,7 @@ describe("applyNonLpOpenerOverride", () => {
   });
 
   it("GMX с уже существующей датой (DeBank-op, egorovfinance) → НЕ flagged", () => {
-    const existing = 1700000000;
+    const existing = OCT_2025; // совпадает с opener → дата не перетирается
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-GM", openedAt: existing, protoName: "GMX V2", startUsd: 275.03 })],
       openerMap(OCT_2025),
