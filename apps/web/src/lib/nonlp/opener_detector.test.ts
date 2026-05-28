@@ -233,4 +233,51 @@ describe("Stage 2: OUT-side startUsd in resolveOpenersFromTransfers", () => {
     expect(out.get(VAULT)!.openedInTokens).toHaveLength(0);
     expect(out.get(VAULT)!.startUsd).toBeNull();
   });
+
+  it("Stage 2c: multi-deposit — суммирует OUT-side по нескольким deposit-tx", () => {
+    const transfers = [
+      // deposit 1: 100 USDC out + receipt mint в той же tx
+      tx({ hash: "0xd1", timeStamp: 1, from: WALLET, to: "0xvault", contractAddress: USDC, value: "100000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xd1", timeStamp: 1, from: "0x0000000000000000000000000000000000000000", to: WALLET, contractAddress: VAULT, value: "1", tokenDecimal: 0, tokenSymbol: "v" }),
+      // deposit 2: 50 USDC out + receipt mint
+      tx({ hash: "0xd2", timeStamp: 2, from: WALLET, to: "0xvault", contractAddress: USDC, value: "50000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xd2", timeStamp: 2, from: "0x0000000000000000000000000000000000000000", to: WALLET, contractAddress: VAULT, value: "1", tokenDecimal: 0, tokenSymbol: "v" }),
+    ];
+    const out = resolveOpenersFromTransfers(transfers, [VAULT], WALLET);
+    const op = out.get(VAULT)!;
+    expect(op.startUsd).toBe(150); // 100 + 50
+    expect(op.openedInTokens).toHaveLength(1);
+    expect(op.openedInTokens[0]!.amount).toBe(150);
+  });
+
+  it("Stage 2c: withdraw-tx (receipt OUT) НЕ считается депозитом", () => {
+    const transfers = [
+      // deposit: 100 USDC out + receipt mint
+      tx({ hash: "0xd", timeStamp: 1, from: WALLET, to: "0xvault", contractAddress: USDC, value: "100000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xd", timeStamp: 1, from: "0x0000000000000000000000000000000000000000", to: WALLET, contractAddress: VAULT, value: "1", tokenDecimal: 0, tokenSymbol: "v" }),
+      // withdraw: receipt OUT (from wallet, contract==VAULT) + USDC возврат
+      tx({ hash: "0xw", timeStamp: 2, from: WALLET, to: "0xvault", contractAddress: VAULT, value: "1", tokenDecimal: 0, tokenSymbol: "v" }),
+      tx({ hash: "0xw", timeStamp: 2, from: "0xvault", to: WALLET, contractAddress: USDC, value: "40000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+    ];
+    const out = resolveOpenersFromTransfers(transfers, [VAULT], WALLET);
+    expect(out.get(VAULT)!.startUsd).toBe(100); // только депозит, без withdraw
+  });
+
+  it("Stage 2c: Alchemy path тоже суммирует multi-deposit OUT-side", () => {
+    const atx = (p: Partial<AlchemyTransfer>): AlchemyTransfer => ({
+      blockNumber: 100, hash: "0xa", from: WALLET, to: "0xother",
+      contractAddress: "0xtoken", amount: 0, symbol: "TKN", ...p,
+    });
+    const out = resolveOpenerBlocksFromAlchemy(
+      [
+        atx({ blockNumber: 10, hash: "0xd1", to: STAKING, contractAddress: USDC, amount: 200, symbol: "USDC" }),
+        atx({ blockNumber: 20, hash: "0xd2", to: STAKING, contractAddress: USDC, amount: 100, symbol: "USDC" }),
+      ],
+      [STAKING],
+      WALLET,
+    );
+    const r = out.get(STAKING)!;
+    expect(r.openedInTokens).toHaveLength(1);
+    expect(r.openedInTokens[0]!.amount).toBe(300); // 200 + 100
+  });
 });

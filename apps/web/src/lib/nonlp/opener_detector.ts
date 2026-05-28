@@ -131,19 +131,49 @@ type WalletTransfer = {
 };
 
 /**
- * Stage 2: OUT-side из opener tx — все transfers с тем же hash где
- * from==wallet (юзер ОТДАЛ токен = депозит). Aggregate по contract+symbol.
- * Если OUT не в той же tx (Safe-internal) — пусто.
+ * Stage 2c: deposit-tx = транзакция, в которой позиция ПОПОЛНЯЛАСЬ
+ * (receipt пришёл на wallet ИЛИ токен ушёл В контракт). Reward-claim'ы и
+ * withdraw'ы (receipt OUT / возврат из контракта) — НЕ депозиты.
+ *
+ *   deposit:  contract==lp && to==wallet   (receipt заминчен на wallet)
+ *          || to==lp && from==wallet       (токен отправлен в контракт)
+ *
+ * Возвращает Set hash'ей всех deposit-tx для этого lpTokenId.
+ */
+function collectDepositHashes(
+  transfers: readonly WalletTransfer[],
+  lp: string,
+  walletLower: string,
+): Set<string> {
+  const hashes = new Set<string>();
+  for (const t of transfers) {
+    const isDeposit =
+      (t.contractAddress === lp && t.to === walletLower) ||
+      (t.to === lp && t.from === walletLower);
+    if (isDeposit) hashes.add(t.hash);
+  }
+  return hashes;
+}
+
+/**
+ * Stage 2c: OUT-side по ВСЕМ deposit-tx (multi-deposit) — все transfers где
+ * from==wallet в любой deposit-tx (юзер ОТДАЛ underlying). Aggregate по
+ * contract+symbol. Receipt-токен (contract==lp) исключаем — он не «потрачен».
+ * Если OUT не в deposit-tx (Safe-internal) — пусто.
+ *
+ * Многократные депозиты в один vault суммируются → startUsd = всё внесённое.
  */
 function extractOpenedInTokens(
   transfers: readonly WalletTransfer[],
-  openerHash: string,
+  depositHashes: ReadonlySet<string>,
   walletLower: string,
+  lp: string,
 ): OpenedInToken[] {
   const bySym = new Map<string, OpenedInToken>();
   for (const t of transfers) {
-    if (t.hash !== openerHash) continue;
+    if (!depositHashes.has(t.hash)) continue;
     if (t.from !== walletLower) continue; // OUT only
+    if (t.contractAddress === lp) continue; // receipt-токен не «потрачен»
     const amount = Number(t.value) / 10 ** t.tokenDecimal;
     if (!(amount > 0)) continue;
     const key = t.contractAddress;
@@ -173,7 +203,13 @@ export function resolveOpenersFromTransfers(
       (t) => t.to === lp || t.from === lp || t.contractAddress === lp,
     );
     if (!hit) continue;
-    const openedInTokens = extractOpenedInTokens(sorted, hit.hash, walletLower);
+    const depositHashes = collectDepositHashes(sorted, lp, walletLower);
+    const openedInTokens = extractOpenedInTokens(
+      sorted,
+      depositHashes,
+      walletLower,
+      lp,
+    );
     out.set(lp, {
       openedAt: hit.timeStamp,
       openBlock: hit.blockNumber,
@@ -208,10 +244,18 @@ export function resolveOpenerBlocksFromAlchemy(
       (t) => t.to === lp || t.from === lp || t.contractAddress === lp,
     );
     if (!hit) continue;
-    // OUT-side: same-tx transfers где from==wallet (потрачено).
+    // Stage 2c: OUT-side по ВСЕМ deposit-tx (multi-deposit), не только opener.
+    const depositHashes = new Set<string>();
+    for (const t of sorted) {
+      const isDeposit =
+        (t.contractAddress === lp && t.to === walletLower) ||
+        (t.to === lp && t.from === walletLower);
+      if (isDeposit) depositHashes.add(t.hash);
+    }
     const bySym = new Map<string, OpenedInToken>();
     for (const t of sorted) {
-      if (t.hash !== hit.hash || t.from !== walletLower) continue;
+      if (!depositHashes.has(t.hash) || t.from !== walletLower) continue;
+      if (t.contractAddress === lp) continue; // receipt-токен не «потрачен»
       if (!(t.amount > 0)) continue;
       const prev = bySym.get(t.contractAddress);
       if (prev) prev.amount += t.amount;

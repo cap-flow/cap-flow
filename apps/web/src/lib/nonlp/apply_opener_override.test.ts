@@ -8,6 +8,7 @@ import { nonLpOpenerKey } from "./use_opener_detector";
 const NOW = Date.now() / 1000;
 const OCT_2025 = 1760606147; // 16.10.2025 (Lombard real date)
 const RECEIPT = "0x5401b8620e5fb570064ca9114fd1e135fd77d57c";
+const USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
 const WALLET = "0x10b850c3abfca78d693c9cd6fce809c129109d1c";
 const WALLET_MAP = new Map([["w1", WALLET]]);
 
@@ -217,6 +218,64 @@ describe("applyNonLpOpenerOverride", () => {
     const out = applyNonLpOpenerOverride(positions, new Map(), WALLET_MAP);
     expect(out.overriddenCount).toBe(0);
     expect(out.positions).toEqual(positions);
+  });
+
+  it("Stage 2c: startUsd+openedInTokens перетираются даже когда дата УЖЕ есть (GLV)", () => {
+    // GMX V2 GLV: UCB дал дату + wrong startUsd $42.57. OUT-side даёт $1000.
+    const existing = 1700000000;
+    const op: NonLpOpener = {
+      openedAt: OCT_2025,
+      openBlock: 1,
+      txHash: "0xglv",
+      receiptAmount: 1,
+      openedInTokens: [{ address: USDC, symbol: "USDC", amount: 1000 }],
+      startUsd: 1000,
+    };
+    const map = new Map([[nonLpOpenerKey("eth", RECEIPT, WALLET), op]]);
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-GLV", openedAt: existing, startUsd: 42.57 })],
+      map,
+      WALLET_MAP,
+    );
+    const p = out.positions[0]!;
+    expect(out.overriddenCount).toBe(1);
+    expect(p.openedAt).toBe(existing); // дата НЕ перетёрта
+    expect(p.startUsd).toBe(1000); // startUsd перетёрт OUT-side
+    expect(p.netStartUsd).toBe(1000);
+    expect(p.openedInTokens).toHaveLength(1);
+    expect(p.openedInTokens[0]!.symbol).toBe("USDC");
+  });
+
+  it("Stage 2c: openedInTokens перетираются даже когда startUsd=null (volatile OUT)", () => {
+    const op: NonLpOpener = {
+      openedAt: OCT_2025,
+      openBlock: 1,
+      txHash: "0xv",
+      receiptAmount: 1,
+      openedInTokens: [{ address: "0xweth", symbol: "WETH", amount: 0.5 }],
+      startUsd: null,
+    };
+    const map = new Map([[nonLpOpenerKey("eth", RECEIPT, WALLET), op]]);
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-W", openedAt: null, startUsd: 522.74 })],
+      map,
+      WALLET_MAP,
+    );
+    const p = out.positions[0]!;
+    expect(p.openedInTokens.map((t) => t.symbol)).toEqual(["WETH"]);
+    expect(p.startUsd).toBe(522.74); // startUsd НЕ тронут (volatile → null)
+  });
+
+  it("Stage 2c: дата есть + opener без OUT-side → no-op", () => {
+    const existing = 1700000000;
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-NOOP", openedAt: existing, startUsd: 50 })],
+      openerMap(OCT_2025), // startUsd null, openedInTokens []
+      WALLET_MAP,
+    );
+    expect(out.overriddenCount).toBe(0);
+    expect(out.positions[0]!.openedAt).toBe(existing);
+    expect(out.positions[0]!.startUsd).toBe(50);
   });
 
   it("ageDays округляется до 0.1", () => {
