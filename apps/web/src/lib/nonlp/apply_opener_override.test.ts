@@ -3,9 +3,13 @@ import { describe, expect, it } from "vitest";
 import type { OpenPosition } from "../portfolio/open_positions";
 import type { NonLpOpener } from "./opener_detector";
 import { applyNonLpOpenerOverride } from "./apply_opener_override";
+import { nonLpOpenerKey } from "./use_opener_detector";
 
 const NOW = Date.now() / 1000;
 const OCT_2025 = 1760606147; // 16.10.2025 (Lombard real date)
+const RECEIPT = "0x5401b8620e5fb570064ca9114fd1e135fd77d57c";
+const WALLET = "0x10b850c3abfca78d693c9cd6fce809c129109d1c";
+const WALLET_MAP = new Map([["w1", WALLET]]);
 
 function pos(args: {
   id: string;
@@ -14,6 +18,7 @@ function pos(args: {
   startUsd?: number;
   feesUsd?: number | null;
   feesLifetimeUsd?: number;
+  lpTokenId?: string | null;
 }): OpenPosition {
   return {
     id: args.id,
@@ -44,6 +49,7 @@ function pos(args: {
     feesClaimedHistory: [],
     feesByToken: [],
     creditFundedUsd: 0,
+    ...(args.lpTokenId === null ? {} : { lpTokenId: args.lpTokenId ?? RECEIPT }),
   } as OpenPosition;
 }
 
@@ -51,11 +57,17 @@ function opener(openedAt: number): NonLpOpener {
   return { openedAt, openBlock: 23589271, txHash: "0x9de7baf4", receiptAmount: 0.00696635 };
 }
 
+/** Build opener Map keyed by stable key (chain=eth, RECEIPT, WALLET). */
+function openerMap(openedAt: number): Map<string, NonLpOpener> {
+  return new Map([[nonLpOpenerKey("eth", RECEIPT, WALLET), opener(openedAt)]]);
+}
+
 describe("applyNonLpOpenerOverride", () => {
   it("проставляет openedAt + ageDays для позиции без даты", () => {
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-017", openedAt: null })],
-      new Map([["POS-017", opener(OCT_2025)]]),
+      openerMap(OCT_2025),
+      WALLET_MAP,
     );
     expect(out.overriddenCount).toBe(1);
     expect(out.positions[0]!.openedAt).toBe(OCT_2025);
@@ -67,7 +79,8 @@ describe("applyNonLpOpenerOverride", () => {
     const existing = 1700000000;
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-X", openedAt: existing })],
-      new Map([["POS-X", opener(OCT_2025)]]),
+      openerMap(OCT_2025),
+      WALLET_MAP,
     );
     expect(out.overriddenCount).toBe(0);
     expect(out.positions[0]!.openedAt).toBe(existing);
@@ -76,16 +89,37 @@ describe("applyNonLpOpenerOverride", () => {
   it("НЕ трогает V3 LP позиции (guard — у них Krystal источник)", () => {
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-V3", openedAt: null, protoName: "Uniswap V3" })],
-      new Map([["POS-V3", opener(OCT_2025)]]),
+      openerMap(OCT_2025),
+      WALLET_MAP,
     );
     expect(out.overriddenCount).toBe(0);
     expect(out.positions[0]!.openedAt).toBeNull();
   });
 
+  it("НЕ трогает позицию без lpTokenId (нечем построить ключ)", () => {
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-NL", openedAt: null, lpTokenId: null })],
+      openerMap(OCT_2025),
+      WALLET_MAP,
+    );
+    expect(out.overriddenCount).toBe(0);
+    expect(out.positions[0]!.openedAt).toBeNull();
+  });
+
+  it("НЕ трогает если wallet не в walletAddressById", () => {
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-NW", openedAt: null })],
+      openerMap(OCT_2025),
+      new Map(), // пустой wallet map
+    );
+    expect(out.overriddenCount).toBe(0);
+  });
+
   it("пересчитывает feeApr когда появился ageDays", () => {
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-F", openedAt: null, startUsd: 1000, feesUsd: 50, feesLifetimeUsd: 50 })],
-      new Map([["POS-F", opener(NOW - 365 * 86400)]]), // ровно 1 год назад
+      openerMap(NOW - 365 * 86400), // ровно 1 год назад
+      WALLET_MAP,
     );
     const p = out.positions[0]!;
     // feeApr = 50/1000 × 365/365 × 100 = 5%
@@ -96,7 +130,8 @@ describe("applyNonLpOpenerOverride", () => {
   it("startUsd НЕ меняется (Stage 1 scope)", () => {
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-S", openedAt: null, startUsd: 522.74 })],
-      new Map([["POS-S", opener(OCT_2025)]]),
+      openerMap(OCT_2025),
+      WALLET_MAP,
     );
     expect(out.positions[0]!.startUsd).toBe(522.74);
   });
@@ -105,7 +140,8 @@ describe("applyNonLpOpenerOverride", () => {
     const future = NOW + 86400 * 30;
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-FUT", openedAt: null })],
-      new Map([["POS-FUT", opener(future)]]),
+      openerMap(future),
+      WALLET_MAP,
     );
     expect(out.overriddenCount).toBe(0);
     expect(out.positions[0]!.openedAt).toBeNull();
@@ -114,15 +150,21 @@ describe("applyNonLpOpenerOverride", () => {
   it("отклоняет openedAt = 0", () => {
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-Z", openedAt: null })],
-      new Map([["POS-Z", opener(0)]]),
+      openerMap(0),
+      WALLET_MAP,
     );
     expect(out.overriddenCount).toBe(0);
   });
 
   it("позиция без opener в Map не трогается", () => {
+    // POS-A имеет дефолтный receipt (в Map), POS-B — другой receipt (нет в Map)
     const out = applyNonLpOpenerOverride(
-      [pos({ id: "POS-A", openedAt: null }), pos({ id: "POS-B", openedAt: null })],
-      new Map([["POS-A", opener(OCT_2025)]]),
+      [
+        pos({ id: "POS-A", openedAt: null }),
+        pos({ id: "POS-B", openedAt: null, lpTokenId: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }),
+      ],
+      openerMap(OCT_2025),
+      WALLET_MAP,
     );
     expect(out.overriddenCount).toBe(1);
     expect(out.positions[0]!.openedAt).toBe(OCT_2025);
@@ -131,7 +173,7 @@ describe("applyNonLpOpenerOverride", () => {
 
   it("пустой opener Map → no-op", () => {
     const positions = [pos({ id: "POS-A", openedAt: null })];
-    const out = applyNonLpOpenerOverride(positions, new Map());
+    const out = applyNonLpOpenerOverride(positions, new Map(), WALLET_MAP);
     expect(out.overriddenCount).toBe(0);
     expect(out.positions).toEqual(positions);
   });
@@ -139,7 +181,8 @@ describe("applyNonLpOpenerOverride", () => {
   it("ageDays округляется до 0.1", () => {
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-R", openedAt: null })],
-      new Map([["POS-R", opener(NOW - 100.567 * 86400)]]),
+      openerMap(NOW - 100.567 * 86400),
+      WALLET_MAP,
     );
     const age = out.positions[0]!.ageDays!;
     expect(age).toBe(Math.round(age * 10) / 10);

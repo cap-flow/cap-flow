@@ -16,6 +16,7 @@
 import type { OpenPosition } from "../portfolio/open_positions";
 import { isV3LpProtocol } from "../portfolio/open_positions";
 import type { NonLpOpener } from "./opener_detector";
+import { nonLpOpenerKey } from "./use_opener_detector";
 
 export interface OpenerOverrideResult {
   positions: OpenPosition[];
@@ -27,11 +28,17 @@ function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
+/**
+ * @param openerByKey — Map keyed by `${chain}|${receiptToken}|${wallet}`
+ *   (стабильный ключ, не positionId — POS-NNN переномеровываются).
+ * @param walletAddressById — для построения ключа из OpenPosition.
+ */
 export function applyNonLpOpenerOverride(
   positions: readonly OpenPosition[],
-  openerByPositionId: ReadonlyMap<string, NonLpOpener>,
+  openerByKey: ReadonlyMap<string, NonLpOpener>,
+  walletAddressById: ReadonlyMap<string, string>,
 ): OpenerOverrideResult {
-  if (openerByPositionId.size === 0) {
+  if (openerByKey.size === 0) {
     return { positions: positions.slice(), overriddenCount: 0, warnings: [] };
   }
   const nowSec = Date.now() / 1000;
@@ -43,9 +50,15 @@ export function applyNonLpOpenerOverride(
     if (p.openedAt != null) return p;
     // Guard 2: не трогаем V3 LP (у них свой источник — Krystal)
     if (isV3LpProtocol(p.protocol.name)) return p;
-    const opener = openerByPositionId.get(p.id);
+    // Guard 3: нужен receipt token + wallet для ключа
+    if (!p.lpTokenId) return p;
+    const wallet = walletAddressById.get(p.walletId);
+    if (!wallet) return p;
+    const opener = openerByKey.get(
+      nonLpOpenerKey(p.chain, p.lpTokenId, wallet),
+    );
     if (!opener) return p;
-    // Guard 3: sane timestamp
+    // Guard 4: sane timestamp
     if (!(opener.openedAt > 0) || opener.openedAt > nowSec) return p;
 
     const ageDays = round1(Math.max(0, (nowSec - opener.openedAt) / 86400));
