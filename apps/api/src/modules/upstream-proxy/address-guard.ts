@@ -236,10 +236,23 @@ function extractAlchemy(
     const c = call as Record<string, unknown>;
     const params = c.params;
     if (params === undefined) return;
+    const method = typeof c.method === "string" ? c.method.toLowerCase() : "";
     // Most account-RPCs: params is an array, first element is the addr.
     if (Array.isArray(params)) {
       // `params[0]` may be string (addr) OR object (filter w/ from/to).
-      walkParamElement(params[0], `body${idx}.params[0]`, out, invalid);
+      //
+      // 2026-05-28 (Stage 1b avax fix): для block/tx-query методов params[0]
+      // — это block tag / block hash / tx hash, НЕ user address. Слепая
+      // проверка params[0] как адреса флагала `eth_getBlockByNumber(0x43325f2)`
+      // как "Malformed address" (короткий hex ≠ 40-char addr) → 400. Для
+      // string-params[0] проверяем адрес ТОЛЬКО если метод реально кладёт
+      // user-address в params[0]. Object-params[0] (eth_call, getAssetTransfers)
+      // всегда walk'аем — там from/to/fromAddress keys (safe).
+      const firstIsObject =
+        params[0] !== null && typeof params[0] === "object";
+      if (firstIsObject || method === "" || ADDRESS_FIRST_PARAM_METHODS.has(method)) {
+        walkParamElement(params[0], `body${idx}.params[0]`, out, invalid);
+      }
       // params[1+] для standard read-methods (`eth_call`, `eth_getBalance`,
       // `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount`) — это
       // **block tag** (типа "latest" или hex block number "0x17de95d"), не
@@ -267,6 +280,25 @@ function extractAlchemy(
     handleRpcCall(req.body, "");
   }
 }
+
+// JSON-RPC методы где `params[0]` — это bare user-address STRING (а не block
+// tag / tx hash / block hash). ТОЛЬКО для них проверяем string-params[0] как
+// адрес. Для block/tx-query методов (eth_getBlockByNumber, eth_getBlockByHash,
+// eth_getTransactionByHash, eth_getTransactionReceipt, eth_getBlockReceipts,
+// eth_getBlockTransactionCountByNumber, ...) params[0] — НЕ адрес, и слепая
+// проверка давала ложный 400 "Malformed address" на block hex (Stage 1b avax).
+// Object-params[0] (eth_call, alchemy_getAssetTransfers) проверяются всегда
+// через walkParamElement (там from/to/fromAddress ключи).
+const ADDRESS_FIRST_PARAM_METHODS = new Set([
+  "eth_getbalance",
+  "eth_getcode",
+  "eth_getstorageat",
+  "eth_gettransactioncount",
+  "eth_getproof",
+  "alchemy_gettokenbalances",
+  "alchemy_gettokenallowance",
+  "alchemy_gettokenmetadata",
+]);
 
 const ADDR_PARAM_KEYS = new Set([
   "address",
