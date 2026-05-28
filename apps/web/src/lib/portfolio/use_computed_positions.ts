@@ -479,7 +479,17 @@ export function useComputedPositions(): ComputedPositions {
     // используя Etherscan-detected дату первого receipt transfer. Guards
     // внутри: только openedAt==null, только non-V3-LP. startUsd НЕ трогаем.
     if (nonLpOpener.data.size > 0) {
-      const openerResult = applyNonLpOpenerOverride(working, nonLpOpener.data);
+      const walletAddressById = new Map<string, string>();
+      for (const l of loadedList) {
+        if (l.wallet.chain === "evm") {
+          walletAddressById.set(l.wallet.id, l.wallet.address);
+        }
+      }
+      const openerResult = applyNonLpOpenerOverride(
+        working,
+        nonLpOpener.data,
+        walletAddressById,
+      );
       if (openerResult.overriddenCount > 0) {
         for (const w of openerResult.warnings) console.warn(w);
       }

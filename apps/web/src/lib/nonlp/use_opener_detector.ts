@@ -74,10 +74,26 @@ function persistCache(): void {
 }
 
 export interface NonLpOpenerState {
-  /** key: positionId → NonLpOpener. */
+  /**
+   * key: `${chain}|${receiptToken}|${wallet}` (all lowercase) → NonLpOpener.
+   *
+   * 2026-05-28 fix: раньше ключевали по positionId (POS-NNN), но они
+   * переномеровываются при прогрессивной загрузке → targetsKey менялся →
+   * effect рестартовал → throttled loop не успевал. Стабильный ключ
+   * (receipt token + wallet) не зависит от порядка позиций.
+   */
   data: Map<string, NonLpOpener>;
   loading: boolean;
   error: string | null;
+}
+
+/** Public helper — построить стабильный ключ (для override match'а). */
+export function nonLpOpenerKey(
+  chainCode: string,
+  receiptToken: string,
+  wallet: string,
+): string {
+  return keyOf({ chainCode, receiptToken, wallet });
 }
 
 const EMPTY: NonLpOpenerState = { data: new Map(), loading: false, error: null };
@@ -92,11 +108,12 @@ export function useNonLpOpenerDetector(
   targets: NonLpOpenerTarget[],
   enabled: boolean,
 ): NonLpOpenerState {
-  // Стабильный ключ для deps — не re-fetch'ить при ре-рендерах с тем же набором.
+  // Стабильный ключ для deps — БЕЗ positionId (POS-NNN переномеровываются при
+  // прогрессивной загрузке). Только receipt token + wallet — это не зависит
+  // от порядка позиций, поэтому effect не рестартует когда POS-NNN сдвигается.
   const targetsKey = useMemo(
     () =>
-      targets
-        .map((t) => `${t.positionId}:${keyOf(t)}`)
+      Array.from(new Set(targets.map((t) => keyOf(t))))
         .sort()
         .join("|"),
     [targets],
@@ -112,18 +129,23 @@ export function useNonLpOpenerDetector(
     setState((s) => ({ ...s, loading: true, error: null }));
 
     (async () => {
+      // result keyed by STABLE key (chain|receiptToken|wallet), не positionId.
       const result = new Map<string, NonLpOpener>();
       const errors: string[] = [];
       let didFetch = false;
+      // Dedup targets по стабильному ключу (2 позиции в одном пуле — 1 fetch).
+      const seen = new Set<string>();
 
       for (const t of targets) {
         if (cancelled) return;
         const cacheKey = keyOf(t);
+        if (seen.has(cacheKey)) continue;
+        seen.add(cacheKey);
 
         // 1. Cache hit (включая negative cache: opener === null).
         const cached = moduleCache.get(cacheKey);
         if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-          if (cached.opener) result.set(t.positionId, cached.opener);
+          if (cached.opener) result.set(cacheKey, cached.opener);
           continue;
         }
 
@@ -132,7 +154,7 @@ export function useNonLpOpenerDetector(
         if (pending) {
           try {
             const r = await pending;
-            if (r) result.set(t.positionId, r);
+            if (r) result.set(cacheKey, r);
           } catch {
             /* in-flight owner логирует */
           }
@@ -151,21 +173,28 @@ export function useNonLpOpenerDetector(
         try {
           const opener = await promise;
           moduleCache.set(cacheKey, { opener, fetchedAt: Date.now() });
-          if (opener) result.set(t.positionId, opener);
+          // Persist ПОСЛЕ КАЖДОГО fetch — прогресс выживает отмену effect'а
+          // (re-render во время throttled loop'а раньше терял всё).
+          persistCache();
+          if (opener) result.set(cacheKey, opener);
         } catch (e) {
           if (e instanceof EtherscanChainNotSupportedError) {
             // BASE/SONIC и т.п. — negative-cache чтобы не долбить каждый mount.
             moduleCache.set(cacheKey, { opener: null, fetchedAt: Date.now() });
+            persistCache();
           } else {
-            errors.push(`${t.positionId}: ${(e as Error).message}`);
+            errors.push(`${cacheKey.slice(0, 24)}: ${(e as Error).message}`);
           }
         } finally {
           inFlight.delete(cacheKey);
         }
+        // Инкрементально обновляем state по мере резолва (не ждём весь loop).
+        if (!cancelled) {
+          setState({ data: new Map(result), loading: true, error: null });
+        }
       }
 
       if (cancelled) return;
-      persistCache();
       setState({
         data: result,
         loading: false,
@@ -173,7 +202,7 @@ export function useNonLpOpenerDetector(
       });
       if (typeof window !== "undefined") {
         console.log(
-          `[NonLP opener] resolved ${result.size}/${targets.length} dates` +
+          `[NonLP opener] resolved ${result.size} dates (${seen.size} unique targets)` +
             (errors.length > 0 ? ` — errors: ${errors.length}` : ""),
         );
       }
