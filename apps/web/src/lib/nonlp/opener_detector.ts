@@ -34,6 +34,7 @@ import {
   isAlchemyChainSupported,
   type AlchemyTransfer,
 } from "./alchemy_transfers";
+import { startUsdFromStableOut, type OpenedInToken } from "./cost_basis";
 
 export interface NonLpOpener {
   /** Unix seconds — block time первого receipt IN transfer. */
@@ -44,6 +45,16 @@ export interface NonLpOpener {
   txHash: string;
   /** Human-units кол-во receipt-токена в первом IN transfer. */
   receiptAmount: number;
+  /**
+   * Stage 2: OUT-side — токены ПОТРАЧЕННЫЕ при открытии (transfers из той же
+   * opener tx где from==wallet). Пусто если OUT не в opener tx (Safe-internal).
+   */
+  openedInTokens: OpenedInToken[];
+  /**
+   * Stage 2a: startUsd если OUT-side весь в USD-стейблах (Σ × $1). null если
+   * OUT пустой ИЛИ содержит non-stable (нужен Stage 2b historical price).
+   */
+  startUsd: number | null;
 }
 
 /**
@@ -88,6 +99,8 @@ export async function detectNonLpOpener(args: {
     openBlock: firstIn.blockNumber,
     txHash: firstIn.hash,
     receiptAmount: Number(firstIn.value) / 10 ** firstIn.tokenDecimal,
+    openedInTokens: [],
+    startUsd: null,
   };
 }
 
@@ -114,17 +127,44 @@ type WalletTransfer = {
   contractAddress: string;
   value: string;
   tokenDecimal: number;
+  tokenSymbol: string;
 };
 
 /**
+ * Stage 2: OUT-side из opener tx — все transfers с тем же hash где
+ * from==wallet (юзер ОТДАЛ токен = депозит). Aggregate по contract+symbol.
+ * Если OUT не в той же tx (Safe-internal) — пусто.
+ */
+function extractOpenedInTokens(
+  transfers: readonly WalletTransfer[],
+  openerHash: string,
+  walletLower: string,
+): OpenedInToken[] {
+  const bySym = new Map<string, OpenedInToken>();
+  for (const t of transfers) {
+    if (t.hash !== openerHash) continue;
+    if (t.from !== walletLower) continue; // OUT only
+    const amount = Number(t.value) / 10 ** t.tokenDecimal;
+    if (!(amount > 0)) continue;
+    const key = t.contractAddress;
+    const prev = bySym.get(key);
+    if (prev) prev.amount += amount;
+    else bySym.set(key, { address: key, symbol: t.tokenSymbol, amount });
+  }
+  return Array.from(bySym.values());
+}
+
+/**
  * Pure: из списка всех transfer'ов кошелька найти opener для каждого
- * lpTokenId. Тестируемо без сети.
+ * lpTokenId. Тестируемо без сети. `wallet` — для OUT-side extraction.
  */
 export function resolveOpenersFromTransfers(
   transfers: readonly WalletTransfer[],
   receiptTokens: readonly string[],
+  wallet: string,
 ): Map<string, NonLpOpener> {
   const out = new Map<string, NonLpOpener>();
+  const walletLower = wallet.toLowerCase();
   // sort asc by time (defensive — API уже asc, но не доверяем)
   const sorted = [...transfers].sort((a, b) => a.timeStamp - b.timeStamp);
   for (const raw of receiptTokens) {
@@ -133,11 +173,14 @@ export function resolveOpenersFromTransfers(
       (t) => t.to === lp || t.from === lp || t.contractAddress === lp,
     );
     if (!hit) continue;
+    const openedInTokens = extractOpenedInTokens(sorted, hit.hash, walletLower);
     out.set(lp, {
       openedAt: hit.timeStamp,
       openBlock: hit.blockNumber,
       txHash: hit.hash,
       receiptAmount: Number(hit.value) / 10 ** hit.tokenDecimal,
+      openedInTokens,
+      startUsd: startUsdFromStableOut(openedInTokens),
     });
   }
   return out;
@@ -151,8 +194,13 @@ export function resolveOpenersFromTransfers(
 export function resolveOpenerBlocksFromAlchemy(
   transfers: readonly AlchemyTransfer[],
   receiptTokens: readonly string[],
-): Map<string, { blockNumber: number; hash: string }> {
-  const out = new Map<string, { blockNumber: number; hash: string }>();
+  wallet: string,
+): Map<string, { blockNumber: number; hash: string; openedInTokens: OpenedInToken[] }> {
+  const out = new Map<
+    string,
+    { blockNumber: number; hash: string; openedInTokens: OpenedInToken[] }
+  >();
+  const walletLower = wallet.toLowerCase();
   const sorted = [...transfers].sort((a, b) => a.blockNumber - b.blockNumber);
   for (const raw of receiptTokens) {
     const lp = raw.toLowerCase();
@@ -160,7 +208,20 @@ export function resolveOpenerBlocksFromAlchemy(
       (t) => t.to === lp || t.from === lp || t.contractAddress === lp,
     );
     if (!hit) continue;
-    out.set(lp, { blockNumber: hit.blockNumber, hash: hit.hash });
+    // OUT-side: same-tx transfers где from==wallet (потрачено).
+    const bySym = new Map<string, OpenedInToken>();
+    for (const t of sorted) {
+      if (t.hash !== hit.hash || t.from !== walletLower) continue;
+      if (!(t.amount > 0)) continue;
+      const prev = bySym.get(t.contractAddress);
+      if (prev) prev.amount += t.amount;
+      else bySym.set(t.contractAddress, { address: t.contractAddress, symbol: t.symbol, amount: t.amount });
+    }
+    out.set(lp, {
+      blockNumber: hit.blockNumber,
+      hash: hit.hash,
+      openedInTokens: Array.from(bySym.values()),
+    });
   }
   return out;
 }
@@ -182,13 +243,13 @@ export async function detectNonLpOpenersForWalletChain(args: {
   if (receiptTokens.length === 0) return new Map();
   try {
     const transfers = await fetchEtherscanWalletTokenTransfers(chainCode, wallet);
-    return resolveOpenersFromTransfers(transfers, receiptTokens);
+    return resolveOpenersFromTransfers(transfers, receiptTokens, wallet);
   } catch (e) {
     if (!(e instanceof EtherscanChainNotSupportedError)) throw e;
     // Stage 1b: Etherscan не поддерживает chain → Alchemy fallback.
     if (!isAlchemyChainSupported(chainCode)) throw e;
     const transfers = await fetchAlchemyWalletTransfers(chainCode, wallet);
-    const blocks = resolveOpenerBlocksFromAlchemy(transfers, receiptTokens);
+    const blocks = resolveOpenerBlocksFromAlchemy(transfers, receiptTokens, wallet);
     if (blocks.size === 0) return new Map();
     const tsByBlock = await fetchBlockTimestamps(
       chainCode,
@@ -203,6 +264,8 @@ export async function detectNonLpOpenersForWalletChain(args: {
         openBlock: b.blockNumber,
         txHash: b.hash,
         receiptAmount: 0,
+        openedInTokens: b.openedInTokens,
+        startUsd: startUsdFromStableOut(b.openedInTokens),
       });
     }
     return out;

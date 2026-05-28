@@ -35,6 +35,10 @@ export interface AlchemyTransfer {
   from: string; // lowercase
   to: string; // lowercase
   contractAddress: string; // lowercase
+  /** Human-units amount (rawContract.value decoded). 0 если нет. */
+  amount: number;
+  /** Token symbol (asset field). */
+  symbol: string;
 }
 
 async function alchemyRpc(
@@ -63,7 +67,8 @@ interface RawAssetTransfer {
   hash?: string;
   from: string;
   to: string | null;
-  rawContract?: { address?: string | null };
+  asset?: string | null;
+  rawContract?: { address?: string | null; value?: string | null; decimal?: string | null };
 }
 
 function mapTransfers(result: unknown): AlchemyTransfer[] {
@@ -71,12 +76,24 @@ function mapTransfers(result: unknown): AlchemyTransfer[] {
   const out: AlchemyTransfer[] = [];
   for (const t of transfers) {
     if (!t.blockNum) continue;
+    const rawVal = t.rawContract?.value;
+    const dec = t.rawContract?.decimal;
+    let amount = 0;
+    if (rawVal && dec) {
+      try {
+        amount = Number(BigInt(rawVal)) / 10 ** Number(BigInt(dec));
+      } catch {
+        amount = 0;
+      }
+    }
     out.push({
       blockNumber: Number(BigInt(t.blockNum)),
       hash: t.hash ?? "",
       from: (t.from ?? "").toLowerCase(),
       to: (t.to ?? "").toLowerCase(),
       contractAddress: (t.rawContract?.address ?? "").toLowerCase(),
+      amount,
+      symbol: t.asset ?? "",
     });
   }
   return out;
