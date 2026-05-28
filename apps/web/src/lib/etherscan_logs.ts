@@ -256,6 +256,85 @@ export async function fetchEtherscanTokenTransfers(
   }));
 }
 
+/**
+ * Все token-transfers кошелька БЕЗ фильтра по контракту (Etherscan v2
+ * `account/tokentx` с одним только `address`). Возвращает from/to/contract
+ * для каждого transfer'а — позволяет искать «первое взаимодействие с любым
+ * контрактом» (stake-in: to==stakingContract; vault mint: from==vault,
+ * to==wallet; receipt: contract==receiptToken).
+ *
+ * 2026-05-28 (Stage 1c non-LP opener): для staking/locked/lending позиций
+ * `lpTokenId` — это адрес контракта, а НЕ transferable receipt-токен. Поэтому
+ * фильтр по `contractaddress=lpTokenId` (как в fetchEtherscanTokenTransfers)
+ * возвращает пусто. Здесь берём ВСЮ историю transfer'ов кошелька и матчим
+ * по `to == lpTokenId` (депозит токена в контракт) — это даёт дату открытия.
+ *
+ * Sort asc, до 10k transfer'ов (Etherscan лимит без pagination). Для наших
+ * кошельков обычно сотни — первый match рано.
+ */
+export async function fetchEtherscanWalletTokenTransfers(
+  chainCode: string,
+  walletAddress: string,
+): Promise<Array<EtherscanTokenTransfer & { from: string; to: string; contractAddress: string }>> {
+  const chainId = CHAIN_TO_ID[chainCode.toLowerCase()];
+  if (!chainId) throw new Error(`Etherscan: unknown chain ${chainCode}`);
+
+  const params = new URLSearchParams({
+    chainid: chainId.toString(),
+    module: "account",
+    action: "tokentx",
+    address: walletAddress,
+    sort: "asc",
+    offset: "10000",
+    page: "1",
+  });
+  const url = `${PROXY}/v2/api?${params.toString()}`;
+  const res = await apiFetch(url);
+  if (!res.ok) {
+    throw new Error(`Etherscan HTTP ${res.status}: ${await res.text()}`);
+  }
+  const json = (await res.json()) as {
+    status: string;
+    message: string;
+    result:
+      | string
+      | Array<{
+          hash: string;
+          timeStamp: string;
+          blockNumber: string;
+          from: string;
+          to: string;
+          contractAddress: string;
+          value: string;
+          tokenDecimal: string;
+        }>;
+  };
+  if (json.status !== "1") {
+    if (typeof json.result === "string" && json.result.includes("No transactions")) {
+      return [];
+    }
+    if (Array.isArray(json.result) && json.result.length === 0) return [];
+    if (
+      typeof json.result === "string" &&
+      json.result.includes("Free API access is not supported")
+    ) {
+      throw new EtherscanChainNotSupportedError(chainCode);
+    }
+    throw new Error(`Etherscan tokentx(all): ${json.message} ${json.result}`);
+  }
+  if (!Array.isArray(json.result)) return [];
+  return json.result.map((r) => ({
+    hash: r.hash,
+    timeStamp: Number(r.timeStamp),
+    blockNumber: Number(r.blockNumber),
+    from: r.from.toLowerCase(),
+    to: r.to.toLowerCase(),
+    contractAddress: r.contractAddress.toLowerCase(),
+    value: r.value,
+    tokenDecimal: Number(r.tokenDecimal),
+  }));
+}
+
 /** Pad uint256 → 64 hex chars + '0x' prefix (для topic encoding). */
 export function uint256ToTopic(value: bigint): string {
   return "0x" + value.toString(16).padStart(64, "0");

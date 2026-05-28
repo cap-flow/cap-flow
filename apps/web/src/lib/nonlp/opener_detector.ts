@@ -26,6 +26,7 @@
 import {
   EtherscanChainNotSupportedError,
   fetchEtherscanTokenTransfers,
+  fetchEtherscanWalletTokenTransfers,
 } from "../etherscan_logs";
 
 export interface NonLpOpener {
@@ -82,6 +83,76 @@ export async function detectNonLpOpener(args: {
     txHash: firstIn.hash,
     receiptAmount: Number(firstIn.value) / 10 ** firstIn.tokenDecimal,
   };
+}
+
+// ───────────────────────────────────────────────────────────────────────
+//  Stage 1c — wallet-level resolver для staking/locked/lending позиций
+//
+//  Для них `lpTokenId` = адрес КОНТРАКТА (стейк/локер/маркет), а НЕ
+//  transferable receipt-токен. Per-token fetch (Strategy A) возвращает
+//  пусто. Здесь берём ВСЮ историю token-transfer'ов кошелька (1 запрос на
+//  wallet+chain) и для каждого lpTokenId ищем самый ранний transfer,
+//  который ТРОГАЕТ этот контракт:
+//    - to == lpTokenId           → депозит токена в контракт (stake-in)
+//    - from == lpTokenId         → receipt/reward пришёл из контракта
+//    - contractAddress == lpTokenId → сам lpTokenId это ERC20 receipt (vault)
+//  Берём earliest из всех matched transfers = момент открытия позиции.
+// ───────────────────────────────────────────────────────────────────────
+
+type WalletTransfer = {
+  timeStamp: number;
+  blockNumber: number;
+  hash: string;
+  from: string;
+  to: string;
+  contractAddress: string;
+  value: string;
+  tokenDecimal: number;
+};
+
+/**
+ * Pure: из списка всех transfer'ов кошелька найти opener для каждого
+ * lpTokenId. Тестируемо без сети.
+ */
+export function resolveOpenersFromTransfers(
+  transfers: readonly WalletTransfer[],
+  receiptTokens: readonly string[],
+): Map<string, NonLpOpener> {
+  const out = new Map<string, NonLpOpener>();
+  // sort asc by time (defensive — API уже asc, но не доверяем)
+  const sorted = [...transfers].sort((a, b) => a.timeStamp - b.timeStamp);
+  for (const raw of receiptTokens) {
+    const lp = raw.toLowerCase();
+    const hit = sorted.find(
+      (t) => t.to === lp || t.from === lp || t.contractAddress === lp,
+    );
+    if (!hit) continue;
+    out.set(lp, {
+      openedAt: hit.timeStamp,
+      openBlock: hit.blockNumber,
+      txHash: hit.hash,
+      receiptAmount: Number(hit.value) / 10 ** hit.tokenDecimal,
+    });
+  }
+  return out;
+}
+
+/**
+ * Fetch + resolve openers для всех lpTokenId одного (wallet, chain) одним
+ * запросом всей token-transfer истории. Используется как fallback/основной
+ * путь для staking/locked/lending (где per-token fetch не работает).
+ *
+ * Throws EtherscanChainNotSupportedError если chain не поддержан (BASE/...).
+ */
+export async function detectNonLpOpenersForWalletChain(args: {
+  chainCode: string;
+  wallet: string;
+  receiptTokens: readonly string[];
+}): Promise<Map<string, NonLpOpener>> {
+  const { chainCode, wallet, receiptTokens } = args;
+  if (receiptTokens.length === 0) return new Map();
+  const transfers = await fetchEtherscanWalletTokenTransfers(chainCode, wallet);
+  return resolveOpenersFromTransfers(transfers, receiptTokens);
 }
 
 export { EtherscanChainNotSupportedError };

@@ -19,7 +19,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
-  detectNonLpOpener,
+  detectNonLpOpenersForWalletChain,
   EtherscanChainNotSupportedError,
   type NonLpOpener,
 } from "./opener_detector";
@@ -48,7 +48,6 @@ function keyOf(t: { chainCode: string; receiptToken: string; wallet: string }): 
 }
 
 const moduleCache = new Map<string, CacheEntry>();
-const inFlight = new Map<string, Promise<NonLpOpener | null>>();
 
 // Load cache from localStorage at module init.
 try {
@@ -132,63 +131,77 @@ export function useNonLpOpenerDetector(
       // result keyed by STABLE key (chain|receiptToken|wallet), не positionId.
       const result = new Map<string, NonLpOpener>();
       const errors: string[] = [];
-      let didFetch = false;
-      // Dedup targets по стабильному ключу (2 позиции в одном пуле — 1 fetch).
-      const seen = new Set<string>();
 
+      // Группируем targets по (chain|wallet) — один Etherscan fetch всей
+      // token-transfer истории резолвит ВСЕ receiptTokens этой группы
+      // (vault receipts + staking/locked contracts). Намного меньше запросов
+      // и покрывает staking где per-token fetch не работал.
+      const groups = new Map<
+        string,
+        { chainCode: string; wallet: string; receiptTokens: string[] }
+      >();
       for (const t of targets) {
-        if (cancelled) return;
         const cacheKey = keyOf(t);
-        if (seen.has(cacheKey)) continue;
-        seen.add(cacheKey);
-
-        // 1. Cache hit (включая negative cache: opener === null).
+        // Сразу подхватываем cache hit (включая negative cache).
         const cached = moduleCache.get(cacheKey);
         if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
           if (cached.opener) result.set(cacheKey, cached.opener);
           continue;
         }
-
-        // 2. In-flight dedup.
-        const pending = inFlight.get(cacheKey);
-        if (pending) {
-          try {
-            const r = await pending;
-            if (r) result.set(cacheKey, r);
-          } catch {
-            /* in-flight owner логирует */
-          }
-          continue;
+        const gk = `${t.chainCode.toLowerCase()}|${t.wallet.toLowerCase()}`;
+        let g = groups.get(gk);
+        if (!g) {
+          g = { chainCode: t.chainCode, wallet: t.wallet, receiptTokens: [] };
+          groups.set(gk, g);
         }
+        if (!g.receiptTokens.includes(t.receiptToken.toLowerCase())) {
+          g.receiptTokens.push(t.receiptToken.toLowerCase());
+        }
+      }
 
-        // 3. Fresh fetch. Throttle между сетевыми вызовами.
+      let didFetch = false;
+      for (const g of groups.values()) {
+        if (cancelled) return;
         if (didFetch) await sleep(250);
         didFetch = true;
-        const promise = detectNonLpOpener({
-          chainCode: t.chainCode,
-          receiptToken: t.receiptToken,
-          wallet: t.wallet,
-        });
-        inFlight.set(cacheKey, promise);
         try {
-          const opener = await promise;
-          moduleCache.set(cacheKey, { opener, fetchedAt: Date.now() });
-          // Persist ПОСЛЕ КАЖДОГО fetch — прогресс выживает отмену effect'а
-          // (re-render во время throttled loop'а раньше терял всё).
+          const openers = await detectNonLpOpenersForWalletChain({
+            chainCode: g.chainCode,
+            wallet: g.wallet,
+            receiptTokens: g.receiptTokens,
+          });
+          // Для КАЖДОГО receiptToken группы фиксируем результат (opener или
+          // null = negative cache, чтобы не перезапрашивать).
+          const now = Date.now();
+          for (const rt of g.receiptTokens) {
+            const cacheKey = keyOf({
+              chainCode: g.chainCode,
+              receiptToken: rt,
+              wallet: g.wallet,
+            });
+            const opener = openers.get(rt) ?? null;
+            moduleCache.set(cacheKey, { opener, fetchedAt: now });
+            if (opener) result.set(cacheKey, opener);
+          }
           persistCache();
-          if (opener) result.set(cacheKey, opener);
         } catch (e) {
           if (e instanceof EtherscanChainNotSupportedError) {
-            // BASE/SONIC и т.п. — negative-cache чтобы не долбить каждый mount.
-            moduleCache.set(cacheKey, { opener: null, fetchedAt: Date.now() });
+            // BASE/SONIC — negative-cache всю группу.
+            const now = Date.now();
+            for (const rt of g.receiptTokens) {
+              const cacheKey = keyOf({
+                chainCode: g.chainCode,
+                receiptToken: rt,
+                wallet: g.wallet,
+              });
+              moduleCache.set(cacheKey, { opener: null, fetchedAt: now });
+            }
             persistCache();
           } else {
-            errors.push(`${cacheKey.slice(0, 24)}: ${(e as Error).message}`);
+            errors.push(`${g.chainCode}|${g.wallet.slice(0, 8)}: ${(e as Error).message}`);
           }
-        } finally {
-          inFlight.delete(cacheKey);
         }
-        // Инкрементально обновляем state по мере резолва (не ждём весь loop).
+        // Инкрементальный setState по мере резолва групп.
         if (!cancelled) {
           setState({ data: new Map(result), loading: true, error: null });
         }
@@ -202,7 +215,8 @@ export function useNonLpOpenerDetector(
       });
       if (typeof window !== "undefined") {
         console.log(
-          `[NonLP opener] resolved ${result.size} dates (${seen.size} unique targets)` +
+          `[NonLP opener] resolved ${result.size} dates ` +
+            `(${groups.size} wallet-chain fetches)` +
             (errors.length > 0 ? ` — errors: ${errors.length}` : ""),
         );
       }
