@@ -278,6 +278,66 @@ describe("applyNonLpOpenerOverride", () => {
     expect(out.positions[0]!.startUsd).toBe(50);
   });
 
+  it("GMX cost basis unknown (claim/async) → coverageIncomplete + startUsd=currentUsd", () => {
+    // POS-014 GLV: дата из claim-mint есть, но OUT-side пуст и DeBank даты нет.
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-GLV", openedAt: null, protoName: "GMX V2", startUsd: 42.57 })],
+      openerMap(OCT_2025), // дата есть, startUsd null, openedInTokens []
+      WALLET_MAP,
+    );
+    const p = out.positions[0]!;
+    expect(out.overriddenCount).toBe(1);
+    expect(p.coverageIncomplete).toBe(true);
+    expect(p.startUsd).toBe(p.currentUsd); // честно: историю не знаем
+    expect(p.netStartUsd).toBe(p.currentUsd);
+    expect(p.netPnlUsd).toBe(0);
+    expect(p.feeApr).toBeNull();
+    expect(p.feeAprLifetime).toBeNull();
+    expect(p.openedAt).toBe(OCT_2025); // дату (когда receipt пришёл) показываем
+  });
+
+  it("GMX с уже существующей датой (DeBank-op, egorovfinance) → НЕ flagged", () => {
+    const existing = 1700000000;
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-GM", openedAt: existing, protoName: "GMX V2", startUsd: 275.03 })],
+      openerMap(OCT_2025),
+      WALLET_MAP,
+    );
+    const p = out.positions[0]!;
+    expect(out.overriddenCount).toBe(0);
+    expect(p.coverageIncomplete).toBeUndefined();
+    expect(p.startUsd).toBe(275.03); // UCB-значение сохранено
+  });
+
+  it("GMX с видимым депозитом (openedInTokens) → startUsd из OUT, НЕ flagged", () => {
+    const op: NonLpOpener = {
+      openedAt: OCT_2025, openBlock: 1, txHash: "0xg", receiptAmount: 1,
+      openedInTokens: [{ address: USDC, symbol: "USDC", amount: 200 }],
+      startUsd: 200,
+    };
+    const map = new Map([[nonLpOpenerKey("eth", RECEIPT, WALLET), op]]);
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-GMok", openedAt: null, protoName: "GMX V2", startUsd: 42 })],
+      map,
+      WALLET_MAP,
+    );
+    const p = out.positions[0]!;
+    expect(p.coverageIncomplete).toBeUndefined();
+    expect(p.startUsd).toBe(200);
+  });
+
+  it("non-GMX (Lombard) с пустым OUT → НЕ flagged (только дата)", () => {
+    const out = applyNonLpOpenerOverride(
+      [pos({ id: "POS-L", openedAt: null, protoName: "Lombard", startUsd: 100 })],
+      openerMap(OCT_2025),
+      WALLET_MAP,
+    );
+    const p = out.positions[0]!;
+    expect(p.coverageIncomplete).toBeUndefined();
+    expect(p.startUsd).toBe(100); // не тронут
+    expect(p.openedAt).toBe(OCT_2025);
+  });
+
   it("ageDays округляется до 0.1", () => {
     const out = applyNonLpOpenerOverride(
       [pos({ id: "POS-R", openedAt: null })],
