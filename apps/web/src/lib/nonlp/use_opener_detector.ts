@@ -97,7 +97,6 @@ export function nonLpOpenerKey(
 
 const EMPTY: NonLpOpenerState = { data: new Map(), loading: false, error: null };
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Hook. `targets` — позиции без openedAt с известным receipt token.
@@ -159,53 +158,43 @@ export function useNonLpOpenerDetector(
         }
       }
 
-      let didFetch = false;
-      for (const g of groups.values()) {
-        if (cancelled) return;
-        if (didFetch) await sleep(250);
-        didFetch = true;
-        try {
-          const openers = await detectNonLpOpenersForWalletChain({
-            chainCode: g.chainCode,
-            wallet: g.wallet,
-            receiptTokens: g.receiptTokens,
-          });
-          // Для КАЖДОГО receiptToken группы фиксируем результат (opener или
-          // null = negative cache, чтобы не перезапрашивать).
-          const now = Date.now();
-          for (const rt of g.receiptTokens) {
-            const cacheKey = keyOf({
+      // 2026-05-28 fix: группы фетчим ПАРАЛЛЕЛЬНО через Promise.allSettled,
+      // НЕ sequential throttled loop. Sequential + re-render churn при загрузке
+      // приводил к отмене effect'а после 2-4 групп → avax/bsc никогда не
+      // достигались. Параллельно = один await, все группы резолвятся за раз;
+      // на стабильном rerun все завершаются together (как Krystal CLOSED hook).
+      const writeGroup = (
+        g: { chainCode: string; wallet: string; receiptTokens: string[] },
+        openers: Map<string, NonLpOpener> | null, // null = negative-cache всю группу
+      ) => {
+        const now = Date.now();
+        for (const rt of g.receiptTokens) {
+          const cacheKey = keyOf({ chainCode: g.chainCode, receiptToken: rt, wallet: g.wallet });
+          const opener = openers?.get(rt) ?? null;
+          moduleCache.set(cacheKey, { opener, fetchedAt: now });
+          if (opener) result.set(cacheKey, opener);
+        }
+      };
+
+      await Promise.allSettled(
+        Array.from(groups.values()).map(async (g) => {
+          try {
+            const openers = await detectNonLpOpenersForWalletChain({
               chainCode: g.chainCode,
-              receiptToken: rt,
               wallet: g.wallet,
+              receiptTokens: g.receiptTokens,
             });
-            const opener = openers.get(rt) ?? null;
-            moduleCache.set(cacheKey, { opener, fetchedAt: now });
-            if (opener) result.set(cacheKey, opener);
-          }
-          persistCache();
-        } catch (e) {
-          if (e instanceof EtherscanChainNotSupportedError) {
-            // BASE/SONIC — negative-cache всю группу.
-            const now = Date.now();
-            for (const rt of g.receiptTokens) {
-              const cacheKey = keyOf({
-                chainCode: g.chainCode,
-                receiptToken: rt,
-                wallet: g.wallet,
-              });
-              moduleCache.set(cacheKey, { opener: null, fetchedAt: now });
+            writeGroup(g, openers);
+          } catch (e) {
+            if (e instanceof EtherscanChainNotSupportedError) {
+              writeGroup(g, null); // chain нигде не поддержан → negative-cache
+            } else {
+              errors.push(`${g.chainCode}|${g.wallet.slice(0, 8)}: ${(e as Error).message}`);
             }
-            persistCache();
-          } else {
-            errors.push(`${g.chainCode}|${g.wallet.slice(0, 8)}: ${(e as Error).message}`);
           }
-        }
-        // Инкрементальный setState по мере резолва групп.
-        if (!cancelled) {
-          setState({ data: new Map(result), loading: true, error: null });
-        }
-      }
+        }),
+      );
+      if (!cancelled) persistCache();
 
       if (cancelled) return;
       setState({
