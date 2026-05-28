@@ -220,19 +220,30 @@ function compareCells(a: ColumnCell, b: ColumnCell, dir: SortDir): number {
   return dir === "asc" ? c : -c;
 }
 
+/** Диапазон для numeric/date столбцов. Для дат — unix-секунды. */
+export interface RangeFilter {
+  min: number | null;
+  max: number | null;
+}
+
 export interface ColumnSortFilterState {
   sortCol: string | null;
   sortDir: SortDir;
   /**
-   * colId → выбранные значения. Присутствие ключа = фильтр активен.
-   * `[]` (ключ есть, пусто) → не проходит ни одна строка. Отсутствие ключа =
-   * фильтр не активен (все проходят).
+   * Текстовые столбцы: colId → выбранные значения. Фильтр активен ТОЛЬКО если
+   * массив непустой. Пустой `[]` или отсутствие ключа = не активен (все
+   * проходят) — чтобы «снять всё» НЕ опустошало таблицу.
    */
   valueFilters: Record<string, string[]>;
+  /**
+   * Числовые/date столбцы: colId → {min,max}. Активен если задан min или max.
+   * Для дат границы — unix-секунды (page конвертит из date-инпутов).
+   */
+  rangeFilters?: Record<string, RangeFilter>;
 }
 
 /**
- * Применить value-фильтры (membership) и сортировку (порядок) к набору.
+ * Применить value-/range-фильтры (membership) и сортировку (порядок).
  * Сортировка стабильна (ties → исходный порядок).
  */
 export function applyColumnSortFilter(
@@ -242,15 +253,34 @@ export function applyColumnSortFilter(
 ): OpenPosition[] {
   let out: OpenPosition[] = positions.slice();
 
-  const activeCols = Object.keys(state.valueFilters);
-  if (activeCols.length > 0) {
-    const sets = new Map(
-      activeCols.map((col) => [col, new Set(state.valueFilters[col])]),
-    );
+  // Текстовые value-фильтры (только непустые наборы активны).
+  const valueCols = Object.entries(state.valueFilters).filter(
+    ([, v]) => v.length > 0,
+  );
+  if (valueCols.length > 0) {
+    const sets = new Map(valueCols.map(([col, v]) => [col, new Set(v)]));
     out = out.filter((p) => {
       for (const [col, sel] of sets) {
         const { values } = getColumnCell(p, col, ctx);
         if (!values.some((v) => sel.has(v))) return false;
+      }
+      return true;
+    });
+  }
+
+  // Range-фильтры для numeric/date (активны если задан min или max).
+  const rangeCols = Object.entries(state.rangeFilters ?? {}).filter(
+    ([, r]) => r.min != null || r.max != null,
+  );
+  if (rangeCols.length > 0) {
+    out = out.filter((p) => {
+      for (const [col, r] of rangeCols) {
+        const { sortKey } = getColumnCell(p, col, ctx);
+        if (typeof sortKey !== "number" || !Number.isFinite(sortKey)) {
+          return false; // нет значения → не попадает в диапазон
+        }
+        if (r.min != null && sortKey < r.min) return false;
+        if (r.max != null && sortKey > r.max) return false;
       }
       return true;
     });
