@@ -46,8 +46,10 @@ import {
   applyColumnSortFilter,
   distinctColumnValues,
   type CellContext,
+  type RangeFilter,
   type SortDir,
 } from "@/lib/portfolio/column_sort_filter";
+import { useLocalStorage } from "@/lib/useLocalStorage";
 import {
   defillamaCoinKey,
   fetchHistoricalPrices,
@@ -413,13 +415,26 @@ function OpenPositionsPageInner(): JSX.Element {
   const [filterHasFee, setFilterHasFee] = useState(false);
   const [filterHasDebt, setFilterHasDebt] = useState(false);
 
-  // Per-column сортировка + value-фильтры (Google-Sheets-style на заголовках).
-  const [sortCol, setSortCol] = useState<string | null>(null);
-  const [sortDir, setSortDir] = useState<SortDir>("desc");
-  // colId → выбранные значения. Присутствие ключа = фильтр активен.
-  const [colValueFilters, setColValueFilters] = useState<Record<string, string[]>>(
-    {},
-  );
+  // Per-column сортировка + фильтры (Google-Sheets-style на заголовках).
+  // Персистится в localStorage (переживает перезагрузку).
+  const [sfPrefs, setSfPrefs] = useLocalStorage<{
+    sortCol: string | null;
+    sortDir: SortDir;
+    valueFilters: Record<string, string[]>;
+    rangeFilters: Record<string, RangeFilter>;
+  }>("capflow.openPositions.sortFilter", {
+    sortCol: null,
+    sortDir: "desc",
+    valueFilters: {},
+    rangeFilters: {},
+  });
+  const sortCol = sfPrefs.sortCol;
+  const sortDir = sfPrefs.sortDir;
+  const colValueFilters = sfPrefs.valueFilters;
+  const colRangeFilters = sfPrefs.rangeFilters ?? {};
+  const setSortCol = (v: string | null) =>
+    setSfPrefs((p) => ({ ...p, sortCol: v }));
+  const setSortDir = (v: SortDir) => setSfPrefs((p) => ({ ...p, sortDir: v }));
 
   // Helper toggles for multi-select sets.
   function toggleInSet<T>(
@@ -541,7 +556,7 @@ function OpenPositionsPageInner(): JSX.Element {
   // и сортировка (порядок). Глобальная аналитика ниже считается по `view`.
   const view = applyColumnSortFilter(
     viewBase,
-    { sortCol, sortDir, valueFilters: colValueFilters },
+    { sortCol, sortDir, valueFilters: colValueFilters, rangeFilters: colRangeFilters },
     cellCtx,
   );
 
@@ -934,22 +949,30 @@ function OpenPositionsPageInner(): JSX.Element {
                             <ColumnFilterDropdown
                               kind={COLUMN_KIND[c.id] ?? "text"}
                               sortDir={sortCol === c.id ? sortDir : null}
-                              filterActive={c.id in colValueFilters}
                               computeValues={() =>
                                 distinctColumnValues(viewBase, c.id, cellCtx)
                               }
                               selected={colValueFilters[c.id] ?? null}
+                              range={colRangeFilters[c.id] ?? null}
                               onSort={(dir) => {
                                 setSortCol(c.id);
                                 setSortDir(dir);
                               }}
                               onClearSort={() => setSortCol(null)}
                               onChangeSelected={(next) =>
-                                setColValueFilters((prev) => {
-                                  const copy = { ...prev };
+                                setSfPrefs((prev) => {
+                                  const copy = { ...prev.valueFilters };
                                   if (next === null) delete copy[c.id];
                                   else copy[c.id] = next;
-                                  return copy;
+                                  return { ...prev, valueFilters: copy };
+                                })
+                              }
+                              onChangeRange={(next) =>
+                                setSfPrefs((prev) => {
+                                  const copy = { ...(prev.rangeFilters ?? {}) };
+                                  if (next === null) delete copy[c.id];
+                                  else copy[c.id] = next;
+                                  return { ...prev, rangeFilters: copy };
                                 })
                               }
                             />
