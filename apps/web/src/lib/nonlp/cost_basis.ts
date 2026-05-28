@@ -80,3 +80,31 @@ export function startUsdFromStableOut(
   }
   return sum > 0 ? sum : null;
 }
+
+/**
+ * Stage 2b: startUsd когда в OUT есть volatile-токены (WETH/WBTC/WAVAX/...).
+ * Стейблы оцениваем как $1, volatile — по исторической цене на момент
+ * депозита (`priceByAddress`, lowercased addr → USD). Если у ЛЮБОГО
+ * volatile-токена нет цены — возвращаем null (частичная оценка занизила бы
+ * startUsd; лучше оставить fallback чем врать).
+ *
+ * `priceByAddress` строится caller'ом из DefiLlama historical (см.
+ * `opener_detector.ts` → `fillVolatileStartUsd`).
+ */
+export function startUsdFromPricedOut(
+  openedInTokens: readonly OpenedInToken[],
+  priceByAddress: ReadonlyMap<string, number>,
+): number | null {
+  if (openedInTokens.length === 0) return null;
+  let sum = 0;
+  for (const t of openedInTokens) {
+    if (isUsdStable(t.symbol)) {
+      sum += t.amount;
+      continue;
+    }
+    const px = priceByAddress.get(t.address.toLowerCase());
+    if (px == null || !(px > 0)) return null; // нет цены → bail
+    sum += t.amount * px;
+  }
+  return sum > 0 ? sum : null;
+}

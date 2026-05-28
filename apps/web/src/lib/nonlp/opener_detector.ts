@@ -34,7 +34,17 @@ import {
   isAlchemyChainSupported,
   type AlchemyTransfer,
 } from "./alchemy_transfers";
-import { startUsdFromStableOut, type OpenedInToken } from "./cost_basis";
+import {
+  isUsdStable,
+  startUsdFromPricedOut,
+  startUsdFromStableOut,
+  type OpenedInToken,
+} from "./cost_basis";
+import {
+  defillamaCoinKey,
+  fetchHistoricalPrices,
+  priceFromMapNearest,
+} from "../defillama";
 
 export interface NonLpOpener {
   /** Unix seconds — block time первого receipt IN transfer. */
@@ -285,6 +295,18 @@ export async function detectNonLpOpenersForWalletChain(args: {
 }): Promise<Map<string, NonLpOpener>> {
   const { chainCode, wallet, receiptTokens } = args;
   if (receiptTokens.length === 0) return new Map();
+  const openers = await resolveOpenersViaProvider(chainCode, wallet, receiptTokens);
+  // Stage 2b: для openers где startUsd null (volatile OUT) — historical price.
+  await fillVolatileStartUsd(chainCode, openers);
+  return openers;
+}
+
+/** Etherscan primary, Alchemy fallback — резолв openers без historical price. */
+async function resolveOpenersViaProvider(
+  chainCode: string,
+  wallet: string,
+  receiptTokens: readonly string[],
+): Promise<Map<string, NonLpOpener>> {
   try {
     const transfers = await fetchEtherscanWalletTokenTransfers(chainCode, wallet);
     return resolveOpenersFromTransfers(transfers, receiptTokens, wallet);
@@ -313,6 +335,58 @@ export async function detectNonLpOpenersForWalletChain(args: {
       });
     }
     return out;
+  }
+}
+
+/**
+ * Stage 2b: для openers с `startUsd == null` но непустым OUT-side (значит
+ * есть volatile-токены) — достаём историческую цену каждого volatile-токена
+ * на момент депозита (`openedAt`) через DefiLlama и пересчитываем startUsd.
+ * Мутирует `op.startUsd` in-place (объекты только что созданы → safe).
+ * Fail-soft: нет цены → startUsd остаётся null, fallback не трогаем.
+ */
+async function fillVolatileStartUsd(
+  chainCode: string,
+  openers: Map<string, NonLpOpener>,
+): Promise<void> {
+  const pending: NonLpOpener[] = [];
+  const requests: { coin: string; timestamp: number }[] = [];
+  const seen = new Set<string>();
+  for (const op of openers.values()) {
+    if (op.startUsd != null) continue;
+    if (op.openedInTokens.length === 0) continue;
+    pending.push(op);
+    for (const t of op.openedInTokens) {
+      if (isUsdStable(t.symbol)) continue;
+      const coin = defillamaCoinKey(chainCode, t.address, t.symbol);
+      if (!coin) continue;
+      const key = `${coin}|${op.openedAt}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      requests.push({ coin, timestamp: op.openedAt });
+    }
+  }
+  if (requests.length === 0) return;
+
+  const priceMap = await fetchHistoricalPrices(requests);
+  for (const op of pending) {
+    const priceByAddress = new Map<string, number>();
+    let allPriced = true;
+    for (const t of op.openedInTokens) {
+      if (isUsdStable(t.symbol)) continue;
+      const coin = defillamaCoinKey(chainCode, t.address, t.symbol);
+      const px = coin
+        ? priceFromMapNearest(priceMap, coin, op.openedAt)?.price ?? null
+        : null;
+      if (px == null) {
+        allPriced = false;
+        break;
+      }
+      priceByAddress.set(t.address.toLowerCase(), px);
+    }
+    if (!allPriced) continue;
+    const startUsd = startUsdFromPricedOut(op.openedInTokens, priceByAddress);
+    if (startUsd != null) op.startUsd = startUsd;
   }
 }
 
