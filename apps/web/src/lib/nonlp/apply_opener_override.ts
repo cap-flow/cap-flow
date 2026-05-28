@@ -2,8 +2,10 @@
  * Pure override для НЕ-LP позиций на основе Etherscan/Alchemy-детекта
  * (см. `use_opener_detector.ts`). Применяет ДВА независимых патча:
  *
- *   1. openedAt / ageDays — ТОЛЬКО если `openedAt == null` (не перетираем
- *      даты от UCB / Krystal — они authoritative).
+ *   1. openedAt / ageDays — заполняем если пусто, А ТАКЖЕ перетираем когда
+ *      on-chain дата receipt-токена ПОЗЖЕ DeBank-даты на >1 день (DeBank для
+ *      multi-market протоколов типа Pendle навешивает дату первого
+ *      взаимодействия на все сабпозиции). Раньше — не трогаем (re-open guard).
  *   2. startUsd / netStartUsd / netPnl + openedInTokens — из OUT-side
  *      («потрачено при открытии», см. cost_basis.ts) НЕЗАВИСИМО от наличия
  *      даты. UCB decomposition для receipt-токенов часто врёт (GMX V2 GLV:
@@ -71,17 +73,31 @@ export function applyNonLpOpenerOverride(
     const patch: Partial<OpenPosition> = {};
     const notes: string[] = [];
 
-    // ── Дата: ставим ТОЛЬКО если её нет (не перетираем UCB/Krystal). ──
-    // Guard: sane timestamp (в прошлом и > 0).
+    // ── Дата открытия = первый on-chain IN-transfer КОНКРЕТНОГО receipt- ──
+    // токена (authoritative per-sub-position). DeBank для multi-market
+    // протоколов (Pendle: PT-apxUSD + PT-apyUSD в одном протоколе) отдаёт дату
+    // ПЕРВОГО взаимодействия с протоколом и навешивает её на ВСЕ сабпозиции →
+    // разные позиции получают одну (раннюю) дату. Поэтому:
+    //   - openedAt пуст → заполняем;
+    //   - detector ПОЗЖЕ существующей на > 1 дня → DeBank дал слишком раннюю
+    //     (конфляция) → перетираем on-chain датой (она точнее для этой позиции).
+    // detector РАНЬШЕ существующей НЕ перетираем: re-open (aToken мог минтиться
+    // раньше при прошлом депозите), DeBank-дата текущего открытия надёжнее.
+    const DAY = 86400;
+    const detectorDateSane = opener.openedAt > 0 && opener.openedAt <= nowSec;
     const dateApplicable =
-      p.openedAt == null && opener.openedAt > 0 && opener.openedAt <= nowSec;
+      detectorDateSane &&
+      (p.openedAt == null || opener.openedAt - p.openedAt > DAY);
     if (dateApplicable) {
       const ageDays = round1(Math.max(0, (nowSec - opener.openedAt) / 86400));
+      const overwrote = p.openedAt != null;
       patch.openedAt = opener.openedAt;
-      patch.openHash = p.openHash ?? opener.txHash;
+      patch.openHash = opener.txHash;
       patch.ageDays = ageDays;
       notes.push(
-        `openedAt → ${new Date(opener.openedAt * 1000)
+        `openedAt ${overwrote ? "перетёрт (DeBank-конфляция) → " : "→ "}${new Date(
+          opener.openedAt * 1000,
+        )
           .toISOString()
           .slice(0, 10)} (${ageDays}d, tx ${opener.txHash.slice(0, 10)}…)`,
       );
