@@ -5,6 +5,7 @@ import {
   CreditCard,
   DollarSign,
   Flag,
+  ScrollText,
   HeartPulse,
   KeyRound,
   LayoutGrid,
@@ -66,6 +67,7 @@ const ADMIN_NAV: AdminNavGroup[] = [
     items: [
       { to: "/admin/users", label: "Пользователи", icon: Users },
       { to: "/admin/portfolios", label: "Портфели", icon: LayoutGrid },
+      { to: "/admin/operations", label: "Реестр операций", icon: ScrollText },
       { to: "/admin/billing", label: "Биллинг", icon: CreditCard },
       { to: "/admin/telegram-chat", label: "Чат TG", icon: MessageSquare },
     ],

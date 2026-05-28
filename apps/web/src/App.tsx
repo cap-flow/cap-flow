@@ -12,6 +12,7 @@ import { AdminIntegrationsPage } from "./pages/admin/IntegrationsPage";
 import { AdminInvitesPage } from "./pages/admin/InvitesPage";
 import { AdminMetricsPage } from "./pages/admin/MetricsPage";
 import { AdminPortfoliosPage } from "./pages/admin/PortfoliosPage";
+import { AdminOperationsRegistryPage } from "./pages/admin/OperationsRegistryPage";
 import { AdminQueuePage } from "./pages/admin/QueuePage";
 import { AdminHealthPage } from "./pages/admin/HealthPage";
 import { AdminTechAuditPage } from "./pages/admin/TechAuditPage";
@@ -60,6 +61,7 @@ function AdminRoutes() {
           <Route index element={<Navigate to="metrics" replace />} />
           <Route path="metrics" element={<AdminMetricsPage />} />
           <Route path="portfolios" element={<AdminPortfoliosPage />} />
+          <Route path="operations" element={<AdminOperationsRegistryPage />} />
           <Route path="users" element={<AdminUsersPage />} />
           <Route path="users/:id" element={<AdminUserDetailPage />} />
           <Route path="invites" element={<AdminInvitesPage />} />

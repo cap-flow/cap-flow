@@ -33,6 +33,8 @@ import { adminMetricsRoutes } from "./modules/admin-metrics/admin-metrics.routes
 import { AdminMetricsService } from "./modules/admin-metrics/admin-metrics.service.js";
 import { adminPortfoliosRoutes } from "./modules/admin-portfolios/admin-portfolios.routes.js";
 import { AdminPortfoliosService } from "./modules/admin-portfolios/admin-portfolios.service.js";
+import { adminOperationsRoutes } from "./modules/admin-operations/admin-operations.routes.js";
+import { AdminOperationsService } from "./modules/admin-operations/admin-operations.service.js";
 import { adminQueueRoutes } from "./modules/admin-queue/admin-queue.routes.js";
 import { adminHealthRoutes } from "./modules/admin-health/admin-health.routes.js";
 import { registerAdminQueueUi } from "./modules/admin-queue/admin-queue.ui.js";
@@ -372,6 +374,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
 
   // ─── Phase 5: admin dashboard services ─────────────────────────────
   const adminPortfoliosService = new AdminPortfoliosService(app.db);
+  const adminOperationsService = new AdminOperationsService(app.db);
   const adminMetricsService = new AdminMetricsService(app.db);
   const adminIntegrationsService = new AdminIntegrationsService(app.db, env);
   const adminAuditService = new AdminAuditService(app.db);
@@ -726,6 +729,10 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         service: adminPortfoliosService,
         refreshQueue,
         prefix: "/admin/portfolios",
+      });
+      await api.register(adminOperationsRoutes, {
+        service: adminOperationsService,
+        prefix: "/admin/operations",
       });
       await api.register(adminMetricsRoutes, {
         service: adminMetricsService,
