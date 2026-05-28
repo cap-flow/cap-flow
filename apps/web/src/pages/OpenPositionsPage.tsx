@@ -435,6 +435,21 @@ function OpenPositionsPageInner(): JSX.Element {
   const setSortCol = (v: string | null) =>
     setSfPrefs((p) => ({ ...p, sortCol: v }));
   const setSortDir = (v: SortDir) => setSfPrefs((p) => ({ ...p, sortDir: v }));
+  // Активны ли per-column сортировка/фильтры (для кнопки сброса — чтобы юзер
+  // не застрял с пустой таблицей: фильтр персистится, reload не спасает).
+  const anyColFilterActive =
+    Object.values(colValueFilters).some((v) => v.length > 0) ||
+    Object.values(colRangeFilters).some(
+      (r) => r && (r.min != null || r.max != null),
+    );
+  const sortOrFilterActive = sortCol != null || anyColFilterActive;
+  const resetSortFilter = () =>
+    setSfPrefs({
+      sortCol: null,
+      sortDir: "desc",
+      valueFilters: {},
+      rangeFilters: {},
+    });
 
   // Helper toggles for multi-select sets.
   function toggleInSet<T>(
@@ -825,35 +840,8 @@ function OpenPositionsPageInner(): JSX.Element {
         </div>
       </CollapsibleSection>
 
-      {/* Filters + Column settings — на одной строке */}
+      {/* Column settings — фильтрация теперь через дропдауны в заголовках */}
       <div className="flex flex-wrap items-center gap-2">
-        <FiltersDropdown
-          groupFilter={groupFilter}
-          setGroupFilter={setGroupFilter}
-          walletFilter={walletFilter}
-          toggleWallet={(id) => toggleInSet(walletFilter, id, setWalletFilter)}
-          clearWallets={() => setWalletFilter(new Set())}
-          kindFilter={kindFilter}
-          toggleKind={(k) => toggleInSet(kindFilter, k, setKindFilter)}
-          clearKinds={() => setKindFilter(new Set())}
-          chainFilter={chainFilter}
-          toggleChain={(c) => toggleInSet(chainFilter, c, setChainFilter)}
-          clearChains={() => setChainFilter(new Set())}
-          protocolFilter={protocolFilter}
-          toggleProtocol={(id) => toggleInSet(protocolFilter, id, setProtocolFilter)}
-          clearProtocols={() => setProtocolFilter(new Set())}
-          filterPnL={filterPnL}
-          setFilterPnL={setFilterPnL}
-          filterRange={filterRange}
-          setFilterRange={setFilterRange}
-          filterHasFee={filterHasFee}
-          setFilterHasFee={setFilterHasFee}
-          filterHasDebt={filterHasDebt}
-          setFilterHasDebt={setFilterHasDebt}
-          groupCounts={groupCounts}
-          loadedList={loadedList}
-          allPositions={positionsWithAlchemyOverride}
-        />
         <div className="ml-auto">
           <ColumnSettings
             columns={COLUMN_DEFS}
@@ -873,32 +861,59 @@ function OpenPositionsPageInner(): JSX.Element {
             <Badge variant="muted" className="ml-2 text-[10px]">
               {view.length}
             </Badge>
-            {hiddenKeys.size > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowHidden((v) => !v)}
-                className="ml-auto inline-flex items-center gap-1 rounded-md border border-border bg-secondary/40 px-2 py-1 text-[10px] font-medium text-muted-foreground transition-colors hover:border-brand-cyan/40 hover:text-foreground"
-                title={
-                  showHidden
-                    ? "Не показывать скрытые позиции"
-                    : "Показать скрытые позиции"
-                }
-              >
-                {showHidden ? (
-                  <Eye className="h-3 w-3" />
-                ) : (
-                  <EyeOff className="h-3 w-3" />
-                )}
-                {showHidden ? "Скрыть скрытые" : `+${hiddenKeys.size} скрытых`}
-              </button>
-            )}
+            <div className="ml-auto flex items-center gap-2">
+              {sortOrFilterActive && (
+                <button
+                  type="button"
+                  onClick={resetSortFilter}
+                  className="inline-flex items-center gap-1 rounded-md border border-brand-cyan/40 bg-brand-cyan/10 px-2 py-1 text-[10px] font-medium text-brand-cyan transition-colors hover:bg-brand-cyan/20"
+                  title="Сбросить сортировку и все фильтры столбцов"
+                >
+                  <X className="h-3 w-3" />
+                  Сбросить фильтры
+                </button>
+              )}
+              {hiddenKeys.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowHidden((v) => !v)}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-secondary/40 px-2 py-1 text-[10px] font-medium text-muted-foreground transition-colors hover:border-brand-cyan/40 hover:text-foreground"
+                  title={
+                    showHidden
+                      ? "Не показывать скрытые позиции"
+                      : "Показать скрытые позиции"
+                  }
+                >
+                  {showHidden ? (
+                    <Eye className="h-3 w-3" />
+                  ) : (
+                    <EyeOff className="h-3 w-3" />
+                  )}
+                  {showHidden ? "Скрыть скрытые" : `+${hiddenKeys.size} скрытых`}
+                </button>
+              )}
+            </div>
           </CardTitle>
         </CardHeader>
         <CardContent className="px-0 pb-0">
           {view.length === 0 ? (
-            <p className="px-4 py-12 text-center text-sm text-muted-foreground">
-              Нет открытых позиций по этим фильтрам.
-            </p>
+            <div className="px-4 py-12 text-center">
+              <p className="text-sm text-muted-foreground">
+                {sortOrFilterActive
+                  ? "Ничего не найдено по выбранным фильтрам столбцов."
+                  : "Нет открытых позиций."}
+              </p>
+              {sortOrFilterActive && (
+                <button
+                  type="button"
+                  onClick={resetSortFilter}
+                  className="mt-3 inline-flex items-center gap-1 rounded-md border border-brand-cyan/40 bg-brand-cyan/10 px-3 py-1.5 text-xs font-medium text-brand-cyan transition-colors hover:bg-brand-cyan/20"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Сбросить фильтры
+                </button>
+              )}
+            </div>
           ) : (
             <div className="hidden md:block overflow-x-auto">
               {/*
