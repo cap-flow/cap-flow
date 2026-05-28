@@ -12,6 +12,12 @@
  *
  * APR (feeApr / feeAprLifetime) пересчитывается на эффективных значениях.
  *
+ *   3. coverageIncomplete — для GMX-позиций (GM/GLV/GLP), где receipt пришёл
+ *      async/claim/миграцией без видимого депозита И DeBank открытия не дал И
+ *      OUT-side пуст: вместо выдуманного startUsd/PnL ставим
+ *      `coverageIncomplete=true` + `startUsd=currentUsd` (тот же honest-флаг,
+ *      что у V3-orphan'ов). UI рисует «⚠ cost basis incomplete».
+ *
  * Защитные guards:
  *   - применяем ТОЛЬКО к non-V3-LP (V3 LP идут через Krystal openedTime)
  *   - startUsd перетираем ТОЛЬКО валидной суммой (>0), не валидным нулём
@@ -109,7 +115,29 @@ export function applyNonLpOpenerOverride(
       );
     }
 
-    if (notes.length === 0) return p; // нечего применять
+    // ── coverageIncomplete: cost basis ПРИНЦИПИАЛЬНО невосстановим. ──
+    // Сигнатура: receipt пришёл (opener дату нашли), но трат не видно ВООБЩЕ
+    // (openedInTokens пусто) И startUsd не вышел (null) И DeBank открытия не
+    // дал (p.openedAt == null). Это GMX V2 async/claim, GLP→GM миграция,
+    // Safe-internal депозиты — где и DeBank-op, и наш OUT-side молчат.
+    // Вместо выдуманного startUsd/PnL помечаем «⚠ cost basis incomplete»
+    // (тот же флаг, что у V3-orphan'ов) и ставим startUsd = currentUsd
+    // (честно: «историю не знаем»). Aave/IPOR/Avantis ловят OUT в той же tx
+    // → openedInTokens непусто → сюда не попадают. egorovfinance: DeBank дал
+    // дату (openedAt != null) → не попадает.
+    // Скоуп: только GMX (V1/V2) — единственное семейство, где receipt (GM/GLV/
+    // GLP) приходит async/claim/миграцией без видимого депозита, а DeBank-op
+    // отсутствует. Lending/staking/yield/cex могут иметь надёжный startUsd из
+    // lot-трекера БЕЗ DeBank-даты — их флагать нельзя (регрессия). Расширять
+    // на другие Safe-internal vault'ы (Lombard/Locus) — отдельно, с проверкой.
+    const isGmx = /\bgmx\b/i.test(p.protocol.name);
+    const costBasisUnknown =
+      isGmx &&
+      p.openedAt == null &&
+      opener.startUsd == null &&
+      opener.openedInTokens.length === 0;
+
+    if (notes.length === 0 && !costBasisUnknown) return p; // нечего применять
 
     // APR: пересчитываем на эффективных startUsd + ageDays (после patch'а).
     const effStartUsd = patch.startUsd ?? p.startUsd;
@@ -120,6 +148,17 @@ export function applyNonLpOpenerOverride(
       }
       patch.feeAprLifetime =
         (p.feesLifetimeUsd / effStartUsd) * (365 / effAgeDays) * 100;
+    }
+
+    if (costBasisUnknown) {
+      patch.coverageIncomplete = true;
+      patch.startUsd = p.currentUsd;
+      patch.netStartUsd = p.currentUsd;
+      patch.netPnlUsd = 0;
+      patch.netPnlPct = 0;
+      patch.feeApr = null;
+      patch.feeAprLifetime = null;
+      notes.push("cost basis неизвестен (receipt без видимого депозита) → ⚠ incomplete");
     }
 
     overriddenCount++;
