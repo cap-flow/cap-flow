@@ -486,11 +486,91 @@ function tryFallbackMatch(
 }
 
 /**
+ * Batch fallback match: для N OpenPositions без matchedV3TokenId, которые
+ * образуют группу `(wallet, chain, sortedCanonPair)` совпадающую с N
+ * IN_RANGE Krystal записями — паримся 1-to-1 по sorted currentUsd.
+ *
+ * 2026-05-28 (MMaksimuk POS-015/016 audit): 2 NFT в одном пуле с
+ * identичными currentUsd ($249.55 vs $249.55) — `tryFallbackMatch`
+ * с currentUsd-disambig корректно bail'ит (AMBIGUITY_THRESHOLD), и
+ * **обе позиции остаются без NFT match**. UI показывает pool address
+ * вместо `#tokenId`, нет даты/APR (всё это идёт из Krystal данных).
+ *
+ * Решение: на уровне batch group, если N positions == N Krystal candidates,
+ * заведомо паримся 1-to-1 (sorted by currentUsd, index-by-index). Никаких
+ * ambiguity guards нужно — каждая позиция получает свой уникальный candidate.
+ *
+ * Возвращает `Map<positionId, KrystalV3Summary>` для positions которые
+ * матчатся через batch. Использует `walletId` как ключ (по `OpenPosition.id`
+ * могли быть генерёные uuid'ы, лучше использовать индекс).
+ */
+function computeBatchFallbackMatches(
+  positions: readonly OpenPosition[],
+  walletAddressById: ReadonlyMap<string, string>,
+  krystalEntries: readonly KrystalV3Summary[],
+): Map<number, KrystalV3Summary> {
+  const out = new Map<number, KrystalV3Summary>();
+
+  // 1. Group eligible positions (V3 LP, no matchedV3TokenId, 2-token pair) by
+  // (walletAddress|chain|sortedCanonPair). Key: composite string.
+  type Item = { idx: number; pos: OpenPosition; wallet: string };
+  const posGroups = new Map<string, Item[]>();
+  positions.forEach((p, idx) => {
+    if (p.matchedV3TokenId) return;
+    if (!isV3LpProtocol(p.protocol.name)) return;
+    if (p.supplyTokens.length !== 2) return;
+    const wallet = walletAddressById.get(p.walletId)?.toLowerCase();
+    if (!wallet) return;
+    const pair = sortedCanonPair(
+      p.supplyTokens[0]!.symbol,
+      p.supplyTokens[1]!.symbol,
+    );
+    const key = `${wallet}|${p.chain.toLowerCase()}|${pair}`;
+    const arr = posGroups.get(key) ?? [];
+    arr.push({ idx, pos: p, wallet });
+    posGroups.set(key, arr);
+  });
+
+  // 2. Group Krystal candidates by same canonical key.
+  const kGroups = new Map<string, KrystalV3Summary[]>();
+  for (const k of krystalEntries) {
+    if (k.status === "CLOSED") continue;
+    const pair = sortedCanonPair(k.pair[0], k.pair[1]);
+    const key = `${k.ownerAddress.toLowerCase()}|${k.chainCode.toLowerCase()}|${pair}`;
+    const arr = kGroups.get(key) ?? [];
+    arr.push(k);
+    kGroups.set(key, arr);
+  }
+
+  // 3. For groups where |positions| == |candidates| && >= 2, do 1-to-1
+  // bipartite match: sort both arrays by currentUsd ASC, pair by index.
+  for (const [key, posGroup] of posGroups) {
+    if (posGroup.length < 2) continue;
+    const kGroup = kGroups.get(key);
+    if (!kGroup || kGroup.length !== posGroup.length) continue;
+
+    const posSorted = [...posGroup].sort(
+      (a, b) => a.pos.currentUsd - b.pos.currentUsd,
+    );
+    const kSorted = [...kGroup].sort((a, b) => a.currentUsd - b.currentUsd);
+
+    for (let i = 0; i < posSorted.length; i++) {
+      out.set(posSorted[i]!.idx, kSorted[i]!);
+    }
+  }
+
+  return out;
+}
+
+/**
  * Apply Krystal override на все V3 LP positions.
- * Primary path: match по `matchedV3TokenId`.
- * Fallback path: для positions без matchedV3TokenId — match по
- * (walletAddress, chain, pair) если walletAddressById предоставлен и
- * Krystal вернул ровно одну подходящую запись (см. tryFallbackMatch).
+ *
+ * Path priority:
+ *  1. **Per-position match**: `matchedV3TokenId` set → lookup в Krystal Map
+ *  2. **Batch fallback** (NEW 2026-05-28): N positions + N Krystal candidates
+ *     в одной (wallet, chain, pair) группе → bipartite pair-up by currentUsd
+ *  3. **Single fallback**: `tryFallbackMatch` — match по pair если уникально
+ *     или однозначно по currentUsd-proximity
  *
  * Pure function — возвращает новый массив, не мутирует input.
  */
@@ -504,13 +584,28 @@ export function applyKrystalV3Override(
     return positions.slice();
   }
   const allEntries = Array.from(krystalByTokenId.values());
-  return positions.map((p) => {
+
+  // Step 2 prep: compute batch matches once. Needs walletAddressById; если
+  // не передан, batch skip — fallback на per-position tryFallbackMatch.
+  const batchMatches: Map<number, KrystalV3Summary> = walletAddressById
+    ? computeBatchFallbackMatches(positions, walletAddressById, allEntries)
+    : new Map();
+
+  return positions.map((p, idx) => {
+    // Path 1: matchedV3TokenId
     if (p.matchedV3TokenId) {
       const k = krystalByTokenId.get(p.matchedV3TokenId);
       if (!k) return p;
       const txs = transactionsByTokenId?.get(p.matchedV3TokenId);
       return overrideOne(p, k, txs);
     }
+    // Path 2: batch fallback (deterministic 1-to-1 for N pos == N candidates)
+    const batchHit = batchMatches.get(idx);
+    if (batchHit) {
+      const txs = transactionsByTokenId?.get(batchHit.tokenId);
+      return overrideOne(p, batchHit, txs);
+    }
+    // Path 3: single fallback
     const wallet = walletAddressById?.get(p.walletId);
     const k = tryFallbackMatch(p, wallet, allEntries);
     if (!k) return p;

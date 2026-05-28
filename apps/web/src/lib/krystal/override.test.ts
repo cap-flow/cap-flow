@@ -630,6 +630,131 @@ describe("applyKrystalV3Override", () => {
       expect(out[0]!.matchedV3TokenId).toBeUndefined();
     });
 
+    it("PR-K30 (MMaksimuk POS-015/016): N positions == N Krystal candidates → batch 1-to-1 match", () => {
+      const pos015 = basePos({
+        id: "POS-015", startUsd: 250, currentUsd: 236.47,
+        supply: [
+          { symbol: "USDT", amount: 57.94, currentUsd: 57.94, startUsd: 125 },
+          { symbol: "SLVON", amount: 2.65, currentUsd: 178.53, startUsd: 125 },
+        ],
+        feesUsd: 12.83,
+      });
+      pos015.walletId = "wA"; pos015.chain = "eth";
+
+      const pos016 = basePos({
+        id: "POS-016", startUsd: 250, currentUsd: 236.48,
+        supply: [
+          { symbol: "USDT", amount: 57.94, currentUsd: 57.94, startUsd: 125 },
+          { symbol: "SLVON", amount: 2.65, currentUsd: 178.54, startUsd: 125 },
+        ],
+        feesUsd: 12.83,
+      });
+      pos016.walletId = "wA"; pos016.chain = "eth";
+
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["1220776", summary({
+          tokenId: "1220776", currentUsd: 249.55,
+          current: [
+            { symbol: "USDT", amount: 110.46, usd: 110.46 },
+            { symbol: "SLVON", amount: 1.91, usd: 139.09 },
+          ],
+          pendingUsd: 0, claimedUsd: 0,
+          chainCode: "eth", ownerAddress: "0xowner",
+          pair: ["USDT", "SLVON"],
+          openedTime: 1772882615, totalDepositValue: 256.51,
+        })],
+        ["1220777", summary({
+          tokenId: "1220777", currentUsd: 249.56,
+          current: [
+            { symbol: "USDT", amount: 110.47, usd: 110.47 },
+            { symbol: "SLVON", amount: 1.91, usd: 139.09 },
+          ],
+          pendingUsd: 0, claimedUsd: 0,
+          chainCode: "eth", ownerAddress: "0xowner",
+          pair: ["USDT", "SLVON"],
+          openedTime: 1772882627, totalDepositValue: 256.51,
+        })],
+      ]);
+      const out = applyKrystalV3Override(
+        [pos015, pos016], krystal,
+        new Map([["wA", "0xowner"]]),
+      );
+      const ids = [out[0]!.matchedV3TokenId, out[1]!.matchedV3TokenId];
+      expect(new Set(ids).size).toBe(2);
+      // sort by currentUsd ASC: pos015 (236.47) → k1220776 (249.55)
+      expect(out[0]!.matchedV3TokenId).toBe("1220776");
+      expect(out[1]!.matchedV3TokenId).toBe("1220777");
+      expect(out[0]!.startUsd).toBe(256.51);
+      expect(out[0]!.openedAt).toBe(1772882615);
+    });
+
+    it("PR-K30: N=2 positions vs M=3 candidates → batch skip (N != M)", () => {
+      // Если N != M, batch не активируется (нельзя надёжно спарить).
+      // Single fallback может ИЛИ найти однозначный match через
+      // currentUsd-disambig (PR #99), ИЛИ bail — оба исхода допустимы.
+      const pos015 = basePos({ id: "POS-015", startUsd: 250, currentUsd: 236, supply: [
+        { symbol: "USDT", amount: 50, currentUsd: 50, startUsd: 125 },
+        { symbol: "SLVON", amount: 0.5, currentUsd: 186, startUsd: 125 },
+      ], feesUsd: 0 });
+      pos015.walletId = "wA"; pos015.chain = "eth";
+      const pos016 = basePos({ id: "POS-016", startUsd: 250, currentUsd: 237, supply: [
+        { symbol: "USDT", amount: 50, currentUsd: 50, startUsd: 125 },
+        { symbol: "SLVON", amount: 0.5, currentUsd: 187, startUsd: 125 },
+      ], feesUsd: 0 });
+      pos016.walletId = "wA"; pos016.chain = "eth";
+      // 3 кандидата с identical currentUsd → single fallback bail (ambiguous)
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["1", summary({ tokenId: "1", currentUsd: 249,
+          current: [{ symbol: "USDT", amount: 110, usd: 110 }, { symbol: "SLVON", amount: 1.9, usd: 139 }],
+          pendingUsd: 0, claimedUsd: 0, chainCode: "eth", ownerAddress: "0xowner",
+          pair: ["USDT", "SLVON"],
+        })],
+        ["2", summary({ tokenId: "2", currentUsd: 249,
+          current: [{ symbol: "USDT", amount: 110, usd: 110 }, { symbol: "SLVON", amount: 1.9, usd: 139 }],
+          pendingUsd: 0, claimedUsd: 0, chainCode: "eth", ownerAddress: "0xowner",
+          pair: ["USDT", "SLVON"],
+        })],
+        ["3", summary({ tokenId: "3", currentUsd: 249,
+          current: [{ symbol: "USDT", amount: 110, usd: 110 }, { symbol: "SLVON", amount: 1.9, usd: 139 }],
+          pendingUsd: 0, claimedUsd: 0, chainCode: "eth", ownerAddress: "0xowner",
+          pair: ["USDT", "SLVON"],
+        })],
+      ]);
+      const out = applyKrystalV3Override([pos015, pos016], krystal,
+        new Map([["wA", "0xowner"]]));
+      // Batch skipped (N=2, M=3) → single fallback bail (ambiguous within disambig).
+      const matched = out.filter((p) => p.matchedV3TokenId).length;
+      expect(matched).toBe(0);
+    });
+
+    it("PR-K30: batch требует walletAddressById — без него skip", () => {
+      const pos015 = basePos({ id: "POS-015", startUsd: 250, currentUsd: 236, supply: [
+        { symbol: "USDT", amount: 50, currentUsd: 50, startUsd: 125 },
+        { symbol: "SLVON", amount: 0.5, currentUsd: 186, startUsd: 125 },
+      ], feesUsd: 0 });
+      pos015.walletId = "wA"; pos015.chain = "eth";
+      const pos016 = basePos({ id: "POS-016", startUsd: 250, currentUsd: 237, supply: [
+        { symbol: "USDT", amount: 50, currentUsd: 50, startUsd: 125 },
+        { symbol: "SLVON", amount: 0.5, currentUsd: 187, startUsd: 125 },
+      ], feesUsd: 0 });
+      pos016.walletId = "wA"; pos016.chain = "eth";
+      const krystal = new Map<string, KrystalV3Summary>([
+        ["A", summary({ tokenId: "A", currentUsd: 249,
+          current: [{ symbol: "USDT", amount: 110, usd: 110 }, { symbol: "SLVON", amount: 1.9, usd: 139 }],
+          pendingUsd: 0, claimedUsd: 0, chainCode: "eth", ownerAddress: "0xowner",
+          pair: ["USDT", "SLVON"],
+        })],
+        ["B", summary({ tokenId: "B", currentUsd: 249,
+          current: [{ symbol: "USDT", amount: 110, usd: 110 }, { symbol: "SLVON", amount: 1.9, usd: 139 }],
+          pendingUsd: 0, claimedUsd: 0, chainCode: "eth", ownerAddress: "0xowner",
+          pair: ["USDT", "SLVON"],
+        })],
+      ]);
+      const out = applyKrystalV3Override([pos015, pos016], krystal);
+      const matched = out.filter((p) => p.matchedV3TokenId).length;
+      expect(matched).toBe(0);
+    });
+
     it("walletAddressById не передан — fallback выключен (legacy callers)", () => {
       const pos = basePos({
         id: "POS-LEG",
