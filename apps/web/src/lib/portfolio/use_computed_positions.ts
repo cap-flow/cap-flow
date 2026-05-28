@@ -40,6 +40,11 @@ import {
   useKrystalV3ClosedPools,
 } from "@/lib/krystal/closed_pools_hook";
 import { applyKrystalV3Override } from "@/lib/krystal/override";
+import {
+  useNonLpOpenerDetector,
+  type NonLpOpenerTarget,
+} from "@/lib/nonlp/use_opener_detector";
+import { applyNonLpOpenerOverride } from "@/lib/nonlp/apply_opener_override";
 import { useLotMethodology } from "@/lib/lot_methodology";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
 import { defillamaCoinKey, fetchHistoricalPrices } from "@/lib/defillama";
@@ -335,6 +340,34 @@ export function useComputedPositions(): ComputedPositions {
     return m;
   }, [loadedList]);
 
+  // 2026-05-28 (MMaksimuk no-date audit): Non-LP opener detector. Для
+  // позиций без openedAt (Lending/Yield/Staked/Locked/Deposit/Farming) —
+  // достаём дату открытия через первый receipt-token IN transfer на
+  // Etherscan. Чинит случаи где DeBank не отдал open op (Gnosis Safe,
+  // mint-from-0, за горизонтом истории). Только non-V3-LP (V3 → Krystal).
+  const nonLpOpenerTargets = useMemo<NonLpOpenerTarget[]>(() => {
+    const walletAddrById = new Map<string, string>();
+    for (const l of loadedList) {
+      if (l.wallet.chain === "evm") walletAddrById.set(l.wallet.id, l.wallet.address);
+    }
+    const out: NonLpOpenerTarget[] = [];
+    for (const p of positionsRaw) {
+      if (p.openedAt != null) continue;
+      if (isV3LpProtocol(p.protocol.name)) continue;
+      if (!p.lpTokenId) continue;
+      const wallet = walletAddrById.get(p.walletId);
+      if (!wallet) continue;
+      out.push({
+        positionId: p.id,
+        chainCode: p.chain,
+        receiptToken: p.lpTokenId,
+        wallet,
+      });
+    }
+    return out;
+  }, [positionsRaw, loadedList]);
+  const nonLpOpener = useNonLpOpenerDetector(nonLpOpenerTargets, true);
+
   const positions = useMemo(() => {
     let working: OpenPosition[] = positionsRaw.slice();
     if (v3CostBasisHook.data.size > 0 && v3.data.size > 0) {
@@ -441,6 +474,17 @@ export function useComputedPositions(): ComputedPositions {
         isV3LpProtocol,
       );
     }
+    // 2026-05-28 (MMaksimuk no-date audit, Stage 1): Non-LP opener override.
+    // Проставляет openedAt / ageDays / APR для не-LP позиций без даты,
+    // используя Etherscan-detected дату первого receipt transfer. Guards
+    // внутри: только openedAt==null, только non-V3-LP. startUsd НЕ трогаем.
+    if (nonLpOpener.data.size > 0) {
+      const openerResult = applyNonLpOpenerOverride(working, nonLpOpener.data);
+      if (openerResult.overriddenCount > 0) {
+        for (const w of openerResult.warnings) console.warn(w);
+      }
+      working = openerResult.positions;
+    }
     return working;
   }, [
     positionsRaw,
@@ -456,6 +500,7 @@ export function useComputedPositions(): ComputedPositions {
     krystalV3.data,
     krystalTxHook.data,
     krystalClosedHook.closedKeys,
+    nonLpOpener.data,
     loadedList,
   ]);
 
