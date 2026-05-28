@@ -14,11 +14,11 @@
  *
  * APR (feeApr / feeAprLifetime) пересчитывается на эффективных значениях.
  *
- *   3. coverageIncomplete — для GMX-позиций (GM/GLV/GLP), где receipt пришёл
- *      async/claim/миграцией без видимого депозита И DeBank открытия не дал И
- *      OUT-side пуст: вместо выдуманного startUsd/PnL ставим
- *      `coverageIncomplete=true` + `startUsd=currentUsd` (тот же honest-флаг,
- *      что у V3-orphan'ов). UI рисует «⚠ cost basis incomplete».
+ *   3. coverageIncomplete — для GMX-позиций c пустым OUT-side, когда либо
+ *      DeBank открытия не дал, либо это GLV-vault (UCB cross-pollution +
+ *      недостоверный startUsd даже при наличии DeBank-даты). Ставим
+ *      `coverageIncomplete=true`, `startUsd=currentUsd`, чистим openedInTokens.
+ *      GM (egorovfinance) НЕ затрагивается — DeBank даёт точный deposit-op.
  *
  * Защитные guards:
  *   - применяем ТОЛЬКО к non-V3-LP (V3 LP идут через Krystal openedTime)
@@ -142,16 +142,27 @@ export function applyNonLpOpenerOverride(
     // → openedInTokens непусто → сюда не попадают. egorovfinance: DeBank дал
     // дату (openedAt != null) → не попадает.
     // Скоуп: только GMX (V1/V2) — единственное семейство, где receipt (GM/GLV/
-    // GLP) приходит async/claim/миграцией без видимого депозита, а DeBank-op
-    // отсутствует. Lending/staking/yield/cex могут иметь надёжный startUsd из
-    // lot-трекера БЕЗ DeBank-даты — их флагать нельзя (регрессия). Расширять
-    // на другие Safe-internal vault'ы (Lombard/Locus) — отдельно, с проверкой.
+    // GLP) приходит async/claim/миграцией без видимого депозита.
+    // Два под-случая когда cost basis невосстановим (OUT-side пуст: startUsd
+    // null И openedInTokens пусто):
+    //   (a) DeBank открытия НЕ дал (p.openedAt == null) — MMaksimuk GLV.
+    //   (b) Это GLV-vault (GLV [WETH-USDC]/[WBTC-USDC]) — даже с DeBank-датой
+    //       UCB разкладывает позицию в receipt-токены ОБОИХ vault'ов
+    //       (cross-pollution: «Открыто в» = оба GLV) и даёт недостоверный
+    //       startUsd (Derbent21: $1.87 на dust-позиции). GLV всегда async+claim
+    //       → on-chain OUT недоступен → DeBank-значению доверять нельзя.
+    // GM (egorovfinance) сюда НЕ попадает: не GLV И openedAt != null (DeBank дал
+    // точный deposit-op, проверено до цента) → costBasisUnknown=false.
+    // Lending/staking/yield/cex могут иметь надёжный startUsd из lot-трекера
+    // БЕЗ DeBank-даты — НЕ GMX → не флагаются.
     const isGmx = /\bgmx\b/i.test(p.protocol.name);
+    const isGlv = [...p.supplyTokens, ...p.openedInTokens].some((t) =>
+      /\bGLV\b/i.test(t.symbol),
+    );
+    const noOutSide =
+      opener.startUsd == null && opener.openedInTokens.length === 0;
     const costBasisUnknown =
-      isGmx &&
-      p.openedAt == null &&
-      opener.startUsd == null &&
-      opener.openedInTokens.length === 0;
+      isGmx && noOutSide && (p.openedAt == null || isGlv);
 
     if (notes.length === 0 && !costBasisUnknown) return p; // нечего применять
 
@@ -174,7 +185,10 @@ export function applyNonLpOpenerOverride(
       patch.netPnlPct = 0;
       patch.feeApr = null;
       patch.feeAprLifetime = null;
-      notes.push("cost basis неизвестен (receipt без видимого депозита) → ⚠ incomplete");
+      // Чистим cross-pollution: UCB клал в openedInTokens receipt-токены обоих
+      // GLV-vault'ов. Раз cost basis неизвестен — «Открыто в» тоже пусто.
+      patch.openedInTokens = [];
+      notes.push("cost basis неизвестен (GMX async/claim) → ⚠ incomplete");
     }
 
     overriddenCount++;
