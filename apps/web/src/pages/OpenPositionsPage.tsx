@@ -825,35 +825,8 @@ function OpenPositionsPageInner(): JSX.Element {
         </div>
       </CollapsibleSection>
 
-      {/* Filters + Column settings — на одной строке */}
+      {/* Column settings — фильтрация теперь через дропдауны в заголовках */}
       <div className="flex flex-wrap items-center gap-2">
-        <FiltersDropdown
-          groupFilter={groupFilter}
-          setGroupFilter={setGroupFilter}
-          walletFilter={walletFilter}
-          toggleWallet={(id) => toggleInSet(walletFilter, id, setWalletFilter)}
-          clearWallets={() => setWalletFilter(new Set())}
-          kindFilter={kindFilter}
-          toggleKind={(k) => toggleInSet(kindFilter, k, setKindFilter)}
-          clearKinds={() => setKindFilter(new Set())}
-          chainFilter={chainFilter}
-          toggleChain={(c) => toggleInSet(chainFilter, c, setChainFilter)}
-          clearChains={() => setChainFilter(new Set())}
-          protocolFilter={protocolFilter}
-          toggleProtocol={(id) => toggleInSet(protocolFilter, id, setProtocolFilter)}
-          clearProtocols={() => setProtocolFilter(new Set())}
-          filterPnL={filterPnL}
-          setFilterPnL={setFilterPnL}
-          filterRange={filterRange}
-          setFilterRange={setFilterRange}
-          filterHasFee={filterHasFee}
-          setFilterHasFee={setFilterHasFee}
-          filterHasDebt={filterHasDebt}
-          setFilterHasDebt={setFilterHasDebt}
-          groupCounts={groupCounts}
-          loadedList={loadedList}
-          allPositions={positionsWithAlchemyOverride}
-        />
         <div className="ml-auto">
           <ColumnSettings
             columns={COLUMN_DEFS}

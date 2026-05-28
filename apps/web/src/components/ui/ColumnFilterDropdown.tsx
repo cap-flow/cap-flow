@@ -294,11 +294,9 @@ export function ColumnFilterDropdown(props: Props): JSX.Element {
                   <button type="button" className="hover:text-foreground" onClick={() => onChangeSelected(null)}>
                     Выбрать всё
                   </button>
-                  {filterActive && (
-                    <button type="button" className="hover:text-foreground" onClick={() => onChangeSelected(null)}>
-                      Сбросить фильтр
-                    </button>
-                  )}
+                  <button type="button" className="hover:text-foreground" onClick={() => onChangeSelected([])}>
+                    Снять всё
+                  </button>
                 </div>
                 <div className="max-h-56 overflow-y-auto">
                   {filtered.length === 0 ? (
