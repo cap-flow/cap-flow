@@ -334,6 +334,40 @@ describe("applyNonLpOpenerOverride", () => {
     expect(p.startUsd).toBe(275.03); // UCB-значение сохранено
   });
 
+  it("GLV с DeBank-датой (Derbent21) → flagged incomplete + cross-pollution очищена", () => {
+    // GMX GLV: есть DeBank-дата, но UCB положил в openedInTokens оба GLV-
+    // токена (cross-pollution) и недостоверный startUsd. OUT-side пуст.
+    const base = pos({ id: "POS-GLV2", openedAt: OCT_2025, protoName: "GMX V2", startUsd: 1.87 });
+    const p0: OpenPosition = {
+      ...base,
+      supplyTokens: [
+        { symbol: "GLV [WETH-USDC]", amount: 1.36, startUsd: 1.87, currentUsd: 1.58 } as never,
+      ],
+      openedInTokens: [
+        { symbol: "GLV [WETH-USDC]", amount: 1.36 },
+        { symbol: "GLV [WBTC-USDC]", amount: 1.36 },
+      ],
+    };
+    const out = applyNonLpOpenerOverride([p0], openerMap(OCT_2025), WALLET_MAP);
+    const r = out.positions[0]!;
+    expect(r.coverageIncomplete).toBe(true);
+    expect(r.startUsd).toBe(r.currentUsd); // честно: историю не знаем
+    expect(r.openedInTokens).toEqual([]); // cross-pollution очищена
+  });
+
+  it("GMX GM с DeBank-датой (egorovfinance, НЕ GLV) → НЕ flagged", () => {
+    // GM-маркет (не GLV): DeBank дал точный deposit-op → startUsd сохраняем.
+    const base = pos({ id: "POS-GM2", openedAt: OCT_2025, protoName: "GMX V2", startUsd: 275.03 });
+    const p0: OpenPosition = {
+      ...base,
+      supplyTokens: [{ symbol: "GM", amount: 100, startUsd: 275.03, currentUsd: 280 } as never],
+    };
+    const out = applyNonLpOpenerOverride([p0], openerMap(OCT_2025), WALLET_MAP);
+    const r = out.positions[0]!;
+    expect(r.coverageIncomplete).toBeUndefined();
+    expect(r.startUsd).toBe(275.03);
+  });
+
   it("GMX с видимым депозитом (openedInTokens) → startUsd из OUT, НЕ flagged", () => {
     const op: NonLpOpener = {
       openedAt: OCT_2025, openBlock: 1, txHash: "0xg", receiptAmount: 1,
