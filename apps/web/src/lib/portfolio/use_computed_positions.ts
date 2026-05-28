@@ -352,7 +352,9 @@ export function useComputedPositions(): ComputedPositions {
     }
     const out: NonLpOpenerTarget[] = [];
     for (const p of positionsRaw) {
-      if (p.openedAt != null) continue;
+      // Stage 2c: НЕ фильтруем по openedAt — OUT-side cost basis нужен и для
+      // позиций С датой (GMX V2 GLV имеет UCB-дату, но wrong startUsd). Date
+      // override остаётся conditional (openedAt==null) внутри override-функции.
       if (isV3LpProtocol(p.protocol.name)) continue;
       if (!p.lpTokenId) continue;
       const wallet = walletAddrById.get(p.walletId);
