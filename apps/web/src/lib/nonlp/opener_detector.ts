@@ -28,6 +28,12 @@ import {
   fetchEtherscanTokenTransfers,
   fetchEtherscanWalletTokenTransfers,
 } from "../etherscan_logs";
+import {
+  fetchAlchemyWalletTransfers,
+  fetchBlockTimestamps,
+  isAlchemyChainSupported,
+  type AlchemyTransfer,
+} from "./alchemy_transfers";
 
 export interface NonLpOpener {
   /** Unix seconds — block time первого receipt IN transfer. */
@@ -138,11 +144,34 @@ export function resolveOpenersFromTransfers(
 }
 
 /**
+ * Pure: из Alchemy transfers (без timestamp — только blockNumber) найти
+ * для каждого lpTokenId earliest matched блок. Timestamp резолвится отдельно.
+ * Возвращает Map<lpTokenId(lower), {blockNumber, ...}>.
+ */
+export function resolveOpenerBlocksFromAlchemy(
+  transfers: readonly AlchemyTransfer[],
+  receiptTokens: readonly string[],
+): Map<string, { blockNumber: number; hash: string }> {
+  const out = new Map<string, { blockNumber: number; hash: string }>();
+  const sorted = [...transfers].sort((a, b) => a.blockNumber - b.blockNumber);
+  for (const raw of receiptTokens) {
+    const lp = raw.toLowerCase();
+    const hit = sorted.find(
+      (t) => t.to === lp || t.from === lp || t.contractAddress === lp,
+    );
+    if (!hit) continue;
+    out.set(lp, { blockNumber: hit.blockNumber, hash: hit.hash });
+  }
+  return out;
+}
+
+/**
  * Fetch + resolve openers для всех lpTokenId одного (wallet, chain) одним
- * запросом всей token-transfer истории. Используется как fallback/основной
- * путь для staking/locked/lending (где per-token fetch не работает).
+ * запросом всей token-transfer истории.
  *
- * Throws EtherscanChainNotSupportedError если chain не поддержан (BASE/...).
+ * Primary: Etherscan (eth/arb/op/matic/bsc — pre-parsed transfers).
+ * Fallback (Stage 1b): если Etherscan free не поддерживает chain (BASE/avax)
+ * → Alchemy `getAssetTransfers` + `eth_getBlockByNumber` для timestamp.
  */
 export async function detectNonLpOpenersForWalletChain(args: {
   chainCode: string;
@@ -151,8 +180,33 @@ export async function detectNonLpOpenersForWalletChain(args: {
 }): Promise<Map<string, NonLpOpener>> {
   const { chainCode, wallet, receiptTokens } = args;
   if (receiptTokens.length === 0) return new Map();
-  const transfers = await fetchEtherscanWalletTokenTransfers(chainCode, wallet);
-  return resolveOpenersFromTransfers(transfers, receiptTokens);
+  try {
+    const transfers = await fetchEtherscanWalletTokenTransfers(chainCode, wallet);
+    return resolveOpenersFromTransfers(transfers, receiptTokens);
+  } catch (e) {
+    if (!(e instanceof EtherscanChainNotSupportedError)) throw e;
+    // Stage 1b: Etherscan не поддерживает chain → Alchemy fallback.
+    if (!isAlchemyChainSupported(chainCode)) throw e;
+    const transfers = await fetchAlchemyWalletTransfers(chainCode, wallet);
+    const blocks = resolveOpenerBlocksFromAlchemy(transfers, receiptTokens);
+    if (blocks.size === 0) return new Map();
+    const tsByBlock = await fetchBlockTimestamps(
+      chainCode,
+      Array.from(blocks.values()).map((b) => b.blockNumber),
+    );
+    const out = new Map<string, NonLpOpener>();
+    for (const [lp, b] of blocks) {
+      const ts = tsByBlock.get(b.blockNumber);
+      if (ts == null) continue;
+      out.set(lp, {
+        openedAt: ts,
+        openBlock: b.blockNumber,
+        txHash: b.hash,
+        receiptAmount: 0,
+      });
+    }
+    return out;
+  }
 }
 
 export { EtherscanChainNotSupportedError };

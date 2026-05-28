@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveOpenersFromTransfers } from "./opener_detector";
+import {
+  resolveOpenerBlocksFromAlchemy,
+  resolveOpenersFromTransfers,
+} from "./opener_detector";
+import type { AlchemyTransfer } from "./alchemy_transfers";
 
 type T = {
   timeStamp: number;
@@ -122,5 +126,54 @@ describe("resolveOpenersFromTransfers", () => {
   it("пустой receiptTokens list → пустой результат", () => {
     const transfers = [tx({ to: STAKING })];
     expect(resolveOpenersFromTransfers(transfers, []).size).toBe(0);
+  });
+});
+
+describe("resolveOpenerBlocksFromAlchemy", () => {
+  const atx = (p: Partial<AlchemyTransfer>): AlchemyTransfer => ({
+    blockNumber: 100,
+    hash: "0xa",
+    from: WALLET,
+    to: "0xother",
+    contractAddress: "0xtoken",
+    ...p,
+  });
+
+  it("vault: receipt mint (contract==lpTokenId) → earliest block", () => {
+    const out = resolveOpenerBlocksFromAlchemy(
+      [atx({ blockNumber: 70395890, hash: "0xmint", to: WALLET, contractAddress: VAULT })],
+      [VAULT],
+    );
+    expect(out.get(VAULT)!.blockNumber).toBe(70395890);
+    expect(out.get(VAULT)!.hash).toBe("0xmint");
+  });
+
+  it("staking: to==lpTokenId → matched", () => {
+    const out = resolveOpenerBlocksFromAlchemy(
+      [atx({ blockNumber: 500, to: STAKING })],
+      [STAKING],
+    );
+    expect(out.get(STAKING)!.blockNumber).toBe(500);
+  });
+
+  it("берёт earliest по blockNumber (нет timestamp у Alchemy)", () => {
+    const out = resolveOpenerBlocksFromAlchemy(
+      [
+        atx({ blockNumber: 900, to: STAKING, hash: "0xlate" }),
+        atx({ blockNumber: 300, to: STAKING, hash: "0xearly" }),
+        atx({ blockNumber: 600, to: STAKING, hash: "0xmid" }),
+      ],
+      [STAKING],
+    );
+    expect(out.get(STAKING)!.blockNumber).toBe(300);
+    expect(out.get(STAKING)!.hash).toBe("0xearly");
+  });
+
+  it("нет matched transfer → не в результате", () => {
+    const out = resolveOpenerBlocksFromAlchemy(
+      [atx({ to: "0xunrelated", contractAddress: "0xunrelated" })],
+      [STAKING],
+    );
+    expect(out.size).toBe(0);
   });
 });
