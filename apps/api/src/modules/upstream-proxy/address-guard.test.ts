@@ -241,6 +241,52 @@ describe("address-guard — Alchemy extraction", () => {
     expect(r.invalid).toHaveLength(0);
   });
 
+  it("eth_getBlockByNumber(blockHex) — short hex block НЕ flag'нуть как malformed", () => {
+    // Stage 1b avax fix: non-LP opener detector делает
+    // eth_getBlockByNumber("0x43325f2", false) чтобы достать timestamp
+    // блока. params[0] = block hex (короткий, ≠ 40-char addr). Раньше
+    // walkParamElement(params[0]) флагал как malformed → 400 → avax даты
+    // не резолвились. Метода нет в ADDRESS_FIRST_PARAM_METHODS → params[0]
+    // string не проверяется как адрес.
+    const r = extractAddresses(
+      req({
+        provider: "alchemy",
+        method: "POST",
+        path: "avax-mainnet",
+        body: {
+          jsonrpc: "2.0",
+          method: "eth_getBlockByNumber",
+          params: ["0x43325f2", false],
+          id: 1,
+        },
+      }),
+    );
+    expect(r.addresses).toHaveLength(0);
+    expect(r.invalid).toHaveLength(0);
+  });
+
+  it("eth_getBalance(addr) всё ещё извлекает address из params[0]", () => {
+    // Регрессия-guard: ADDRESS_FIRST_PARAM_METHODS должен СОХРАНИТЬ
+    // извлечение для методов где params[0] реально user-address.
+    const r = extractAddresses(
+      req({
+        provider: "alchemy",
+        method: "POST",
+        path: "eth-mainnet",
+        body: {
+          jsonrpc: "2.0",
+          method: "eth_getBalance",
+          params: ["0x10b850c3abfca78d693c9cd6fce809c129109d1c", "latest"],
+          id: 1,
+        },
+      }),
+    );
+    expect(r.addresses).toHaveLength(1);
+    expect(r.addresses[0]!.normalized).toBe(
+      "0x10b850c3abfca78d693c9cd6fce809c129109d1c",
+    );
+  });
+
   it("decide() для eth_getTransactionReceipt → allow", () => {
     const txHash =
       "0xa4b7940802fa46b801102989ed5d363beb1579004893c680ce3e5234db7ec3c9";
