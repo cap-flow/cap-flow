@@ -40,6 +40,14 @@ import { useComputedPositions } from "@/lib/portfolio/use_computed_positions";
 import { useLotMethodology } from "@/lib/lot_methodology";
 import { LotMethodologyHelpDialog } from "@/components/LotMethodologyHelpDialog";
 import { ColumnHelpDialog, hasColumnHelp } from "@/components/ColumnHelpDialog";
+import { ColumnFilterDropdown } from "@/components/ui/ColumnFilterDropdown";
+import {
+  COLUMN_KIND,
+  applyColumnSortFilter,
+  distinctColumnValues,
+  type CellContext,
+  type SortDir,
+} from "@/lib/portfolio/column_sort_filter";
 import {
   defillamaCoinKey,
   fetchHistoricalPrices,
@@ -405,6 +413,14 @@ function OpenPositionsPageInner(): JSX.Element {
   const [filterHasFee, setFilterHasFee] = useState(false);
   const [filterHasDebt, setFilterHasDebt] = useState(false);
 
+  // Per-column сортировка + value-фильтры (Google-Sheets-style на заголовках).
+  const [sortCol, setSortCol] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  // colId → выбранные значения. Присутствие ключа = фильтр активен.
+  const [colValueFilters, setColValueFilters] = useState<Record<string, string[]>>(
+    {},
+  );
+
   // Helper toggles for multi-select sets.
   function toggleInSet<T>(
     set: ReadonlySet<T>,
@@ -493,7 +509,8 @@ function OpenPositionsPageInner(): JSX.Element {
     [activePurchasePositionId, positionsWithAlchemyOverride],
   );
 
-  const view = positionsWithAlchemyOverride.filter((p) => {
+  // Базовый набор: глобальные фильтры (FiltersDropdown + status toggles).
+  const viewBase = positionsWithAlchemyOverride.filter((p) => {
     if (!showHidden && hiddenKeys.has(p.id)) return false;
     if (groupFilter !== "all") {
       const wallet = loadedList.find((l) => l.wallet.id === p.walletId)?.wallet;
@@ -513,6 +530,20 @@ function OpenPositionsPageInner(): JSX.Element {
     if (filterHasDebt && p.currentDebtUsd <= 0) return false;
     return true;
   });
+
+  // Контекст для per-column сортировки/фильтра. sumCurrentUsd = Σ по базовому
+  // набору (знаменатель «Вес %»); используется и для distinct-списков значений.
+  const cellCtx: CellContext = {
+    sumCurrentUsd: viewBase.reduce((s, p) => s + p.currentUsd, 0),
+    locale,
+  };
+  // Финальный набор для таблицы/аналитики: + per-column value-фильтры (членство)
+  // и сортировка (порядок). Глобальная аналитика ниже считается по `view`.
+  const view = applyColumnSortFilter(
+    viewBase,
+    { sortCol, sortDir, valueFilters: colValueFilters },
+    cellCtx,
+  );
 
   // ─────────────────────────────────────────────────────────────────────
   //  V3 NFT → OpenPosition assignment
@@ -898,6 +929,30 @@ function OpenPositionsPageInner(): JSX.Element {
                             >
                               ?
                             </button>
+                          )}
+                          {c.id !== "capital" && (
+                            <ColumnFilterDropdown
+                              kind={COLUMN_KIND[c.id] ?? "text"}
+                              sortDir={sortCol === c.id ? sortDir : null}
+                              filterActive={c.id in colValueFilters}
+                              computeValues={() =>
+                                distinctColumnValues(viewBase, c.id, cellCtx)
+                              }
+                              selected={colValueFilters[c.id] ?? null}
+                              onSort={(dir) => {
+                                setSortCol(c.id);
+                                setSortDir(dir);
+                              }}
+                              onClearSort={() => setSortCol(null)}
+                              onChangeSelected={(next) =>
+                                setColValueFilters((prev) => {
+                                  const copy = { ...prev };
+                                  if (next === null) delete copy[c.id];
+                                  else copy[c.id] = next;
+                                  return copy;
+                                })
+                              }
+                            />
                           )}
                         </span>
                       </Th>
