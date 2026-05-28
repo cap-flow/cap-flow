@@ -2,25 +2,36 @@ import { z } from "zod";
 
 import { api } from "@/lib/api/client";
 
+export const adminOperationMovementSchema = z.object({
+  symbol: z.string(),
+  amount: z.number(),
+  usd: z.number().nullable(),
+  direction: z.enum(["in", "out"]),
+});
+export type AdminOperationMovement = z.infer<
+  typeof adminOperationMovementSchema
+>;
+
 export const adminOperationRowSchema = z.object({
   id: z.string().uuid(),
+  walletId: z.string().uuid(),
+  walletName: z.string(),
   accountId: z.string().uuid(),
   accountName: z.string(),
   ownerId: z.string().uuid(),
   ownerEmail: z.string().nullable(),
   ownerName: z.string().nullable(),
-  date: z.string(),
-  type: z.string(),
-  source: z.string(),
-  fromName: z.string().nullable(),
-  toName: z.string().nullable(),
-  cur1: z.string().nullable(),
-  amount1: z.string().nullable(),
-  cur2: z.string().nullable(),
-  amount2: z.string().nullable(),
-  priceUsd: z.string().nullable(),
-  network: z.string().nullable(),
-  comment: z.string(),
+  opTime: z.string().datetime(),
+  opType: z.string(),
+  chain: z.string(),
+  status: z.string(),
+  txHash: z.string(),
+  protocol: z.string().nullable(),
+  counterparty: z.string().nullable(),
+  netUsd: z.number().nullable(),
+  gasUsd: z.number().nullable(),
+  movements: z.array(adminOperationMovementSchema),
+  notes: z.array(z.string()),
   createdAt: z.string().datetime(),
 });
 export type AdminOperationRow = z.infer<typeof adminOperationRowSchema>;
@@ -33,14 +44,19 @@ export const adminOperationsPageSchema = z.object({
 });
 export type AdminOperationsPage = z.infer<typeof adminOperationsPageSchema>;
 
-const facetsSchema = z.object({ networks: z.array(z.string()) });
+const facetsSchema = z.object({
+  chains: z.array(z.string()),
+  opTypes: z.array(z.string()),
+});
 export type AdminOperationsFacets = z.infer<typeof facetsSchema>;
 
 export interface AdminOperationsParams {
   readonly userId?: string;
   readonly accountId?: string;
+  readonly walletId?: string;
   readonly type?: string;
-  readonly network?: string;
+  readonly chain?: string;
+  readonly status?: string;
   readonly from?: string;
   readonly to?: string;
   readonly search?: string;
