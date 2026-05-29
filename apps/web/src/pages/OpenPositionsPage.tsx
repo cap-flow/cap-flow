@@ -35,6 +35,10 @@ import {
 import { PurchaseHistoryPopup } from "@/components/PurchaseHistoryPopup";
 import { useCexWithdrawalCostBasis } from "@/features/cex/hooks";
 import type { CexCostBasisMatch } from "@/lib/portfolio/position_coverage";
+import {
+  MIN_START_USD_FOR_PCT,
+  safePnlPct,
+} from "@/lib/portfolio/display_pnl";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
 import { useComputedPositions } from "@/lib/portfolio/use_computed_positions";
 import { useLotMethodology } from "@/lib/lot_methodology";
@@ -1294,8 +1298,7 @@ function PositionRow({
   const { locale } = useI18n();
   // PnL позиций — только движение цены (без fee).
   const priceOnlyPnl = p.currentUsd - p.startUsd;
-  const priceOnlyPnlPct =
-    p.startUsd > 0 ? (priceOnlyPnl / p.startUsd) * 100 : 0;
+  const priceOnlyPnlPct = safePnlPct(priceOnlyPnl, p.startUsd);
   // Total — fee lifetime (pending + claimed) для отображения в Fee колонке.
   // НО для Aave-style supply_yield positions pending fee УЖЕ в currentUsd
   // (rebase). Для отображения в Fee column используем визуальный сырой
@@ -1305,9 +1308,9 @@ function PositionRow({
   const feesLifetime = feesPending + feesClaimed;
   const totalAssets = totalAssetsOf(p);
   const totalPnlUsd = totalAssets - p.startUsd;
-  const totalPnlPct = p.startUsd > 0 ? (totalPnlUsd / p.startUsd) * 100 : 0;
+  const totalPnlPct = safePnlPct(totalPnlUsd, p.startUsd);
   const totalApr =
-    p.ageDays != null && p.ageDays > 0 && p.startUsd > 0
+    p.ageDays != null && p.ageDays > 0 && p.startUsd >= MIN_START_USD_FOR_PCT
       ? (totalPnlUsd / p.startUsd) * (365 / p.ageDays) * 100
       : null;
   const weightPct =
@@ -2050,7 +2053,13 @@ function computeAnalytics(positions: OpenPosition[]): AnalyticsData {
   let feeAprWSum = 0;
   let feeAprWeightDenom = 0;
   for (const p of positions) {
-    if (!p.ageDays || p.ageDays <= 0 || p.currentUsd <= 0 || p.startUsd <= 0) continue;
+    if (
+      !p.ageDays ||
+      p.ageDays <= 0 ||
+      p.currentUsd <= 0 ||
+      p.startUsd < MIN_START_USD_FOR_PCT
+    )
+      continue;
     const totalPnlI = totalAssetsOf(p) - p.startUsd;
     const totalAprI = (totalPnlI / p.startUsd) * (365 / p.ageDays) * 100;
     totalAprWSum += totalAprI * p.currentUsd;
@@ -3151,8 +3160,25 @@ function CapitalToggle({
   );
 }
 
-function PnlCell({ usd, pct }: { usd: number; pct: number }) {
+function PnlCell({ usd, pct }: { usd: number; pct: number | null }) {
   const { locale } = useI18n();
+  // pct === null → startUsd неизвестна/≈0 (cost basis incomplete). Показываем
+  // ⚠ вместо абсурдного % И вместо misleading $ (который ≈ currentUsd, когда
+  // start ≈ 0). Симметрично FeeAprCell.
+  if (pct === null) {
+    return (
+      <span
+        className="text-amber-500 font-medium inline-flex items-center gap-1 cursor-help"
+        title={
+          "PnL недостоверен: стартовая сумма (cost basis) неизвестна или ≈0 — " +
+          "classifier мог не захватить deposit (напр. Velodrome gauge-staked). " +
+          "Проверьте детали позиции."
+        }
+      >
+        ⚠ —
+      </span>
+    );
+  }
   const positive = usd >= 0;
   return (
     <>
