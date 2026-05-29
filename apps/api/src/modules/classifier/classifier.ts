@@ -400,6 +400,19 @@ function classifyDex(
   const sendsLp = sends.some((s) => s.isProtocolToken);
   const recvLp = receives.some((r) => r.isProtocolToken);
 
+  // Gauge unstake (Velodrome/Aerodrome CL Slipstream): `CLGauge.withdraw(tokenId)`
+  // возвращает позиционный NFT из gauge в кошелёк — protocol-token IN, при этом
+  // НИЧЕГО не уходит. Это РАССТЕЙК, не внесение ликвидности. Без этого guard'а
+  // ветка `recvLp && !sendsLp` ниже метит его `lp_add` → ложный opener с датой
+  // анстейка и нулевым cost basis (POS-011). Реальный mint имеет sends
+  // (underlying) → сюда не попадает.
+  const fnName = (it.tx?.name ?? "").toLowerCase();
+  if (recvLp && !sendsLp && sends.length === 0 && fnName.includes("withdraw")) {
+    return base(it, seq, "unstake", protocol, movement, status, [
+      "gauge-unstake",
+    ]);
+  }
+
   if (recvLp && !sendsLp) {
     return base(it, seq, "lp_add", protocol, movement, status);
   }

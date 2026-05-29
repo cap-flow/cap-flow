@@ -32,6 +32,10 @@ const TOKENS: Record<string, DeBankToken> = {
   "eth:arb": tok("eth:arb", "ARB", 1.5),
   "eth:uni-v2": tok("eth:uni-v2", "UNI-V2", 100),
   "eth:lib": tok("eth:lib", "LIBRARY.io", 0), // scam-ish, no price
+  // Velodrome V3 (Slipstream) CL position NFT receipt + underlying (Optimism).
+  "op:velo-cl-pos": tok("op:velo-cl-pos", "VELO-CL-POS"),
+  "op:weth": tok("op:weth", "WETH", 4356),
+  "op:wbtc": tok("op:wbtc", "WBTC", 120590),
 };
 
 const PROJECTS: Record<string, DeBankProject> = {
@@ -43,6 +47,7 @@ const PROJECTS: Record<string, DeBankProject> = {
   "eth_etherfi": proj("eth_etherfi", "Ether.fi"),
   "eth_stargate": proj("eth_stargate", "Stargate"),
   "arb_pendle": proj("arb_pendle", "Pendle"),
+  "op_velodrome3": proj("op_velodrome3", "Velodrome V3"),
 };
 
 const CEX = {
@@ -604,5 +609,38 @@ describe("classifyHistory — movement enrichment", () => {
     const inMv = r.movement.find((m) => m.direction === "in")!;
     expect(inMv.symbol).toBe("aArbUSDC");
     expect(inMv.isProtocolToken).toBe(true);
+  });
+});
+
+/* --------------------- Velodrome gauge unstake (Bug A) -------------------- */
+
+describe("classifyDex — Velodrome/Aerodrome gauge unstake", () => {
+  // CLGauge.withdraw(tokenId) возвращает позиционный NFT из gauge в кошелёк
+  // (protocol-token IN, ничего не уходит). Это РАССТЕЙК, не внесение —
+  // иначе ложный opener с неверной датой и нулевым cost basis (POS-011).
+  it("withdraw() возвращающий позиционный NFT → unstake, не lp_add", () => {
+    const op = item({
+      chain: "op",
+      projectId: "op_velodrome3",
+      receives: [{ token: "op:velo-cl-pos", amount: 1 }],
+      tx: { name: "withdraw" },
+    });
+    expect(classifyHistory([op], ctx())[0]!.type).toBe("unstake");
+  });
+
+  // Регрессия: реальный mint (внесение WETH/WBTC + получение NFT) остаётся
+  // lp_add — guard не должен его трогать (есть sends, fnName=mint).
+  it("реальный CL mint (внесение) остаётся lp_add", () => {
+    const op = item({
+      chain: "op",
+      projectId: "op_velodrome3",
+      sends: [
+        { token: "op:weth", amount: 0.0269 },
+        { token: "op:wbtc", amount: 0.001 },
+      ],
+      receives: [{ token: "op:velo-cl-pos", amount: 1 }],
+      tx: { name: "mint" },
+    });
+    expect(classifyHistory([op], ctx())[0]!.type).toBe("lp_add");
   });
 });
