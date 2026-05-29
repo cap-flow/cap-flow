@@ -299,6 +299,27 @@ export async function attachBlockTimes(
   }));
 }
 
+/**
+ * A cached cost-basis result is only trustworthy when it actually resolved
+ * historical USD prices.
+ *
+ * 2026-05-29 (MMaksimuk POS-024 prod incident): entries persisted during an
+ * upstream price-feed outage carry `hasHistPrices:false` + `netCostBasisUsd:0`
+ * even though their on-chain event amounts are correct. Concretely: the prod
+ * Caddy `/defillama` proxy returned SPA HTML for a while, so `fetchHistoricalPrices`
+ * yielded nothing and the Velodrome NFT cached as `{netCostBasisUsd:0,
+ * hasHistPrices:false, totalDeposited0:0.0269, totalDeposited1:0.001}`. The
+ * `useV3LiquidityEvents` module/localStorage cache then served that $0 forever —
+ * the proxy fix alone never took effect because the hook early-returns from
+ * cache and never recomputes. Such entries must be recomputed (and not
+ * re-persisted), never trusted, once the feed recovers.
+ */
+export function isTrustworthyCostBasis(
+  r: Pick<V3CostBasisResult, "hasHistPrices">,
+): boolean {
+  return r.hasHistPrices === true;
+}
+
 export interface V3CostBasisResult {
   /** tokenId NFT (для match'а с V3Position). */
   tokenId: bigint;
