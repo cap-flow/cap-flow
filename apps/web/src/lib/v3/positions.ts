@@ -18,7 +18,15 @@ import {
   type PublicClient,
 } from "viem";
 
-import { ERC20_ABI, FACTORY_ABI, NPM_ABI, POOL_ABI } from "./abis";
+import { fetchMintedNftTokenIds } from "../nonlp/alchemy_transfers";
+import {
+  ERC20_ABI,
+  FACTORY_ABI,
+  NPM_ABI,
+  POOL_ABI,
+  VELODROME_FACTORY_ABI,
+  VELODROME_POOL_ABI,
+} from "./abis";
 import { alchemyRpcUrl, type V3Deployment } from "./chains";
 import {
   isInRange,
@@ -139,6 +147,22 @@ export async function fetchV3PositionsForDeployment(
 
   if (tokenIds.length === 0) return [];
 
+  return assembleV3Positions(client, dep, tokenIds);
+}
+
+/**
+ * Сборка `V3Position[]` из набора tokenId. Общий путь для wallet-owned
+ * discovery (`fetchV3PositionsForDeployment`) и gauge-staked discovery
+ * (`fetchV3StakedPositions`): делает positions()/getPool/slot0 multicall'ы,
+ * фильтрует liquidity>0, считает текущие amounts.
+ */
+async function assembleV3Positions(
+  client: ReturnType<typeof makeClient>,
+  dep: V3Deployment,
+  tokenIds: bigint[],
+): Promise<V3Position[]> {
+  if (tokenIds.length === 0) return [];
+
   // 3) positions(tokenId) для всех
   const posCalls = tokenIds.map((id) => ({
     address: dep.npm,
@@ -206,9 +230,14 @@ export async function fetchV3PositionsForDeployment(
   }
   const tokenList = Array.from(tokens);
 
+  // Velodrome/Aerodrome Slipstream: getPool(...,int24 tickSpacing) — другой
+  // селектор, иначе reverts (Uniswap ABI). `a.fee` = tickSpacing для CL.
+  const factoryAbi = /velodrome|aerodrome/i.test(dep.id)
+    ? VELODROME_FACTORY_ABI
+    : FACTORY_ABI;
   const poolCalls = active.map((a) => ({
     address: dep.factory,
-    abi: FACTORY_ABI,
+    abi: factoryAbi,
     functionName: "getPool" as const,
     args: [a.token0, a.token1, a.fee] as const,
   }));
@@ -253,9 +282,13 @@ export async function fetchV3PositionsForDeployment(
       poolByIdx.filter((p): p is Address => p != null && p !== "0x0000000000000000000000000000000000000000"),
     ),
   );
+  // Velodrome/Aerodrome Slipstream pool slot0 без feeProtocol (6 полей).
+  const poolAbi = /velodrome|aerodrome/i.test(dep.id)
+    ? VELODROME_POOL_ABI
+    : POOL_ABI;
   const slotCalls = uniquePools.map((addr) => ({
     address: addr,
-    abi: POOL_ABI,
+    abi: poolAbi,
     functionName: "slot0" as const,
   }));
 
@@ -265,7 +298,8 @@ export async function fetchV3PositionsForDeployment(
   for (let i = 0; i < uniquePools.length; i++) {
     const r = slotRes[i];
     if (r.status === "success") {
-      const s = r.result as readonly [bigint, number, number, number, number, number, boolean];
+      // sqrtPriceX96 + tick — первые два поля в обоих layout'ах (Uniswap 7 / Velodrome 6).
+      const s = r.result as readonly [bigint, number, ...unknown[]];
       slotByPool.set(uniquePools[i], { sqrtPriceX96: s[0], tick: s[1] });
     }
   }
@@ -333,4 +367,53 @@ export async function fetchV3PositionsForDeployment(
     });
   }
   return out;
+}
+
+/**
+ * Gauge-staked V3 позиции (Velodrome/Aerodrome CL Slipstream).
+ *
+ * После stake'а NFT принадлежит CLGauge, поэтому `balanceOf(wallet)=0` и
+ * `fetchV3PositionsForDeployment` её не находит. Здесь:
+ *   1. enumerate'им все NFT данного NPM, **сминченные** на кошелёк
+ *      (mint-событие 0x0 → wallet остаётся в истории даже после stake'а);
+ *   2. `ownerOf(tokenId)` — оставляем те, что больше НЕ у кошелька
+ *      (= застейканы в gauge либо переведены); burned (revert) отсекаются;
+ *   3. собираем через общий `assembleV3Positions` (он сам фильтрует
+ *      liquidity>0 — закрытые/выведенные позиции отпадают).
+ *
+ * Результат вливается в тот же V3PositionMap → существующий events→override
+ * путь (`useV3LiquidityEvents` + `applyV3CostBasisOverride`) считает honest
+ * cost basis из IncreaseLiquidity. Никакой новой override-логики не нужно.
+ */
+export async function fetchV3StakedPositions(
+  dep: V3Deployment,
+  wallet: Address,
+  apiKey: string,
+): Promise<V3Position[]> {
+  const minted = await fetchMintedNftTokenIds(dep.chainCode, dep.npm, wallet);
+  if (minted.length === 0) return [];
+
+  const client = makeClient(dep, apiKey);
+
+  // ownerOf для всех сминченных — оставляем НЕ-у-кошелька (staked в gauge).
+  const ownerCalls = minted.map((id) => ({
+    address: dep.npm,
+    abi: NPM_ABI,
+    functionName: "ownerOf" as const,
+    args: [id] as const,
+  }));
+  const ownerRes = await client.multicall({
+    contracts: ownerCalls,
+    allowFailure: true,
+  });
+  const walletLc = wallet.toLowerCase();
+  const stakedIds: bigint[] = [];
+  for (let i = 0; i < ownerRes.length; i++) {
+    const r = ownerRes[i];
+    if (r.status !== "success") continue; // burned → ownerOf reverts
+    const owner = (r.result as Address).toLowerCase();
+    if (owner === walletLc) continue; // ещё у кошелька → покрыто обычным path
+    stakedIds.push(minted[i]);
+  }
+  return assembleV3Positions(client, dep, stakedIds);
 }
