@@ -287,6 +287,42 @@ describe("address-guard — Alchemy extraction", () => {
     );
   });
 
+  it("eth_getLogs(address=contract, topics) — НЕ извлекать contract как user-owned", () => {
+    // useV3LiquidityEvents (gauge-staked Velodrome fallback) фетчит
+    // IncreaseLiquidity events: eth_getLogs({address: NPM contract,
+    // topics:[eventSig, tokenId]}). `address` тут — contract-emitter фильтр
+    // (публичные данные, как Etherscan logs-модуль), НЕ user wallet.
+    // Раньше address-guard брал params[0].address и enforce'ил ownership
+    // → 403 → cost basis для Velodrome не считался.
+    const r = extractAddresses(
+      req({
+        provider: "alchemy",
+        method: "POST",
+        path: "opt-mainnet",
+        body: [
+          {
+            jsonrpc: "2.0",
+            method: "eth_getLogs",
+            params: [
+              {
+                address: "0x416b433906b1b72fa758e166e239c43d68dc6f29",
+                topics: [
+                  "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f",
+                  "0x000000000000000000000000000000000000000000000000000000000034505e",
+                ],
+                fromBlock: "earliest",
+                toBlock: "latest",
+              },
+            ],
+            id: 1,
+          },
+        ],
+      }),
+    );
+    expect(r.addresses).toHaveLength(0);
+    expect(r.invalid).toHaveLength(0);
+  });
+
   it("decide() для eth_getTransactionReceipt → allow", () => {
     const txHash =
       "0xa4b7940802fa46b801102989ed5d363beb1579004893c680ce3e5234db7ec3c9";

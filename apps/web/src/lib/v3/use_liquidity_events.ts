@@ -536,7 +536,7 @@ export function useV3LiquidityEvents(
       //   5. Если всё mimo — null (skipping cost basis для этого event'а).
       function deriveUsdPrices(
         target: Target,
-        pp: PoolPriceCacheValue,
+        pp: PoolPriceCacheValue | undefined,
         event?: V3LiquidityEvent,
       ): { p0: number; p1: number } | null {
         const t0Sym = target.position.token0.symbol;
@@ -545,22 +545,25 @@ export function useV3LiquidityEvents(
         const t1Addr = target.position.token1.address.toLowerCase();
         const stable0 = isStableSymbol(t0Sym);
         const stable1 = isStableSymbol(t1Sym);
-        if (stable1) {
-          return { p0: pp.price1Per0, p1: 1 };
-        }
-        if (stable0) {
-          if (pp.price1Per0 <= 0) return null;
-          return { p0: 1, p1: 1 / pp.price1Per0 };
-        }
-        const anchorAddr = pp.anchorTokenAddress?.toLowerCase();
-        const anchorUsd = pp.anchorTokenUsd;
-        if (anchorAddr && anchorUsd && anchorUsd > 0) {
-          if (t0Addr === anchorAddr) {
-            if (pp.price1Per0 <= 0) return null;
-            return { p0: anchorUsd, p1: anchorUsd / pp.price1Per0 };
+        // slot0-based pricing — только если pool price прочитан. Для Velodrome
+        // Slipstream pool slot0 (6 полей) decode падает в fetchPoolMintPrice
+        // → pp undefined → идём сразу в DefiLlama-фоллбэк ниже.
+        if (pp) {
+          if (stable1) {
+            return { p0: pp.price1Per0, p1: 1 };
           }
-          if (t1Addr === anchorAddr) {
-            return { p0: anchorUsd * pp.price1Per0, p1: anchorUsd };
+          if (stable0 && pp.price1Per0 > 0) {
+            return { p0: 1, p1: 1 / pp.price1Per0 };
+          }
+          const anchorAddr = pp.anchorTokenAddress?.toLowerCase();
+          const anchorUsd = pp.anchorTokenUsd;
+          if (anchorAddr && anchorUsd && anchorUsd > 0) {
+            if (t0Addr === anchorAddr && pp.price1Per0 > 0) {
+              return { p0: anchorUsd, p1: anchorUsd / pp.price1Per0 };
+            }
+            if (t1Addr === anchorAddr) {
+              return { p0: anchorUsd * pp.price1Per0, p1: anchorUsd };
+            }
           }
         }
         // DefiLlama fallback — direct per-token historical USD prices.
@@ -611,9 +614,9 @@ export function useV3LiquidityEvents(
 
         function pricesForEvent(e: V3LiquidityEvent): { p0: number; p1: number } | null {
           const k = `${target.position.chain}|${target.position.poolAddress.toLowerCase()}|${e.txHash.toLowerCase()}`;
-          const pp = poolPriceCache.get(k);
-          if (!pp) return null;
-          return deriveUsdPrices(target, pp, e);
+          // pp может быть undefined (Velodrome slot0 не прочитан) — deriveUsdPrices
+          // тогда уходит в DefiLlama-фоллбэк по blockTime.
+          return deriveUsdPrices(target, poolPriceCache.get(k), e);
         }
 
         for (const e of acc.increases) {

@@ -237,6 +237,12 @@ function extractAlchemy(
     const params = c.params;
     if (params === undefined) return;
     const method = typeof c.method === "string" ? c.method.toLowerCase() : "";
+    // eth_getLogs: params[0].address — это CONTRACT-emitter фильтр (публичные
+    // event-данные, как Etherscan logs-модуль), topics могут содержать
+    // tokenId/eventSig, НЕ user wallet. Enforce ownership здесь бы давал 403
+    // на чтении IncreaseLiquidity (V3 cost basis, особенно gauge-staked
+    // Velodrome) — skip как у Etherscan logs.
+    if (method === "eth_getlogs") return;
     // Most account-RPCs: params is an array, first element is the addr.
     if (Array.isArray(params)) {
       // `params[0]` may be string (addr) OR object (filter w/ from/to).

@@ -155,3 +155,55 @@ export async function fetchBlockTimestamps(
 export function isAlchemyChainSupported(chainCode: string): boolean {
   return CHAIN_TO_SUBDOMAIN[chainCode.toLowerCase()] != null;
 }
+
+interface RawNftTransfer {
+  erc721TokenId?: string | null;
+  tokenId?: string | null;
+}
+
+/**
+ * tokenId всех ERC721-NFT данного контракта, **полученных** кошельком
+ * (любой transfer с to = wallet, включая mint 0x0 → wallet). Нужно для
+ * gauge-staked V3 позиций: после stake'а NFT принадлежит gauge, поэтому
+ * `balanceOf(wallet)=0` и обычный enumerate его не находит — но transfer
+ * на кошелёк остаётся в истории.
+ *
+ * NB: фильтруем ТОЛЬКО по `toAddress` (адрес юзера). `fromAddress: 0x0`
+ * добавлять нельзя — upstream-proxy address-guard режет запрос с не-юзерским
+ * адресом (нулевой адрес не принадлежит юзеру) → 403.
+ */
+export async function fetchMintedNftTokenIds(
+  chainCode: string,
+  contract: string,
+  wallet: string,
+): Promise<bigint[]> {
+  const result = await alchemyRpc(chainCode, "alchemy_getAssetTransfers", [
+    {
+      fromBlock: "0x0",
+      toBlock: "latest",
+      category: ["erc721"],
+      contractAddresses: [contract],
+      toAddress: wallet,
+      order: "asc",
+      maxCount: "0x3e8", // 1000
+    },
+  ]);
+  const transfers =
+    (result as { transfers?: RawNftTransfer[] })?.transfers ?? [];
+  const ids: bigint[] = [];
+  const seen = new Set<string>();
+  for (const t of transfers) {
+    const raw = t.erc721TokenId ?? t.tokenId;
+    if (!raw) continue;
+    try {
+      const id = BigInt(raw);
+      const key = id.toString();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      ids.push(id);
+    } catch {
+      /* skip non-numeric tokenId */
+    }
+  }
+  return ids;
+}
