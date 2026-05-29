@@ -34,6 +34,7 @@ import {
 import {
   attachBlockTimes,
   fetchV3LiquidityEvents,
+  isTrustworthyCostBasis,
   type V3CostBasisResult,
   type V3LiquidityEvent,
 } from "./liquidity_events";
@@ -277,10 +278,15 @@ export function useV3LiquidityEvents(
       for (const t of targets) {
         const cacheKey = `${t.position.chain}|${t.tokenId.toString()}`;
         const cached = moduleCache.get(cacheKey);
-        if (cached) {
+        if (cached && isTrustworthyCostBasis(cached)) {
           result.set(t.tokenId.toString(), cached);
           continue;
         }
+        // Poisoned cache entry (priced during an upstream feed outage —
+        // hasHistPrices=false, netCostBasisUsd=0): drop it and recompute
+        // below now that the feed may be healthy. Without this the stale $0
+        // is served forever (MMaksimuk POS-024 prod incident 2026-05-29).
+        if (cached) moduleCache.delete(cacheKey);
         const pending = inFlight.get(cacheKey);
         if (pending) {
           awaitInFlight.push({ target: t, promise: pending });
@@ -729,8 +735,15 @@ export function useV3LiquidityEvents(
         // DeBank-derived startUsd должен остаться primary в таких случаях.
         // Если пользователь обновит API plan — hook попробует заново.
         if (acc.increases.length > 0 || acc.decreases.length > 0) {
+          // In-memory result for this render is fine even without prices
+          // (the override simply falls back to DeBank when cb=0). But only
+          // PERSIST when historical prices resolved — caching a $0/no-price
+          // result would pin it across reloads even after the feed recovers
+          // (MMaksimuk POS-024 prod incident 2026-05-29).
           result.set(target.tokenId.toString(), item);
-          moduleCache.set(cacheKey, item);
+          if (isTrustworthyCostBasis(item)) {
+            moduleCache.set(cacheKey, item);
+          }
         }
         // Резолвим in-flight Promise (даже если empty — чтобы waiters не висели).
         inFlightResolvers.get(cacheKey)?.(
