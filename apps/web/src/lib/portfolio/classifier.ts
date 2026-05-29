@@ -497,6 +497,20 @@ function classifyDex(
   const sendsLp = sends.some((s) => s.isProtocolToken);
   const recvLp = receives.some((r) => r.isProtocolToken);
 
+  // Gauge unstake (Velodrome/Aerodrome CL Slipstream): `CLGauge.withdraw(tokenId)`
+  // возвращает позиционный NFT из gauge в кошелёк — protocol-token IN, при этом
+  // ничего не уходит. Это РАССТЕЙК, не внесение ликвидности. Без guard'а ветка
+  // `recvLp && !sendsLp` ниже метит его `lp_add` → ложный opener (POS-011).
+  // Реальный mint имеет sends (underlying) → сюда не попадает.
+  // ВАЖНО: тот же fix есть в серверном apps/api/.../classifier.ts (параллельный
+  // pipeline — менять синхронно).
+  const fnName = (it.tx?.name ?? "").toLowerCase();
+  if (recvLp && !sendsLp && sends.length === 0 && fnName.includes("withdraw")) {
+    return base(it, seq, "unstake", protocol, movement, status, [
+      "gauge-unstake",
+    ]);
+  }
+
   if (recvLp && !sendsLp) {
     return base(it, seq, "lp_add", protocol, movement, status);
   }

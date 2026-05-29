@@ -406,6 +406,9 @@ function classifyDex(
   // ветка `recvLp && !sendsLp` ниже метит его `lp_add` → ложный opener с датой
   // анстейка и нулевым cost basis (POS-011). Реальный mint имеет sends
   // (underlying) → сюда не попадает.
+  // ВАЖНО: тот же fix есть в клиентском apps/web/src/lib/portfolio/classifier.ts
+  // (параллельный pipeline — refresh классифицирует на клиенте и пушит через
+  // POST /chain-ops/:walletId/sync — менять синхронно).
   const fnName = (it.tx?.name ?? "").toLowerCase();
   if (recvLp && !sendsLp && sends.length === 0 && fnName.includes("withdraw")) {
     return base(it, seq, "unstake", protocol, movement, status, [
