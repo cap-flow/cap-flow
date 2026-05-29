@@ -171,27 +171,34 @@ jobs:
             # 4. Roll new containers.
             $COMPOSE up -d --remove-orphans
 
-            # 4b. Reload Caddy config.
+            # 4b. Apply Caddy config by RECREATING the caddy container.
             #
-            # The Caddyfile is bind-mounted (./caddy/Caddyfile:ro), NOT baked
-            # into the caddy image. `docker compose up -d` therefore leaves the
-            # caddy container "Running" untouched whenever only the Caddyfile
-            # changed — Compose can't detect bind-mounted *file content* drift,
-            # so a freshly scp'd Caddyfile would silently never take effect
-            # (this is exactly how the /defillama, /llamaprotos, /coingecko
-            # proxy routes shipped to disk but kept returning the SPA HTML).
+            # The Caddyfile is a SINGLE-FILE bind-mount (./caddy/Caddyfile:ro).
+            # Two compounding gotchas made fresh configs never go live:
+            #   1. `docker compose up -d` leaves caddy "Running" untouched when
+            #      only the bind-mounted file changed — Compose can't detect
+            #      file-content drift.
+            #   2. Even an in-place `caddy reload` re-reads the SAME pinned
+            #      inode: replacing a single-file bind-mount on the host does
+            #      NOT propagate into a running container, so reload reloaded
+            #      the STALE config (this is why #126's /defillama,
+            #      /llamaprotos, /coingecko routes kept returning SPA HTML even
+            #      after a "successful" reload).
             #
-            # Validate first; on success do a graceful in-place reload (zero
-            # downtime, keeps ACME certs warm). If validation fails, leave the
-            # currently-running config untouched and fail the deploy so the
-            # bad Caddyfile never goes live.
-            if $COMPOSE exec -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; then
-              $COMPOSE exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
-              echo "✓ caddy config reloaded"
-            else
-              echo "✗ Caddyfile failed validation — keeping current config, aborting"
-              exit 1
-            fi
+            # Ground-truth log: show whether the routes actually reached disk.
+            echo "on-disk Caddyfile /defillama handle count: $(grep -c 'handle /defillama' infra/caddy/Caddyfile || true)"
+
+            # Validate the FRESH on-disk file via a one-off container (resolves
+            # the current host inode, unlike exec into the running caddy). A
+            # bad config fails the deploy before we touch the live container.
+            docker run --rm -v /opt/cap-flow/infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
+              caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+            # Recreate caddy so the new container binds to the CURRENT host
+            # inode and loads the fresh config. --force-recreate is required
+            # because the image/compose spec are unchanged.
+            $COMPOSE up -d --force-recreate caddy
+            echo "✓ caddy recreated with current config"
 
             # 5. Smoke test — wait up to 60s for /health to return 200.
             for i in $(seq 1 30); do
