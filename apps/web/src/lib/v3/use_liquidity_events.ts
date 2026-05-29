@@ -82,6 +82,33 @@ const moduleCache = new Map<string, V3CostBasisResult>();
 const inFlight = new Map<string, Promise<V3CostBasisResult | null>>();
 
 /**
+ * Race a promise against a timeout, resolving to `fallback` if it doesn't
+ * settle in time.
+ *
+ * 2026-05-29 (MMaksimuk POS-024 prod incident): the event pipeline is staged
+ * — Phase 1 collects on-chain events for ALL targets, only THEN does the
+ * batched DefiLlama price lookup (Phase B) run. `fetchEtherscanLogs` is a
+ * single `apiFetch` with no timeout, so on the shared free-tier Etherscan key
+ * under multi-tenant load one hung request stalls the whole hook forever:
+ * `setData` never fires, the Velodrome NFT never gets priced, and its cost
+ * basis stays $0. Bounding every external await guarantees the hook always
+ * reaches completion, pricing whatever events it managed to collect.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+/** Per-target on-chain event collection budget (Etherscan/Alchemy). */
+const TARGET_FETCH_TIMEOUT_MS = 25_000;
+/** Per-tx pool slot0 read budget. */
+const SLOT0_TIMEOUT_MS = 12_000;
+/** DefiLlama batched historical-price lookup budget. */
+const DEFILLAMA_TIMEOUT_MS = 20_000;
+
+/**
  * Map<txHash, {amount0, amount1}> сериализуем как Array<[hash, value]> —
  * JSON.stringify на сыром Map'е даёт "{}" (Map не enumerable как Object),
  * поле полностью теряется при reload. Влияет на PR-2 (collect-vs-decrease
@@ -324,8 +351,12 @@ export function useV3LiquidityEvents(
       // — кэшируем чтобы не повторять запрос для каждого NFT той же сети.
       const etherscanUnsupportedChains = new Set<string>();
 
-      for (const t of targetsToFetch) {
-        try {
+      // Collect events for ONE target. Wrapped in a per-target timeout below
+      // so a hung Etherscan/Alchemy request can't stall the whole staged
+      // pipeline (Phase B pricing waits for ALL targets — POS-024 incident).
+      const collectEventsForTarget = async (
+        t: Target,
+      ): Promise<{ increases: V3LiquidityEvent[]; decreases: V3LiquidityEvent[] }> => {
           let increases: V3LiquidityEvent[] = [];
           let decreases: V3LiquidityEvent[] = [];
           const chainSupportsEtherscan =
@@ -425,7 +456,23 @@ export function useV3LiquidityEvents(
             increases = inc;
             decreases = dec;
           }
-          accs.push({ target: t, increases, decreases });
+          return { increases, decreases };
+      };
+
+      for (const t of targetsToFetch) {
+        try {
+          const collected = await withTimeout(
+            collectEventsForTarget(t),
+            TARGET_FETCH_TIMEOUT_MS,
+            null as { increases: V3LiquidityEvent[]; decreases: V3LiquidityEvent[] } | null,
+          );
+          if (collected === null) {
+            // Timed out — skip this target, but DON'T block the rest of the
+            // pipeline (Phase B pricing + setData must still run).
+            errors.push(`${t.tokenId}: event fetch timed out (${TARGET_FETCH_TIMEOUT_MS}ms)`);
+            continue;
+          }
+          accs.push({ target: t, increases: collected.increases, decreases: collected.decreases });
         } catch (e) {
           errors.push(`${t.tokenId}: ${(e as Error).message}`);
         }
@@ -470,7 +517,7 @@ export function useV3LiquidityEvents(
       // slot0 + anchor slot0). Ставим лёгкий throttle 50ms.
       for (const [k, req] of poolPriceRequests) {
         try {
-          const res = await fetchPoolMintPrice(req);
+          const res = await withTimeout(fetchPoolMintPrice(req), SLOT0_TIMEOUT_MS, null);
           if (res) {
             poolPriceCache.set(k, {
               price1Per0: res.price1Per0,
@@ -520,7 +567,14 @@ export function useV3LiquidityEvents(
       let llamaPrices: Map<string, number> | null = null;
       if (defillamaNeeds.length > 0) {
         try {
-          llamaPrices = await fetchHistoricalPrices(defillamaNeeds);
+          llamaPrices = await withTimeout(
+            fetchHistoricalPrices(defillamaNeeds),
+            DEFILLAMA_TIMEOUT_MS,
+            null,
+          );
+          if (llamaPrices === null) {
+            errors.push(`defillama-fallback: timed out (${DEFILLAMA_TIMEOUT_MS}ms)`);
+          }
         } catch (err) {
           errors.push(`defillama-fallback: ${(err as Error).message}`);
         }
