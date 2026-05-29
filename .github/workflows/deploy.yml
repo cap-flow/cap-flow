@@ -188,11 +188,15 @@ jobs:
             # Ground-truth log: show whether the routes actually reached disk.
             echo "on-disk Caddyfile /defillama handle count: $(grep -c 'handle /defillama' infra/caddy/Caddyfile || true)"
 
-            # Validate the FRESH on-disk file via a one-off container (resolves
-            # the current host inode, unlike exec into the running caddy). A
-            # bad config fails the deploy before we touch the live container.
-            docker run --rm -v /opt/cap-flow/infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
-              caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+            # Validate the FRESH on-disk file before touching the live
+            # container. Use `compose run` (not a bare `docker run`) so the
+            # caddy service's env is injected — the Caddyfile references
+            # {$CADDY_ACME_EMAIL} / {$CADDY_DOMAIN}, and without those a bare
+            # container fails with "wrong argument count after 'email'". A
+            # throwaway compose-run container also resolves the current host
+            # inode, so it validates exactly what force-recreate will load.
+            $COMPOSE run --rm --no-deps --entrypoint caddy caddy \
+              validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
             # Recreate caddy so the new container binds to the CURRENT host
             # inode and loads the fresh config. --force-recreate is required
