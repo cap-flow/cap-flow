@@ -1273,14 +1273,24 @@ function PositionRow({
   const valueOverridden = valueOverride != null;
   const feesOverridden = feesOverride != null;
   const v3OnChain = useMemo<V3Position[]>(() => {
-    if (!p.v3) return [];
-    // Используем pre-computed assignment с parent'а — каждой позиции
-    // соответствует ровно ОДНА NFT (если в группе их несколько в одном
-    // pair'е). Без assignment'а тут показывались бы ВСЕ NFT в paire,
-    // и POS-001 / POS-003 (две WETH/USDC NFT) видели бы обе.
-    if (v3Assigned != null) return v3Assigned;
-    // Fallback: если assignment ещё не посчитан — старая логика
-    // (показывает все NFT в pair'е).
+    // Range-блок (Pa/Pb + расчёты выхода) зависит ТОЛЬКО от on-chain данных
+    // NFT, не от cost-basis (`p.v3`). Раньше тут стоял `if (!p.v3) return []`,
+    // из-за чего позиции без matched lp_add в истории (exotic-пары, staked) не
+    // показывали диапазоны, хотя NFT задискаврена. Считаем для всех V3 LP.
+    if (!isV3LpProtocol(p.protocol.name)) return [];
+    // 1. Pre-computed assignment с parent'а — каждой позиции соответствует
+    // ровно ОДНА NFT (если в группе их несколько в одном pair'е).
+    if (v3Assigned != null && v3Assigned.length > 0) return v3Assigned;
+    // 2. По matched tokenId — устойчиво к symbol-key mismatch. DeBank live
+    // symbol (USD₮0, SLVon, …) часто ≠ on-chain token.symbol, и lookup по
+    // паре промахивается, хотя NFT задискаврена. tokenId — точный матч.
+    if (p.matchedV3TokenId) {
+      for (const arr of v3Map.values()) {
+        const hit = arr.find((n) => n.tokenId.toString() === p.matchedV3TokenId);
+        if (hit) return [hit];
+      }
+    }
+    // 3. Fallback: по канонической паре (symbol-key).
     const deps = findV3Deployments(p.chain, p.protocol.name);
     const out: V3Position[] = [];
     for (const dep of deps) {
@@ -1498,7 +1508,9 @@ function PositionRow({
           >
             {p.itemName || KIND_LABEL[p.kind]}
           </span>
-          {p.v3 && <V3InfoButton p={p} onChain={v3OnChain} />}
+          {(p.v3 || v3OnChain.length > 0) && (
+            <V3InfoButton p={p} onChain={v3OnChain} />
+          )}
         </div>
       </td>
     ),
