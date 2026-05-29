@@ -161,6 +161,28 @@ jobs:
             # 4. Roll new containers.
             $COMPOSE up -d --remove-orphans
 
+            # 4b. Reload Caddy config.
+            #
+            # The Caddyfile is bind-mounted (./caddy/Caddyfile:ro), NOT baked
+            # into the caddy image. `docker compose up -d` therefore leaves the
+            # caddy container "Running" untouched whenever only the Caddyfile
+            # changed — Compose can't detect bind-mounted *file content* drift,
+            # so a freshly scp'd Caddyfile would silently never take effect
+            # (this is exactly how the /defillama, /llamaprotos, /coingecko
+            # proxy routes shipped to disk but kept returning the SPA HTML).
+            #
+            # Validate first; on success do a graceful in-place reload (zero
+            # downtime, keeps ACME certs warm). If validation fails, leave the
+            # currently-running config untouched and fail the deploy so the
+            # bad Caddyfile never goes live.
+            if $COMPOSE exec -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; then
+              $COMPOSE exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+              echo "✓ caddy config reloaded"
+            else
+              echo "✗ Caddyfile failed validation — keeping current config, aborting"
+              exit 1
+            fi
+
             # 5. Smoke test — wait up to 60s for /health to return 200.
             for i in $(seq 1 30); do
               if $COMPOSE exec -T api wget -qO- http://127.0.0.1:3000/health >/dev/null 2>&1; then
