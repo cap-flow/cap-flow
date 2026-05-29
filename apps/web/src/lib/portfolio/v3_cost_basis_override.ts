@@ -248,7 +248,12 @@ function overrideCurrentFromOnChain(
   // не трогаем — там feesUsd derived иначе.
   let newFeesUsd: number | null = base.feesUsd;
   let newFeesByToken: OpenPosition["feesByToken"] = base.feesByToken;
-  if (base.feesSource === "v3_rewards") {
+  // Gauge-staked Velodrome/Aerodrome: "доход" позиции — это эмиссия VELO
+  // (gauge rewards из DeBank `lp.rewards`), а НЕ V3 trading fees. У stake'нутого
+  // NFT tokensOwed0/1 = 0 → on-chain pendingFee = 0 → обнулять fee неверно
+  // (затирает реальные ~$9 emissions). Оставляем DeBank-значение (base.feesUsd).
+  const isGaugeBased = /velodrome|aerodrome/i.test(nft.protocolLabel);
+  if (base.feesSource === "v3_rewards" && !isGaugeBased) {
     const feeAmounts = [
       { symbol: nft.token0.symbol, amount: nft.pendingFee0 },
       { symbol: nft.token1.symbol, amount: nft.pendingFee1 },
