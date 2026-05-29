@@ -240,16 +240,32 @@ export async function fetchHistoricalPrices(
     s.add(coin);
   }
 
-  // 3. Делаем запросы — последовательно, чтобы не ддосить (DefiLlama бесплатный).
-  for (const [ts, coins] of byTs) {
-    if (signal?.aborted) break;
-    const got = await fetchOneTs(ts, Array.from(coins), signal);
-    for (const [coin, price] of got) {
-      const k = cacheKeyFor(coin, ts);
-      cache[k] = price;
-      result.set(k, price);
+  // 3. Делаем запросы по ts-bucket с ограниченной параллельностью.
+  //
+  // 2026-05-29 (MMaksimuk POS-024): раньше шли строго последовательно. При
+  // пересчёте многих NFT с разными mint-временами это десятки последовательных
+  // запросов — суммарно > таймаута вызывающей стороны, и поздние bucket'ы
+  // (включая Velodrome) не успевали → цена null → cost basis $0. 5 запросов
+  // в полёте: на порядок быстрее, при этом вежливо к DefiLlama (один JS-поток,
+  // запись в cache/result между await'ами безопасна).
+  const tsEntries = Array.from(byTs.entries());
+  const CONCURRENCY = 5;
+  let cursor = 0;
+  const runWorker = async (): Promise<void> => {
+    while (cursor < tsEntries.length) {
+      if (signal?.aborted) return;
+      const [ts, coins] = tsEntries[cursor++]!;
+      const got = await fetchOneTs(ts, Array.from(coins), signal);
+      for (const [coin, price] of got) {
+        const k = cacheKeyFor(coin, ts);
+        cache[k] = price;
+        result.set(k, price);
+      }
     }
-  }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, tsEntries.length) }, runWorker),
+  );
 
   // 4. Сохраняем кэш.
   writeCache(cache);
