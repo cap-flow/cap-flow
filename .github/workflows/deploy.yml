@@ -99,6 +99,16 @@ jobs:
           source: "infra/docker-compose.yml,infra/caddy/Caddyfile"
           target: "/opt/cap-flow"
           strip_components: 0
+          # drone-scp only passes `tar --overwrite` when this is true. Left
+          # at the default (false), tar PRESERVES existing files on the
+          # remote — so docker-compose.yml and the Caddyfile, which exist
+          # since the first deploy, never got replaced by later edits. That
+          # silently froze the prod Caddy config (e.g. #126's /defillama,
+          # /llamaprotos, /coingecko proxy routes shipped here but the
+          # on-disk file kept returning SPA HTML). Code still deployed fine
+          # because image tags flow through a server-generated .env.images,
+          # not this scp.
+          overwrite: true
 
       - name: Deploy on remote
         uses: appleboy/ssh-action@v1.2.0
