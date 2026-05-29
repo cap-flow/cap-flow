@@ -64,6 +64,31 @@ www.{$CADDY_DOMAIN} {
 		reverse_proxy 127.0.0.1:3100
 	}
 
+	# External read-only API proxies — зеркало dev-proxy из
+	# apps/web/vite.config.ts. Без них эти top-level пути попадают в
+	# SPA-catch-all (`handle {}` ниже) и возвращают index.html вместо
+	# JSON → ломаются исторические цены DefiLlama (Velodrome/Aerodrome
+	# gauge cost basis = 0 на проде), список протоколов, CoinGecko.
+	# Все три — публичные keyless API.
+	handle /defillama/* {
+		uri strip_prefix /defillama
+		reverse_proxy https://coins.llama.fi {
+			header_up Host coins.llama.fi
+		}
+	}
+	handle /llamaprotos/* {
+		uri strip_prefix /llamaprotos
+		reverse_proxy https://api.llama.fi {
+			header_up Host api.llama.fi
+		}
+	}
+	handle /coingecko/* {
+		uri replace /coingecko /api/v3
+		reverse_proxy https://api.coingecko.com {
+			header_up Host api.coingecko.com
+		}
+	}
+
 	handle {
 		reverse_proxy 127.0.0.1:8080
 	}
