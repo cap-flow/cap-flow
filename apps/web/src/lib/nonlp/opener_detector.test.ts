@@ -23,6 +23,7 @@ const VAULT = "0x5401b8620e5fb570064ca9114fd1e135fd77d57c"; // Lombard LBTCv
 const STAKING = "0x475be1b034139f4a0ec46dd47843aaaaaaaaaaaa"; // Convex-like contract
 const STAKE_TOKEN = "0xaaaa000000000000000000000000000000000001";
 const USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+const ZERO = "0x0000000000000000000000000000000000000000";
 
 function tx(p: Partial<T>): T {
   return {
@@ -248,6 +249,66 @@ describe("Stage 2: OUT-side startUsd in resolveOpenersFromTransfers", () => {
     expect(op.startUsd).toBe(150); // 100 + 50
     expect(op.openedInTokens).toHaveLength(1);
     expect(op.openedInTokens[0]!.amount).toBe(150);
+  });
+
+  it("GMX V2 GLV async request/fill (POS-005): OUT-side из request-tx → startUsd=$1300", () => {
+    // testakk 1s GLV [WBTC-USDC] (arb). Реальные on-chain transfer'ы:
+    //   request 0x17cf @t0: wallet → GlvVault 1300 USDC (to ≠ receipt-токен!)
+    //   fill    0xea23 @t0+4s: GLV сминчен from 0x0 на wallet (receives-only)
+    // OUT (USDC) и mint receipt'а — в РАЗНЫХ tx → старый same-tx детект пропускал
+    // request → openedInTokens пуст → costBasisUnknown затирал buildOne $1300.
+    const GLV = "0xdf03eed325b82bc1d4db8b49c30ecc9e05104b96";
+    const GMX_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831";
+    const GLV_VAULT = "0x393053b58f9678c9c28c2ce941ff6cac49c3f8f9";
+    const transfers = [
+      tx({ hash: "0x17cf", timeStamp: 1774790684, blockNumber: 446895388, from: WALLET, to: GLV_VAULT, contractAddress: GMX_USDC, value: "1300000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xea23", timeStamp: 1774790688, blockNumber: 446895401, from: ZERO, to: WALLET, contractAddress: GLV, value: "1016578616393671586567", tokenDecimal: 18, tokenSymbol: "GLV [WBTC-USDC]" }),
+    ];
+    const out = resolveOpenersFromTransfers(transfers, [GLV], WALLET);
+    const op = out.get(GLV)!;
+    expect(op.openedAt).toBe(1774790688); // дата = fill (первый touch receipt-токена)
+    expect(op.openedInTokens).toHaveLength(1);
+    expect(op.openedInTokens[0]!.symbol).toBe("USDC");
+    expect(op.openedInTokens[0]!.amount).toBe(1300);
+    expect(op.startUsd).toBe(1300); // 1300 USDC × $1 — НЕ market value receipt'а
+  });
+
+  it("async request/fill: НЕ пэйрит swap (tx с wallet-IN — не sends-only)", () => {
+    // За окном до mint'а есть swap (wallet и отдал, и получил) — это НЕ request.
+    const GLV = "0xdf03eed325b82bc1d4db8b49c30ecc9e05104b96";
+    const transfers = [
+      // swap: wallet отдал USDC и получил WETH (есть wallet-IN) — не request
+      tx({ hash: "0xswap", timeStamp: 1000, from: WALLET, to: "0xpool", contractAddress: USDC, value: "500000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xswap", timeStamp: 1000, from: "0xpool", to: WALLET, contractAddress: "0xweth", value: "100000000000000000", tokenDecimal: 18, tokenSymbol: "WETH" }),
+      // fill: GLV mint from 0x0 (receives-only)
+      tx({ hash: "0xfill", timeStamp: 1004, from: ZERO, to: WALLET, contractAddress: GLV, value: "1000000000000000000", tokenDecimal: 18, tokenSymbol: "GLV [WBTC-USDC]" }),
+    ];
+    const op = resolveOpenersFromTransfers(transfers, [GLV], WALLET).get(GLV)!;
+    expect(op.openedInTokens).toHaveLength(0); // swap не засчитан как request
+    expect(op.startUsd).toBeNull();
+  });
+
+  it("async request/fill: request за пределами окна → не пэйрится", () => {
+    const GLV = "0xdf03eed325b82bc1d4db8b49c30ecc9e05104b96";
+    const transfers = [
+      // request слишком давно (>10 мин до fill) → не наш депозит
+      tx({ hash: "0xold", timeStamp: 1000, from: WALLET, to: "0xvault", contractAddress: USDC, value: "1300000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xfill", timeStamp: 1000 + 3600, from: ZERO, to: WALLET, contractAddress: GLV, value: "1000000000000000000", tokenDecimal: 18, tokenSymbol: "GLV [WBTC-USDC]" }),
+    ];
+    const op = resolveOpenersFromTransfers(transfers, [GLV], WALLET).get(GLV)!;
+    expect(op.openedInTokens).toHaveLength(0);
+    expect(op.startUsd).toBeNull();
+  });
+
+  it("async request/fill: same-tx депозит (IPOR) НЕ ломается async-веткой", () => {
+    // mint from 0x0 + OUT в ТОЙ ЖЕ tx → классический same-tx путь, async не нужен.
+    const transfers = [
+      tx({ hash: "0xdep", timeStamp: 100, from: WALLET, to: "0xvault", contractAddress: USDC, value: "100000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xdep", timeStamp: 100, from: ZERO, to: WALLET, contractAddress: VAULT, value: "91000000000000000000", tokenDecimal: 18, tokenSymbol: "ipReceipt" }),
+    ];
+    const op = resolveOpenersFromTransfers(transfers, [VAULT], WALLET).get(VAULT)!;
+    expect(op.startUsd).toBe(100); // ровно 1 раз, без двойного счёта
+    expect(op.openedInTokens).toHaveLength(1);
   });
 
   it("Stage 2c: withdraw-tx (receipt OUT) НЕ считается депозитом", () => {

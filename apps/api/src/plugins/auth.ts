@@ -37,6 +37,17 @@ declare module "fastify" {
     audit: AuditService;
     requireAuth: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
     requireAdmin: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+    /**
+     * Like requireAdmin, but ALSO allows an admin who is impersonating a
+     * regular user (view/edit mode). During impersonation `req.user.role` is
+     * the TARGET user's role, so plain requireAdmin would 403 — but golden
+     * curation (Epic A3) is performed precisely while an admin views a user's
+     * positions. We verify the impersonator is an admin.
+     */
+    requireAdminOrImpersonator: (
+      req: FastifyRequest,
+      reply: FastifyReply,
+    ) => Promise<void>;
   }
 
   interface FastifyRequest {
@@ -119,6 +130,23 @@ export const authPlugin = fp<AuthPluginOptions>(
         if (!req.user || req.user.role !== "admin") {
           throw new ForbiddenError("Admin access required.");
         }
+      }
+    );
+
+    app.decorate(
+      "requireAdminOrImpersonator",
+      async (req: FastifyRequest, reply: FastifyReply) => {
+        await app.requireAuth(req, reply);
+        if (!req.user) throw new ForbiddenError("Admin access required.");
+        if (req.user.role === "admin") return;
+        // Impersonation: the acting party is the impersonator — allow if THEY
+        // are an admin (verified against current DB role).
+        const impersonatorId = req.user.impersonation?.impersonatorId;
+        if (impersonatorId) {
+          const actor = await authRepo.findUserById(impersonatorId);
+          if (actor && actor.role === "admin") return;
+        }
+        throw new ForbiddenError("Admin access required.");
       }
     );
   },

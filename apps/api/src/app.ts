@@ -50,6 +50,9 @@ import { chainOpsRoutes } from "./modules/chain-ops/chain-ops.routes.js";
 import { AnnotationsRepository } from "./modules/chain-ops/annotations.repository.js";
 import { AnnotationsService } from "./modules/chain-ops/annotations.service.js";
 import { annotationsRoutes } from "./modules/chain-ops/annotations.routes.js";
+import { GoldenRepository } from "./modules/golden/golden.repository.js";
+import { GoldenService } from "./modules/golden/golden.service.js";
+import { goldenRoutes } from "./modules/golden/golden.routes.js";
 import { SyncCoverageService } from "./modules/sync-coverage/sync-coverage.service.js";
 import { syncCoverageRoutes } from "./modules/sync-coverage/sync-coverage.routes.js";
 import { CexService } from "./modules/cex/cex.service.js";
@@ -572,6 +575,10 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     app.audit,
   );
 
+  // UCB Epic A3: golden cases + anomaly flags (admin-only oracle + findings).
+  const goldenRepo = new GoldenRepository(app.db);
+  const goldenService = new GoldenService(goldenRepo, app.audit);
+
   // UCB B4: aggregated sync coverage (wallets + CEX accounts state).
   const syncCoverageService = new SyncCoverageService(app.db);
 
@@ -705,6 +712,10 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(annotationsRoutes, {
         service: annotationsService,
         prefix: "/chain-ops/annotations",
+      });
+      await api.register(goldenRoutes, {
+        service: goldenService,
+        prefix: "/admin/golden",
       });
       await api.register(syncCoverageRoutes, {
         service: syncCoverageService,

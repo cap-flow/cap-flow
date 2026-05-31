@@ -26,6 +26,9 @@ importers:
       '@cap-flow/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@cap-flow/ucb':
+        specifier: workspace:*
+        version: link:../../packages/ucb
       '@fastify/cookie':
         specifier: ^11.0.1
         version: 11.0.2
@@ -114,6 +117,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@cap-flow/ucb':
+        specifier: workspace:*
+        version: link:../../packages/ucb
       '@radix-ui/react-slot':
         specifier: ^1.1.1
         version: 1.2.4(@types/react@18.3.28)(react@18.3.1)
@@ -200,6 +206,15 @@ importers:
       tsx:
         specifier: ^4.19.2
         version: 4.21.0
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/ucb:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.17
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

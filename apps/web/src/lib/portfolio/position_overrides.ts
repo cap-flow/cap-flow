@@ -53,23 +53,11 @@ export function positionOverrideKey(args: {
   return args.instanceId ? `${base}|${args.instanceId}` : base;
 }
 
-/**
- * Стабильный hash для supply-amounts позиции (fallback discriminator,
- * когда нет ни `openHash`, ни NFT tokenId). Округляем amount до 4 знаков
- * чтобы микро-колебания interest accrual не меняли ключ между сессиями.
- *
- * Используется в `positionOverrideKey({ instanceId: supplyHash(...) })` для
- * V3 NFT'ов и других мульти-маркетных протоколов с одинаковым `pool.id`.
- */
-export function supplyAmountsHash(
-  supply: ReadonlyArray<{ symbol: string; amount: number }>,
-): string {
-  if (supply.length === 0) return "";
-  return [...supply]
-    .map((s) => `${s.symbol.toUpperCase()}:${s.amount.toFixed(4)}`)
-    .sort()
-    .join(",");
-}
+// A0: `supplyAmountsHash` moved to `@cap-flow/ucb/supply_hash` (used by the
+// engine's open_positions). Re-exported here so existing import sites are
+// unchanged. Used in `positionOverrideKey({ instanceId: supplyAmountsHash(...) })`
+// for V3 NFTs and other multi-market protocols sharing one `pool.id`.
+export { supplyAmountsHash } from "@cap-flow/ucb/supply_hash";
 
 export function usePositionOverrides() {
   return useLocalStorage<PositionOverrides>(KEY, {});

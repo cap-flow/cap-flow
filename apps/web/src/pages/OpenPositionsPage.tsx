@@ -33,6 +33,10 @@ import {
   type PositionKind,
 } from "@/lib/portfolio/open_positions";
 import { PurchaseHistoryPopup } from "@/components/PurchaseHistoryPopup";
+import { MarkGoldenDialog } from "@/components/admin/MarkGoldenDialog";
+import { useAuth } from "@/features/auth/AuthProvider";
+import { useGoldenCases } from "@/features/admin/golden/hooks";
+import { positionKey } from "@cap-flow/ucb/identity";
 import { useCexWithdrawalCostBasis } from "@/features/cex/hooks";
 import type { CexCostBasisMatch } from "@/lib/portfolio/position_coverage";
 import {
@@ -157,6 +161,30 @@ export function OpenPositionsPage(): JSX.Element {
 }
 
 function OpenPositionsPageInner(): JSX.Element {
+  // Epic A3 (Q6): admin-only "mark golden" affordance + dialog target.
+  // Allowed for an admin OR an admin impersonating a user (golden curation
+  // happens while an admin views the user's positions — A3.4 auth note).
+  const { isAdmin, isImpersonating } = useAuth();
+  // Impersonation is always admin-initiated, and it survives page reloads
+  // (whereas `impersonationOrigin` is only set in-memory at impersonate-time).
+  // The server (`requireAdminOrImpersonator`) verifies the impersonator is
+  // actually an admin, so showing the button on any impersonation is safe.
+  const canMarkGolden = isAdmin || isImpersonating;
+  const [goldenPos, setGoldenPos] = useState<OpenPosition | null>(null);
+  // Fetch existing golden/wrong marks to highlight rows. Keyed by
+  // `${realWalletUuid}|${positionId}` (frontend walletId is composite).
+  const goldenQ = useGoldenCases(undefined, { enabled: canMarkGolden });
+  // Match by the STABLE positionKey (not POS-NNN, which reshuffles). A3.6.
+  const goldenMarks = useMemo(() => {
+    const m = new Map<string, "golden" | "wrong">();
+    for (const c of goldenQ.data?.cases ?? []) {
+      if (c.status !== "active" || !c.positionKey) continue;
+      m.set(c.positionKey, c.kind === "wrong" ? "wrong" : "golden");
+    }
+    return m;
+  }, [goldenQ.data]);
+  const goldenMarkOf = (p: OpenPosition): "golden" | "wrong" | undefined =>
+    goldenMarks.get(positionKey(p));
   const _t = useT();
   const { locale } = useI18n();
   const { loadedById, busyId, loadAll, costBasisOverrideByHash, newTrackers } =
@@ -1042,6 +1070,9 @@ function OpenPositionsPageInner(): JSX.Element {
                           setActivePurchasePositionId(p.id)
                         }
                         v3CostBasisLoading={computed.v3CostBasisLoading}
+                        isAdmin={canMarkGolden}
+                        onMarkGolden={() => setGoldenPos(p)}
+                        goldenMark={goldenMarkOf(p)}
                       />
                     );
                   })}
@@ -1188,6 +1219,17 @@ function OpenPositionsPageInner(): JSX.Element {
           truth и устраняет race-conditions когда было по popup'у в каждом
           PositionRow. Каждое нажатие на ⓘ устанавливает активную позицию,
           предыдущий popup автоматически закрывается перед открытием нового. */}
+      {canMarkGolden && (
+        <MarkGoldenDialog
+          open={goldenPos !== null}
+          onClose={() => setGoldenPos(null)}
+          position={goldenPos}
+          walletOps={goldenPos ? (opsByWalletId.get(goldenPos.walletId) ?? []) : []}
+          histPrices={walletHistPrices.histPrices}
+          costBasisOverrideByHash={costBasisOverrideByHash}
+        />
+      )}
+
       {activePurchasePosition && (
         <PurchaseHistoryPopup
           key={activePurchasePosition.id}
@@ -1236,6 +1278,9 @@ function PositionRow({
   onToggleHidden,
   onOpenPurchaseHistory,
   v3CostBasisLoading,
+  isAdmin,
+  onMarkGolden,
+  goldenMark,
 }: {
   p: OpenPosition;
   v3Map: V3PositionMap;
@@ -1269,6 +1314,12 @@ function PositionRow({
    * После loading=false: если NFT всё ещё orphan → real ⚠.
    */
   v3CostBasisLoading: boolean;
+  /** Admin-only: показывать кнопку «отметить эталоном» (Epic A3, Q6). */
+  isAdmin?: boolean;
+  /** Открыть диалог разметки golden для этой позиции. */
+  onMarkGolden?: () => void;
+  /** Текущая golden-метка позиции (для подсветки строки + звезды). */
+  goldenMark?: "golden" | "wrong" | undefined;
 }) {
   const valueOverridden = valueOverride != null;
   const feesOverridden = feesOverride != null;
@@ -1479,6 +1530,30 @@ function PositionRow({
     protocol: () => (
       <td key="protocol" className={cn(cellPad, "text-center")}>
         <div className="font-medium leading-tight inline-flex items-center gap-1">
+          {isAdmin && onMarkGolden && (
+            <button
+              type="button"
+              onClick={onMarkGolden}
+              className={cn(
+                "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded transition-colors",
+                goldenMark === "golden"
+                  ? "text-emerald-500"
+                  : goldenMark === "wrong"
+                    ? "text-amber-500"
+                    : "text-muted-foreground/40 hover:text-amber-400",
+              )}
+              title={
+                goldenMark === "golden"
+                  ? "Эталон ✓ (клик — изменить)"
+                  : goldenMark === "wrong"
+                    ? "Помечена неверной (клик — изменить)"
+                    : "Отметить эталоном / как неверную (admin)"
+              }
+              aria-label="Mark golden"
+            >
+              ★
+            </button>
+          )}
           {p.protocol.name}
           {p.inferred && (
             <span
@@ -1796,7 +1871,16 @@ function PositionRow({
   };
 
   return (
-    <tr className={cn("hover:bg-accent/40 text-xs", hidden && "opacity-50")}>
+    <tr
+      className={cn(
+        "hover:bg-accent/40 text-xs",
+        hidden && "opacity-50",
+        goldenMark === "golden" &&
+          "bg-emerald-500/10 ring-1 ring-inset ring-emerald-500/40",
+        goldenMark === "wrong" &&
+          "bg-amber-500/10 ring-1 ring-inset ring-amber-500/50",
+      )}
+    >
       {columnIds.map((id) => renderers[id]?.() ?? null)}
     </tr>
   );

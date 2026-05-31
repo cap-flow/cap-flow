@@ -1816,10 +1816,19 @@ async function tryHydrateFromServer(
   ops.sort((a, b) => b.time - a.time);
 
   const snapshot = buildSnapshot(wallet.id, wallet.address, ops);
+  // A3.5b: server hydration restores ONLY ops (cheap, no DeBank credits). The
+  // open-positions list also needs `live` (DeBank current state) — without it
+  // positions render empty until a manual "Обновить". Preserve any previously
+  // fetched `live` from the local cache so positions paint INSTANTLY with ZERO
+  // extra API calls. A real `load()` (refresh / hourly tick) overwrites it with
+  // fresh state. (Before this, writing the ops-only payload back to cache also
+  // CLOBBERED a previously cached `live`.)
+  const prevCachedLive = readWalletCache<Loaded>(wallet.id)?.live;
   return {
     wallet,
     ops,
     snapshot,
     loadedAt: Date.now(),
+    ...(prevCachedLive !== undefined && { live: prevCachedLive }),
   };
 }

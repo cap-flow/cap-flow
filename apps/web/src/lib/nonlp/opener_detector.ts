@@ -165,6 +165,88 @@ function collectDepositHashes(
   return hashes;
 }
 
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * Окно поиска request-tx для async-deposit (GMX V2 GLV/GM, GMSOL, …) в секундах.
+ * Эти протоколы исполняются в ДВУХ транзакциях: request (wallet отдаёт underlying
+ * в deposit-vault) и fill (keeper минтит receipt). Mirror логики
+ * `async_deposit_linker.ts` (там ±30с по DeBank-ops); здесь шире (10 мин) —
+ * запас на лаг keeper'а + jitter block-time, при этом ограничено. Поиск
+ * sends-only + nearest-preceding делает ложный пэйринг крайне маловероятным.
+ */
+const ASYNC_DEPOSIT_WINDOW_SEC = 600;
+/** То же окно для Alchemy-пути (нет timestamp → блоки): ~10 мин на любой chain. */
+const ASYNC_DEPOSIT_WINDOW_BLOCKS = 300;
+
+/** Минимальный shape для async request↔fill пэйринга (общий для ETH-scan/Alchemy). */
+interface AsyncPairLeg {
+  hash: string;
+  from: string;
+  to: string;
+  contractAddress: string;
+  /** Упорядочивающий ключ: timeStamp (Etherscan) или blockNumber (Alchemy). */
+  order: number;
+}
+
+/**
+ * Stage 2c (async request/fill): для receipt-токенов, которые приходят в
+ * ОТДЕЛЬНОЙ fill-tx от трат underlying (GMX V2 GLV/GM — POS-005), найти
+ * hash'и request-tx, чтобы их OUT-сторона попала в cost basis.
+ *
+ * Сигнатура async-fill (а НЕ same-tx депозита типа IPOR):
+ *   - receipt сминчен `from 0x0` на wallet (свежий mint), И
+ *   - в той же tx wallet НЕ отдавал underlying (receives-only fill).
+ * Для каждого такого fill'а берём БЛИЖАЙШИЙ предшествующий sends-only
+ * (wallet отдал ≥1 не-receipt токен, ничего не получил — подпись request'а,
+ * исключает swap'ы) tx в пределах окна. Его hash → deposit-hashes.
+ *
+ * Чисто: same-tx депозиты (OUT в fill-tx) сюда не попадают (guard sameTxHasOut),
+ * mint не from-zero (Safe-internal) — тоже (не async-fill).
+ */
+function collectAsyncRequestHashes(
+  legs: readonly AsyncPairLeg[],
+  lp: string,
+  walletLower: string,
+  windowSpan: number,
+): Set<string> {
+  const hashesWithWalletIn = new Set<string>();
+  const hashesWithWalletOut = new Set<string>();
+  for (const t of legs) {
+    if (t.to === walletLower) hashesWithWalletIn.add(t.hash);
+    if (t.from === walletLower && t.contractAddress !== lp) {
+      hashesWithWalletOut.add(t.hash);
+    }
+  }
+
+  const out = new Set<string>();
+  for (const mint of legs) {
+    const isFreshMint =
+      mint.contractAddress === lp &&
+      mint.to === walletLower &&
+      mint.from === ZERO_ADDRESS;
+    if (!isFreshMint) continue;
+    // same-tx депозит (OUT в той же tx) → классический путь уже покрыл.
+    if (hashesWithWalletOut.has(mint.hash)) continue;
+
+    let bestHash: string | undefined;
+    let bestΔ = Infinity;
+    for (const t of legs) {
+      if (t.hash === mint.hash) continue;
+      if (t.from !== walletLower || t.contractAddress === lp) continue; // wallet OUT
+      const Δ = mint.order - t.order; // request предшествует fill'у
+      if (Δ < 0 || Δ > windowSpan) continue;
+      if (hashesWithWalletIn.has(t.hash)) continue; // sends-only (не swap)
+      if (Δ < bestΔ) {
+        bestΔ = Δ;
+        bestHash = t.hash;
+      }
+    }
+    if (bestHash) out.add(bestHash);
+  }
+  return out;
+}
+
 /**
  * Stage 2c: OUT-side по ВСЕМ deposit-tx (multi-deposit) — все transfers где
  * from==wallet в любой deposit-tx (юзер ОТДАЛ underlying). Aggregate по
@@ -214,6 +296,16 @@ export function resolveOpenersFromTransfers(
     );
     if (!hit) continue;
     const depositHashes = collectDepositHashes(sorted, lp, walletLower);
+    // async request/fill (GMX V2 GLV/GM): добираем hash'и request-tx, где
+    // underlying ушёл в deposit-vault в отдельной tx от mint'а receipt'а.
+    for (const h of collectAsyncRequestHashes(
+      sorted.map((t) => ({ ...t, order: t.timeStamp })),
+      lp,
+      walletLower,
+      ASYNC_DEPOSIT_WINDOW_SEC,
+    )) {
+      depositHashes.add(h);
+    }
     const openedInTokens = extractOpenedInTokens(
       sorted,
       depositHashes,
@@ -261,6 +353,21 @@ export function resolveOpenerBlocksFromAlchemy(
         (t.contractAddress === lp && t.to === walletLower) ||
         (t.to === lp && t.from === walletLower);
       if (isDeposit) depositHashes.add(t.hash);
+    }
+    // async request/fill (GMX V2 GLV/GM): добираем request-tx по blockNumber.
+    for (const h of collectAsyncRequestHashes(
+      sorted.map((t) => ({
+        hash: t.hash,
+        from: t.from,
+        to: t.to,
+        contractAddress: t.contractAddress,
+        order: t.blockNumber,
+      })),
+      lp,
+      walletLower,
+      ASYNC_DEPOSIT_WINDOW_BLOCKS,
+    )) {
+      depositHashes.add(h);
     }
     const bySym = new Map<string, OpenedInToken>();
     for (const t of sorted) {

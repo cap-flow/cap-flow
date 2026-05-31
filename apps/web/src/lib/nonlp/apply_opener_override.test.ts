@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { OpenPosition } from "../portfolio/open_positions";
 import type { NonLpOpener } from "./opener_detector";
+import { resolveOpenersFromTransfers } from "./opener_detector";
 import { applyNonLpOpenerOverride } from "./apply_opener_override";
 import { nonLpOpenerKey } from "./use_opener_detector";
 
@@ -395,6 +396,42 @@ describe("applyNonLpOpenerOverride", () => {
     expect(p.coverageIncomplete).toBeUndefined();
     expect(p.startUsd).toBe(100); // не тронут
     expect(p.openedAt).toBe(OCT_2025);
+  });
+
+  it("POS-005 e2e: реальные transfer'ы → детектор → override → startUsd=$1300 (не market value GLV, не incomplete)", () => {
+    // testakk 1s GLV [WBTC-USDC] (arb). Регрессия: до фикса async request/fill
+    // детектор не видел OUT-сторону (USDC и mint в разных tx) → costBasisUnknown
+    // затирал buildOne $1300 на currentUsd (market value receipt'а ~$1474).
+    const GLV = "0xdf03eed325b82bc1d4db8b49c30ecc9e05104b96";
+    const GMX_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831";
+    const GLV_VAULT = "0x393053b58f9678c9c28c2ce941ff6cac49c3f8f9";
+    const W = "0xcad07a3c7de7eeaed84e22bc75caf7529778a825";
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    const leg = (p: Record<string, unknown>) => ({
+      timeStamp: 0, blockNumber: 0, hash: "0x", from: W, to: "0x",
+      contractAddress: "0x", value: "0", tokenDecimal: 18, tokenSymbol: "T",
+      ...p,
+    });
+    const transfers = [
+      leg({ hash: "0x17cf", timeStamp: 1774790684, blockNumber: 446895388, from: W, to: GLV_VAULT, contractAddress: GMX_USDC, value: "1300000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      leg({ hash: "0xea23", timeStamp: 1774790688, blockNumber: 446895401, from: ZERO, to: W, contractAddress: GLV, value: "1016578616393671586567", tokenDecimal: 18, tokenSymbol: "GLV [WBTC-USDC]" }),
+    ];
+    const detected = resolveOpenersFromTransfers(transfers, [GLV], W).get(GLV)!;
+    const map = new Map([[nonLpOpenerKey("arb", GLV, W), detected]]);
+
+    const base = pos({ id: "POS-005", openedAt: 1774790688, protoName: "GMX V2", startUsd: 1474, lpTokenId: GLV });
+    const p0: OpenPosition = {
+      ...base,
+      chain: "arb",
+      currentUsd: 1474,
+      supplyTokens: [{ symbol: "GLV [WBTC-USDC]", amount: 1016.58, startUsd: 1474, currentUsd: 1474 } as never],
+    };
+    const out = applyNonLpOpenerOverride([p0], map, new Map([["w1", W]]));
+    const r = out.positions[0]!;
+    expect(r.startUsd).toBe(1300);
+    expect(r.netStartUsd).toBe(1300);
+    expect(r.coverageIncomplete).toBeUndefined(); // НЕ помечен «cost basis неизвестен»
+    expect(r.openedInTokens.map((t) => t.symbol)).toEqual(["USDC"]);
   });
 
   it("ageDays округляется до 0.1", () => {

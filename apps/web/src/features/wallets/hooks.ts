@@ -47,8 +47,18 @@ export function useDeleteWallet(accountId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (walletId: string) => walletsApi.delete(accountId, walletId),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: KEYS.list(accountId) }),
+    onSuccess: (_res, walletId) => {
+      // Optimistically drop the wallet from the cached list IMMEDIATELY so the
+      // localStorage hydration (useWalletsHydration) rebuilds in lockstep and
+      // LoadedWalletsProvider prunes it from positions/registry without a page
+      // reload. Previously we only invalidated → the async refetch lag left the
+      // deleted wallet visible until a manual cache clear.
+      qc.setQueryData<{ id: string }[]>(KEYS.list(accountId), (old) =>
+        old ? old.filter((w) => w.id !== walletId) : old,
+      );
+      qc.removeQueries({ queryKey: KEYS.addresses(accountId, walletId) });
+      void qc.invalidateQueries({ queryKey: KEYS.list(accountId) });
+    },
   });
 }
 

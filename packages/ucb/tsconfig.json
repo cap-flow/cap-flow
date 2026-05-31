@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    // Engine is isomorphic: it uses `typeof window` guards (DOM lib) AND
+    // `process.env` guards (node types) to no-op appropriately per runtime.
+    // Both are needed only at compile time; the emitted .d.ts exposes neither
+    // in public signatures, so consumers (web + Epic B server) are unaffected.
+    "types": ["node"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // A0: the moved engine code (verbatim from apps/web) was never validated
+    // under strict `tsc` — web ships via Vite (no typecheck) and its `tsc`
+    // config is a no-op references project (~275 latent errors). These flags
+    // are relaxed to keep moves byte-for-byte verbatim instead of churning
+    // working code; all OTHER strict flags from tsconfig.base stay ON.
+    "exactOptionalPropertyTypes": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

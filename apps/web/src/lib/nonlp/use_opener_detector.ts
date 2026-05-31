@@ -27,7 +27,9 @@ import {
 // v2: NonLpOpener расширен openedInTokens + startUsd (Stage 2a).
 // v3: Stage 2b — volatile OUT оценивается через DefiLlama historical. v2
 // entries имели startUsd=null для volatile депозитов → bump чтобы пересчитать.
-const CACHE_KEY = "capflow.cache.nonlp.opener.v3";
+// v4: async request/fill OUT-side (GMX V2 GLV/GM — POS-005). v3 entries имели
+// openedInTokens=[]/startUsd=null для GLV (request-tx не собирался) → bump.
+const CACHE_KEY = "capflow.cache.nonlp.opener.v4";
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface NonLpOpenerTarget {

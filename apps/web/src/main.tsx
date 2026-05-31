@@ -23,8 +23,13 @@ import "./lib/portfolio/lots/self_check";
 // Регистрируем DefiLlama oracle для авто-детекта unknown protocols
 // (решает whitelist scaling problem). Каталог загружается лениво при
 // первом использовании, кэшируется 24h в localStorage.
-import { loadLlamaProtocols, getProtocolMetadataSync } from "./lib/defillama_protocols";
+import {
+  loadLlamaProtocols,
+  getProtocolMetadataSync,
+  mapDefiLlamaToProtocolCategory,
+} from "./lib/defillama_protocols";
 import { registerReceiptLessOracle } from "./lib/portfolio/token_roles";
+import { registerProtocolCatalogOracle } from "./lib/portfolio/protocols";
 
 // Триггерим background load каталога — занимает ~1-2 сек, кэшируется.
 loadLlamaProtocols().catch(() => {
@@ -38,6 +43,21 @@ registerReceiptLessOracle((protocolId, protocolName) => {
   const meta = getProtocolMetadataSync(protocolId, protocolName);
   if (!meta || meta.source !== "defillama") return null;
   return meta.isReceiptLess;
+});
+
+// Регистрируем catalog oracle для classifyProtocol (A0: protocols.ts moved to
+// @cap-flow/ucb, DefiLlama-каталог теперь инъецируется тем же паттерном).
+// Возвращает null если каталог ещё не загружен → fallback на "other", как
+// и раньше при cold-start пустом snapshot'е.
+registerProtocolCatalogOracle((projectId, projectName) => {
+  const meta = getProtocolMetadataSync(projectId, projectName);
+  if (meta?.llama?.category) {
+    return {
+      name: meta.llama.name ?? null,
+      category: mapDefiLlamaToProtocolCategory(meta.llama.category),
+    };
+  }
+  return null;
 });
 
 const queryClient = new QueryClient({

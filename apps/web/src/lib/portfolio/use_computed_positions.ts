@@ -310,6 +310,9 @@ export function useComputedPositions(): ComputedPositions {
         v3PoolByTxHash,
         costBasisOverrideByHash,
         lotsByWallet: newTrackers.lotsByWallet,
+        // Lot: FIFO/LIFO/WAC toggle → non-stable supply-token cost basis
+        // (lending/yield). LP startUsd идёт из Krystal (methodology-independent).
+        methodology: lotMethodology,
         ...(lendingAuditOn && {
           lendingAuditByKey: lendingAuditHook.data,
         }),
@@ -330,6 +333,7 @@ export function useComputedPositions(): ComputedPositions {
     newTrackers.lotsByWallet,
     lendingAuditHook.data,
     lendingAuditOn,
+    lotMethodology,
   ]);
 
   // opsByWallet — reused by the lending override and exposed to callers

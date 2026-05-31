@@ -2,27 +2,11 @@ import { useCallback } from "react";
 
 import { useLocalStorage } from "./useLocalStorage";
 
-/**
- * Тип кошелька — определяет как мы его загружаем:
- *   - "evm"       → DeBank как primary
- *   - "sol"       → Helius + Vybe + Sonar
- *   - "coinstats" → CoinStats для всех остальных сетей; сеть указана
- *                   в `connectionId` (e.g. "bitcoin", "ton-wallet").
- */
-export type WalletChain = "evm" | "sol" | "coinstats";
-
-export interface SavedWallet {
-  id: string;
-  name: string;
-  address: string;
-  chain: WalletChain;
-  /**
-   * Только для chain === "coinstats" — CoinStats `connectionId`
-   * (см. lib/coinstats_chains.ts).
-   */
-  connectionId?: string;
-  createdAt: number;
-}
+// A0: WalletChain / SavedWallet moved to `@cap-flow/ucb/wallet` (the engine
+// references them). Re-exported here so existing `@/lib/wallets` import sites
+// are unchanged; this file keeps the React/localStorage wallet store below.
+import type { WalletChain, SavedWallet } from "@cap-flow/ucb/wallet";
+export type { WalletChain, SavedWallet };
 
 interface WalletsState {
   list: SavedWallet[];

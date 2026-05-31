@@ -14,6 +14,7 @@ export * from "./api_usage.js";
 export * from "./chain_registry.js";
 export * from "./coingecko_registry.js";
 export * from "./historical_prices.js";
+export * from "./op_token_prices.js";
 
 // Per-account overrides on top of global reference data (Phase 2).
 export * from "./cg_id_overrides.js";
@@ -60,3 +61,7 @@ export * from "./cex_accounts.js";
 
 // UCB C1: client-supplied cost basis seeds for CEX deposits.
 export * from "./cex_deposit_seeds.js";
+
+// UCB server-port enablers (Epic A1): golden-case oracle + anomaly findings.
+export * from "./golden_cases.js";
+export * from "./anomaly_flags.js";
