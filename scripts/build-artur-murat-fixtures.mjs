@@ -1,9 +1,9 @@
 // One-off: build per-wallet golden fixtures for the testakk account wallets
-// (artur, murat) from the live capture. Anchors every VERIFIED non-Fluid
-// position; Fluid is skipped because one receipt (0x324c5dc1) maps to TWO
-// decomposed positions per wallet (ETH + WBTC collateral) and the harness has
-// no match-type to disambiguate by collateral asset yet (follow-up: add a
-// `supplySymbol` match type, then anchor the 4 Fluid positions too).
+// (artur, murat) from the live capture. Anchors every VERIFIED position.
+// Fluid uses the `supplySymbol` match type because one receipt (0x324c5dc1)
+// maps to TWO decomposed positions per wallet (ETH + WBTC collateral) — the
+// receipt (marketKey) alone is ambiguous, so we disambiguate by the supply
+// token symbol.
 //
 // All 14 positions were verified from the operations registry on 2026-06-01:
 //  - GMX (×7): startUsd = linkedCostBasisUsd (Σ stablecoin paid in the request
@@ -27,28 +27,34 @@ for (const w of cap.wallets) {
   const name = w.wallet.name; // artur | murat
   const slug = name.toLowerCase().replace(/\s+/g, "-");
 
-  // Anchor every verified non-Fluid position for this wallet.
-  const mine = cap.positions.filter(
-    (p) => p.walletId === w.wallet.id && !/fluid/i.test(p.protocolName),
-  );
+  // Anchor every verified position for this wallet. Fluid decomposes one
+  // receipt into >1 collateral row → disambiguate by supplySymbol.
+  const mine = cap.positions.filter((p) => p.walletId === w.wallet.id);
   const seen = new Set();
   const anchors = [];
   for (const p of mine) {
     const isV3 = p.matchedV3TokenId != null;
-    const match = isV3 ? "tokenId" : "marketKey";
-    const key = isV3 ? `tok:${p.matchedV3TokenId}` : `mk:${p.lpTokenId}`;
+    const isFluid = /fluid/i.test(p.protocolName);
+    const supplySym = p.supplyTokens?.[0]?.symbol ?? null;
+    const match = isV3 ? "tokenId" : isFluid ? "supplySymbol" : "marketKey";
+    const key = isV3
+      ? `tok:${p.matchedV3TokenId}`
+      : isFluid
+        ? `mk:${p.lpTokenId}|sym:${supplySym}`
+        : `mk:${p.lpTokenId}`;
     if (seen.has(key)) {
       throw new Error(`${name}: ambiguous anchor ${key} — would match >1 position`);
     }
     seen.add(key);
     anchors.push({
-      label: `${name}:${p.protocolName}:${(p.lpTokenId || "").slice(0, 10)}${isV3 ? `#${p.matchedV3TokenId}` : ""}`,
+      label: `${name}:${p.protocolName}:${(p.lpTokenId || "").slice(0, 10)}${isV3 ? `#${p.matchedV3TokenId}` : isFluid ? `:${supplySym}` : ""}`,
       anchor: {
         chain: p.chain,
         protocolId: p.protocolId,
         marketKey: isV3 ? null : p.lpTokenId,
         openHash: p.openHash ?? null,
         tokenId: isV3 ? p.matchedV3TokenId : null,
+        ...(isFluid && { supplySymbol: supplySym }),
       },
       match,
       expected: { startUsd: p.startUsd, toleranceAbsUsd: 1, tolerancePct: 0.005 },

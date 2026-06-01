@@ -10,11 +10,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   fixtureToReplayInput,
+  matchesAnchor,
   replayInputToFixture,
   tagBigints,
   reviveBigints,
+  type GoldenAnchor,
   type GoldenFixture,
 } from "./golden_fixture";
+import type { OpenPosition } from "../open_positions";
 import { replayPositions, type ReplayInput } from "./replay_positions";
 import simpleAaveEth from "../__fixtures__/golden/simple-aave-eth.json";
 
@@ -96,6 +99,42 @@ describe("replayInputToFixture (A3.2 export serializer)", () => {
     const v = { a: 1n, b: [2n, { c: 3n, d: "x" }], e: null };
     const round = reviveBigints(JSON.parse(JSON.stringify(tagBigints(v))));
     expect(round).toEqual(v);
+  });
+
+  it("supplySymbol match disambiguates two decomposed positions on one receipt", () => {
+    // A Fluid multi-collateral vault: one receipt (0x324c5dc1) split by DeBank
+    // into an ETH row and a WBTC row. `marketKey` alone is ambiguous; the
+    // `supplySymbol` match picks the right collateral row.
+    const RECEIPT = "0x324c5dc1fc4200000000000000000000000000aa";
+    const mk = (sym: string): OpenPosition =>
+      ({
+        chain: "arb",
+        protocol: { id: "arb_fluid" },
+        lpTokenId: RECEIPT,
+        matchedV3TokenId: null,
+        supplyTokens: [{ symbol: sym }],
+      }) as unknown as OpenPosition;
+    const ethPos = mk("ETH");
+    const wbtcPos = mk("WBTC");
+    const anchor = (sym: string): GoldenAnchor => ({
+      chain: "arb",
+      protocolId: "arb_fluid",
+      marketKey: RECEIPT,
+      openHash: null,
+      supplySymbol: sym,
+    });
+    expect(matchesAnchor(ethPos, anchor("ETH"), "supplySymbol")).toBe(true);
+    expect(matchesAnchor(wbtcPos, anchor("ETH"), "supplySymbol")).toBe(false);
+    expect(matchesAnchor(wbtcPos, anchor("WBTC"), "supplySymbol")).toBe(true);
+    // marketKey alone would match BOTH (the ambiguity supplySymbol resolves).
+    const mkAnchor: GoldenAnchor = {
+      chain: "arb",
+      protocolId: "arb_fluid",
+      marketKey: RECEIPT,
+      openHash: null,
+    };
+    expect(matchesAnchor(ethPos, mkAnchor, "marketKey")).toBe(true);
+    expect(matchesAnchor(wbtcPos, mkAnchor, "marketKey")).toBe(true);
   });
 
   it("omits absent optional map inputs (no empty keys leak in)", () => {

@@ -65,9 +65,20 @@ export interface GoldenAnchor {
   openHash: string | null;
   /** Matched V3/V4/CL NFT tokenId — disambiguates multiple NFTs in one pool. */
   tokenId?: string | null;
+  /**
+   * First supply-token symbol — disambiguates multiple DECOMPOSED positions
+   * sharing one receipt (e.g. a Fluid multi-collateral vault `0x324c5dc1` split
+   * into an ETH row and a WBTC row). Used with `match: "supplySymbol"`.
+   */
+  supplySymbol?: string | null;
 }
 
-export type AnchorMatchKey = "protocolId" | "marketKey" | "openHash" | "tokenId";
+export type AnchorMatchKey =
+  | "protocolId"
+  | "marketKey"
+  | "openHash"
+  | "tokenId"
+  | "supplySymbol";
 
 export interface GoldenExpected {
   startUsd?: number;
@@ -263,6 +274,13 @@ export function matchesAnchor(
       return anchor.openHash != null && p.openHash === anchor.openHash;
     case "tokenId":
       return anchor.tokenId != null && p.matchedV3TokenId === anchor.tokenId;
+    case "supplySymbol":
+      return (
+        anchor.marketKey != null &&
+        p.lpTokenId === anchor.marketKey &&
+        anchor.supplySymbol != null &&
+        p.supplyTokens[0]?.symbol === anchor.supplySymbol
+      );
   }
 }
 

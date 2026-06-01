@@ -607,15 +607,23 @@ $15.88 — артефакт неверного opener-fallback (даже не р
   5000+5000+10000+10000; ETH LIFO lot-трейс $32,296.72; murat $1068.53/$1533.14).
   Все подтверждены.
 
-**Захвачено в replay (10/14):** `__fixtures__/golden/artur-1.json` (3 GMX + Morpho),
-`murat-1.json` (4 GMX + 2 V3). Каждый анкор проверяет locate + startUsd + currentUsd.
-Builder: `scripts/build-artur-murat-fixtures.mjs`.
+**Захвачено в replay (13/14):** `__fixtures__/golden/artur-1.json` (3 GMX + Morpho
++ Fluid WBTC), `murat-1.json` (4 GMX + 2 V3 + Fluid WBTC + Fluid ETH). Каждый
+анкор проверяет locate + startUsd + currentUsd. Builder:
+`scripts/build-artur-murat-fixtures.mjs`.
 
-**Fluid ×4 отложены:** один receipt `0x324c5dc1` = 2 декомпозированные позиции на
-кошелёк (ETH + WBTC залог); у harness нет match-типа, чтобы их различить.
-Follow-up: добавить match-тип `supplySymbol` (anchor по `supplyTokens[0].symbol`),
-тогда заякорить и 4 Fluid. Значения уже верифицированы (см. выше), задача — только
-механика анкоринга.
+**Match-тип `supplySymbol` добавлен** (`golden_fixture.ts`): один receipt
+`0x324c5dc1` = 2 декомпозированные Fluid-позиции на кошелёк (ETH + WBTC залог);
+`marketKey` неоднозначен → различаем по `supplyTokens[0].symbol`.
+
+**artur ETH Fluid НЕ заякорен (1/14):** offline replay даёт **$33,709 vs
+live-эталон $32,296.72 (+4.4%)** — захваченный `histPrices` (49 записей) НЕ
+покрывает все старые ETH-лоты artur'а (32 acquisition'а), lot-tracker фоллбэчит.
+Значение верифицировано от реестра (LIFO ~$2283/ETH), но оффлайн невоспроизводимо
+без полного `histPrices`. Якорить replay-число ($33,709) нельзя — оно расходится
+с проверенным live. Follow-up: захватывать ПОЛНЫЙ `histPrices` (dev-hook отдаёт
+усечённый набор) → тогда заякорить и эту позицию. Остальные 3 Fluid
+воспроизводятся в пределах 0.5% (artur WBTC точно, murat WBTC, murat ETH 0.38%).
 
 **Ключевой урок верификации:** `movement.usd` на receive-side свопов в dev-hook
 КОНТАМИНИРОВАН (все WBTC-свопы за 4 месяца показывали одну цену $73,253). Cost basis
