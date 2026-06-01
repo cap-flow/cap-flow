@@ -52,8 +52,25 @@ import {
   type PortfolioRefreshJobData,
 } from "./modules/queue/portfolio-refresh.queue.js";
 import { PortfolioRefreshProcessor } from "./modules/queue/portfolio-refresh.processor.js";
+import { OpPricingService } from "./modules/ucb/op-pricing.service.js";
+import { OpPricingRepository } from "./modules/ucb/op-pricing.repository.js";
+import { UcbOpsRepository } from "./modules/ucb/ucb-ops.repository.js";
+import { UcbShadowRepository } from "./modules/ucb/ucb-shadow.repository.js";
+import { UcbShadowService } from "./modules/ucb/ucb-shadow.service.js";
+import {
+  UcbShadowRunner,
+  type DeBankRawSource,
+  type EvmWalletRow,
+  type WalletAddressSource,
+} from "./modules/ucb/ucb-shadow-runner.js";
+import type {
+  DeBankComplexProtocol,
+  DeBankTokenBalance,
+} from "./modules/ucb/debank-live.adapter.js";
 
 const REFRESH_EVERY_MS = 60 * 60 * 1000; // 1 hour
+/** `@cap-flow/ucb` engine version stamp for shadow rows (B5). */
+const UCB_ENGINE_VERSION = "ucb-server@dev";
 const JITTER_MS = 60 * 60 * 1000;
 const PAYMENT_SCAN_EVERY_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -135,6 +152,57 @@ async function main(): Promise<void> {
   const processor = new PortfolioRefreshProcessor(refreshService);
   const refreshQueue = new PortfolioRefreshQueue(bullConn);
 
+  // ─── UCB B5 server-shadow (flag-gated, default OFF) ────────────────
+  // Computes canonical positions server-side via @cap-flow/ucb after each
+  // refresh and stores them in ucb_shadow_results. NEVER serves; inert unless
+  // `capflow.feature.ucbServerShadow` is ON for the account. Fail-soft.
+  const ucbShadowService = new UcbShadowService({
+    opsRepo: new UcbOpsRepository(dbClient.db),
+    shadowRepo: new UcbShadowRepository(dbClient.db),
+    opPricingService: new OpPricingService(new OpPricingRepository(dbClient.db)),
+    flags: featureFlagsService,
+    engineVersion: UCB_ENGINE_VERSION,
+  });
+  // Bind the DeBank client to the adapter's RAW input shape (same JSON, cast at
+  // the boundary — mirrors the evmHistoryFetcher cast above).
+  const ucbDebankSource: DeBankRawSource = {
+    complexProtocolList: async (addr) =>
+      (await debankClient.getRawComplexProtocols(
+        addr,
+      )) as unknown as DeBankComplexProtocol[],
+    allTokens: async (addr) =>
+      (await debankClient.getRawTokenList(
+        addr,
+      )) as unknown as DeBankTokenBalance[],
+    totalBalance: async (addr) => ({
+      total_usd_value: (await debankClient.getTotalBalance(addr)).totalUsdValue,
+    }),
+  };
+  const ucbWalletSource: WalletAddressSource = {
+    evmWalletsForAccount: async (accountId) => {
+      const out: EvmWalletRow[] = [];
+      for (const w of await walletsRepo.listByAccount(accountId)) {
+        const evm = (await walletsRepo.listAddresses(w.id)).find(
+          (a) => a.type === "evm",
+        );
+        if (evm)
+          out.push({
+            id: w.id,
+            name: w.name,
+            createdAt: w.createdAt,
+            address: evm.address,
+          });
+      }
+      return out;
+    },
+  };
+  const ucbShadowRunner = new UcbShadowRunner({
+    debank: ucbDebankSource,
+    walletSource: ucbWalletSource,
+    shadowService: ucbShadowService,
+    flags: featureFlagsService,
+  });
+
   const billingRepo = new BillingRepository(dbClient.db);
   // Real providers if their keys are set, else mock (always-empty). The
   // monitor pipeline runs cleanly either way.
@@ -161,7 +229,31 @@ async function main(): Promise<void> {
   // ─── refresh worker ───────────────────────────────────────────────
   const refreshWorker = new Worker<PortfolioRefreshJobData>(
     PORTFOLIO_REFRESH_QUEUE,
-    async (job) => processor.process(job),
+    async (job) => {
+      const result = await processor.process(job);
+      // UCB B5 shadow — flag-gated inside run() (no DeBank fetch when OFF),
+      // fail-soft so it can NEVER break the refresh job.
+      try {
+        const shadow = await ucbShadowRunner.run(job.data.accountId);
+        if (!shadow.skipped) {
+          logger.info(
+            {
+              accountId: job.data.accountId,
+              shadowId: shadow.id,
+              positions: shadow.positionCount,
+              error: shadow.error,
+            },
+            "[worker] ucb shadow stored"
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          { accountId: job.data.accountId, err: (err as Error).message },
+          "[worker] ucb shadow failed (refresh unaffected)"
+        );
+      }
+      return result;
+    },
     { connection: bullConn, concurrency: 5 }
   );
   refreshWorker.on("completed", (job) => {

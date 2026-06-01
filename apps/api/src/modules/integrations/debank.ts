@@ -243,6 +243,33 @@ export class DeBankClient implements IBalanceProvider {
   }
 
   /**
+   * UCB B5: RAW all_complex_protocol_list — the UNPROCESSED DeBank shape the
+   * live adapter consumes (portfolio_item_list with detail/pool/asset_dict).
+   * `getProtocolsSummary` derives a summary from this; the adapter needs the
+   * full nested response, so this returns it verbatim. Caller casts to the
+   * adapter's DeBankComplexProtocol[] at the boundary (same JSON).
+   */
+  async getRawComplexProtocols(address: string): Promise<unknown[]> {
+    if (!this.isLive) throw new ProviderNotConfiguredError("debank");
+    const url = new URL(`${this.base}/v1/user/all_complex_protocol_list`);
+    url.searchParams.set("id", address);
+    return this.fetchJson<unknown[]>(url);
+  }
+
+  /**
+   * UCB B5: RAW all_token_list — UNPROCESSED so the adapter keeps the fields
+   * `getAllTokens` drops (price/optimized_symbol/is_verified/is_core/is_wallet)
+   * that drive its spam filter. Caller casts to DeBankTokenBalance[].
+   */
+  async getRawTokenList(address: string): Promise<unknown[]> {
+    if (!this.isLive) throw new ProviderNotConfiguredError("debank");
+    const url = new URL(`${this.base}/v1/user/all_token_list`);
+    url.searchParams.set("id", address);
+    url.searchParams.set("is_all", "true");
+    return this.fetchJson<unknown[]>(url);
+  }
+
+  /**
    * Sum up supply/borrow USD across every DeFi protocol the address
    * participates in. One DeBank credit per call. Returns zeroed result
    * (not error) on missing fields so a partial response from DeBank
