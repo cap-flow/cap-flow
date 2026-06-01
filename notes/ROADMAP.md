@@ -1,9 +1,27 @@
 ---
-updated: 2026-05-21 (Design System v1 brief — переход на брендбук Capflow v1.0)
+updated: 2026-06-01 (Снижение расходов DeBank + admin app_settings)
 ---
 
 
 # ROADMAP
+
+## 💸 Снижение расходов DeBank + admin-настройки API (2026-06-01)
+
+**Контекст**: DeBank Pro оплачивается по объёму запросов. Аудит — DeBank нужен
+лишь на 4 эндпоинта; остальное уже покрыто гибридом. Сняли основной
+рекуррентный расход и дали владельцу тюнинг лимитов.
+
+**Решение** (см. [decisions/api-cost-reduction-app-settings](decisions/api-cost-reduction-app-settings.md)):
+- История DeBank: полный бэкфилл на первой загрузке (не теряем старшие лоты),
+  затем дешёвый инкремент (2-5 стр.) через `historyComplete`-флаг.
+- Авто-рефреш: **заменил** «раз в час слепым setInterval» → activity-gating
+  (вкладка видима + online, ≤1/час).
+- Новая таблица `app_settings` (миграция 0026) + `AppSettingsService` +
+  admin-вкладка «Настройки» в «Расходы и настройки API» (rate limits, квоты,
+  cache TTL, retry, DeBank history, авто-рефреш) с live/restart-кнобами.
+
+**Follow-up**: Рычаг 1 — вынести `total_balance`/`token_list` на
+Alchemy×DefiLlama (ещё ~⅔ рекуррентного DeBank-трафика).
 
 ## 🎨 Design System v1 — переход на брендбук Capflow (2026-05-21)
 
