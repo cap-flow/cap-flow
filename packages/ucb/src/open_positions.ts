@@ -142,6 +142,56 @@ function canonicalCollateralSymbol(s: string): string {
   return u;
 }
 
+/**
+ * Parse the underlying tokens encoded in a wrapped-protocol symbol:
+ * `"GLV [WETH-USDC]"` → `["WETH","USDC"]`. Returns null when no `[…]` part.
+ */
+function parseUnderlyingFromSymbol(symbol: string): string[] | null {
+  const m = symbol.match(/\[([^\]]+)\]/);
+  if (!m || !m[1]) return null;
+  return m[1]
+    .split(/[-/]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * GENERAL (POS-014 class): for a receipt-less lending position whose DeBank
+ * live supply is the UNDERLYING DECOMPOSITION of a supplied protocol token
+ * (`GLV [WETH-USDC]` supplied → DeBank shows WETH+USDC), return that protocol
+ * token's symbol so cost basis is scoped by IT (its lots carry the real cost),
+ * not by the decomposed underlying (which never matches the `lend_supply OUT
+ * GLV` op → near-zero startUsd). Multi-market safe: the protocol token's
+ * underlying must match THIS position's live supply (WBTC-market keeps WBTC).
+ */
+function findDecomposedProtocolCollateral(
+  ops: readonly ClassifiedOp[],
+  protocolId: string,
+  chain: string,
+  liveSupplySymbols: readonly string[],
+): string | undefined {
+  const liveCanon = new Set(
+    liveSupplySymbols.map((s) => canonicalCollateralSymbol(s)),
+  );
+  if (liveCanon.size === 0) return undefined;
+  for (const op of ops) {
+    if (op.status === "failed") continue;
+    if (op.protocol?.id !== protocolId || op.chain !== chain) continue;
+    if (op.type !== "lend_supply" && op.type !== "lp_add") continue;
+    for (const m of op.movement) {
+      if (m.direction !== "out" || !m.isProtocolToken || m.amount <= 0) continue;
+      const underlying = parseUnderlyingFromSymbol(m.symbol);
+      if (!underlying || underlying.length === 0) continue;
+      const underlyingCanon = underlying.map((u) => canonicalCollateralSymbol(u));
+      // Decomposition match: every underlying token appears in the live supply.
+      if (underlyingCanon.every((u) => liveCanon.has(u))) {
+        return m.symbol;
+      }
+    }
+  }
+  return undefined;
+}
+
 export interface OpenPositionToken {
   symbol: string;
   /** Кол-во в позиции сейчас (live). */
@@ -2584,10 +2634,22 @@ function buildOne(
   // чтобы не смешивать залоги разных Morpho-рынков (POS-004). Канонизируем
   // wSPYx→SPYx (owner 2026-05-31).
   const isReceiptLessPos = isReceiptLessProtocol(lp.protocolId, lp.protocolName);
-  const collateralHint =
-    isReceiptLessPos && lp.supply.length > 0
-      ? lp.supply.reduce((a, b) => ((b.usd ?? 0) > (a.usd ?? 0) ? b : a)).symbol
-      : undefined;
+  let collateralHint: string | undefined;
+  if (isReceiptLessPos && lp.supply.length > 0) {
+    // POS-014 (GENERAL): if the live supply is the underlying decomposition of
+    // a supplied protocol token (GLV [WETH-USDC] → WETH+USDC), scope cost basis
+    // by THAT protocol token (its lots carry the real cost basis), else the
+    // dominant live-supply symbol (single-token collateral, e.g. wSPYx/WBTC).
+    const decomposed = findDecomposedProtocolCollateral(
+      ops,
+      lp.protocolId,
+      lp.chain,
+      lp.supply.map((s) => s.symbol),
+    );
+    collateralHint =
+      decomposed ??
+      lp.supply.reduce((a, b) => ((b.usd ?? 0) > (a.usd ?? 0) ? b : a)).symbol;
+  }
   const collateralCanon = collateralHint
     ? canonicalCollateralSymbol(collateralHint)
     : null;

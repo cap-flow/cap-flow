@@ -28,6 +28,16 @@ import { buildOpenPositions, type OpenPosition } from "../open_positions";
 import { runUcbPipelineForWallet } from "../ucb_pipeline";
 import { applyLendingCostBasisOverride } from "../lending_cost_basis_override";
 import { applyCexInheritanceCostBasisOverride } from "../cex_inheritance_cost_basis_override";
+import { applyNonLpOpenerOverride } from "../../nonlp/apply_opener_override";
+import type { NonLpOpener } from "../../nonlp/opener_detector";
+import { applyV3CostBasisOverride } from "../v3_cost_basis_override";
+import { applyKrystalV3Override } from "../../krystal/override";
+import type {
+  KrystalV3Summary,
+  KrystalTransactionsSummary,
+} from "../../krystal/adapter";
+import type { V3PositionMap } from "../../v3/hook";
+import type { V3CostBasisResult } from "../../v3/liquidity_events";
 import type { ClassifiedOp } from "../types";
 import type { LiveSnapshot } from "../live";
 import type { SavedWallet } from "../../wallets";
@@ -58,6 +68,32 @@ export interface ReplayInput {
   v3LpHistPrices?: Map<string, number>;
   /** Server CEX withdrawal cost basis, keyed by lowercased tx hash. */
   cexCostBasisByHash?: Map<string, CexCostBasisMatch>;
+  /**
+   * Frozen non-LP opener detection (GMX V2 GLV/GM, Avantis, lending-without-
+   * mint) keyed by `nonLpOpenerKey(chain, lpTokenId, wallet)`. Captured from the
+   * client's `useNonLpOpenerDetector` (Etherscan/Alchemy fetch) so the override
+   * replays offline — no network. When present, the harness applies
+   * `applyNonLpOpenerOverride` (mirrors `useComputedPositions`).
+   */
+  nonLpOpenerByKey?: ReadonlyMap<string, NonLpOpener>;
+  /**
+   * Frozen V3 NFT positions (`useV3Positions`, keyed by walletId) — feeds the
+   * V3 cost-basis override.
+   */
+  v3PositionMap?: V3PositionMap;
+  /**
+   * Frozen V3 liquidity-event cost basis (`useV3LiquidityEvents`, keyed by
+   * `chain|tokenId`). With `v3PositionMap`, the harness applies
+   * `applyV3CostBasisOverride` (Etherscan slot0 startUsd) offline.
+   */
+  v3CostBasis?: Map<string, V3CostBasisResult>;
+  /**
+   * Frozen Krystal V3 summaries (`useKrystalV3Positions`, keyed by tokenId) —
+   * AUTHORITATIVE startUsd for covered LP (`totalDepositValue`/Σ DEPOSIT),
+   * overrides the slot0 value. Plus per-NFT transactions for the Σ DEPOSIT path.
+   */
+  krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
+  krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
 }
 
 export interface ReplayResult {
@@ -121,8 +157,27 @@ export function replayPositions(input: ReplayInput): ReplayResult {
   const opsByWallet = new Map<string, ClassifiedOp[]>();
   for (const w of input.wallets) opsByWallet.set(w.wallet.id, w.ops);
 
-  // ── Step 3: lending cost basis override (FIFO/LIFO/WAC) ─────────────
   let working: OpenPosition[] = positionsRaw.slice();
+
+  // ── Step 2.5: V3 cost basis override (Etherscan slot0) ──────────────
+  // First in the client's override chain. Frozen `v3PositionMap` +
+  // `v3CostBasis` make it offline (no Etherscan/Alchemy fetch). The function
+  // self-guards on empty maps; we mirror that to skip when V3 data is absent.
+  if (
+    input.v3PositionMap &&
+    input.v3CostBasis &&
+    input.v3PositionMap.size > 0 &&
+    input.v3CostBasis.size > 0
+  ) {
+    const v3Result = applyV3CostBasisOverride(
+      working,
+      input.v3PositionMap,
+      input.v3CostBasis,
+    );
+    working = v3Result.positions;
+  }
+
+  // ── Step 3: lending cost basis override (FIFO/LIFO/WAC) ─────────────
   const lendingResult = applyLendingCostBasisOverride(
     working,
     opsByWallet,
@@ -141,6 +196,46 @@ export function replayPositions(input: ReplayInput): ReplayResult {
       histPrices,
     );
     working = cexResult.positions;
+  }
+
+  // ── Step 4.7: Krystal V3 override (AUTHORITATIVE startUsd for covered LP) ──
+  // Mirrors useComputedPositions Phase 7 (krystalPrimary). For covered V3/V4/CL
+  // LP, startUsd = Krystal totalDepositValue / Σ DEPOSIT — overrides the slot0
+  // value from Step 2.5. Lending/CEX above don't touch LP, so order holds.
+  if (input.krystalV3ByTokenId && input.krystalV3ByTokenId.size > 0) {
+    const walletAddressById = new Map<string, string>();
+    for (const w of input.wallets) {
+      if (w.wallet.chain === "evm") {
+        walletAddressById.set(w.wallet.id, w.wallet.address);
+      }
+    }
+    working = applyKrystalV3Override(
+      working,
+      input.krystalV3ByTokenId,
+      walletAddressById,
+      input.krystalTxByTokenId,
+    );
+  }
+
+  // ── Step 5: non-LP opener override (guarded, frozen detection) ──────
+  // Mirrors the tail of useComputedPositions: applies Etherscan/Alchemy-
+  // detected OUT-side cost basis for non-V3-LP positions (GMX V2 GLV/GM,
+  // Avantis, lending-without-mint). Frozen `nonLpOpenerByKey` makes it offline.
+  // V3/Krystal steps that precede it in the client are no-ops here (their
+  // inputs are absent), so for these non-LP positions the effective order holds.
+  if (input.nonLpOpenerByKey && input.nonLpOpenerByKey.size > 0) {
+    const walletAddressById = new Map<string, string>();
+    for (const w of input.wallets) {
+      if (w.wallet.chain === "evm") {
+        walletAddressById.set(w.wallet.id, w.wallet.address);
+      }
+    }
+    const openerResult = applyNonLpOpenerOverride(
+      working,
+      input.nonLpOpenerByKey,
+      walletAddressById,
+    );
+    working = openerResult.positions;
   }
 
   return { positions: working, positionsRaw };

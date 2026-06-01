@@ -29,7 +29,10 @@ import {
 // entries имели startUsd=null для volatile депозитов → bump чтобы пересчитать.
 // v4: async request/fill OUT-side (GMX V2 GLV/GM — POS-005). v3 entries имели
 // openedInTokens=[]/startUsd=null для GLV (request-tx не собирался) → bump.
-const CACHE_KEY = "capflow.cache.nonlp.opener.v4";
+// v5 (2026-06-01): partial-withdrawal netting (receiptNetFraction) — startUsd
+// receipt-токен позиций с частичным выводом изменился (POS-007 GMX $7122→$5268).
+// Bump инвалидирует stale v4 cost-basis у всех клиентов.
+const CACHE_KEY = "capflow.cache.nonlp.opener.v5";
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface NonLpOpenerTarget {

@@ -39,6 +39,10 @@ import {
   filterClosedDustPositions,
   useKrystalV3ClosedPools,
 } from "@/lib/krystal/closed_pools_hook";
+import {
+  buildKrystalOpenIndex,
+  filterKrystalAbsentV3Phantoms,
+} from "@/lib/krystal/phantom_filter";
 import { applyKrystalV3Override } from "@/lib/krystal/override";
 import {
   useNonLpOpenerDetector,
@@ -480,6 +484,34 @@ export function useComputedPositions(): ComputedPositions {
         isV3LpProtocol,
       );
     }
+    // 2026-06-01 (MMaksimuk phantom audit): Krystal-absent phantom filter.
+    // Catches BOTH (a) closed-residual dust the flaky CLOSED-fetch above missed
+    // and (b) DeBank-only positions Krystal never indexed — by using the PRIMARY
+    // (open) Krystal set as the reliable signal. Drops only no-NFT, small,
+    // covered-chain V3 LP positions Krystal doesn't list open for that wallet;
+    // gauge-staked CL (has matchedV3TokenId) and Krystal-listed positions are
+    // kept. Fail-soft when Krystal returned nothing.
+    if (krystalV3.data.size > 0) {
+      const walletAddressById = new Map<string, string>();
+      for (const l of loadedList) {
+        if (l.wallet.chain === "evm") {
+          walletAddressById.set(l.wallet.id, l.wallet.address);
+        }
+      }
+      const phantomResult = filterKrystalAbsentV3Phantoms(
+        working,
+        walletAddressById,
+        buildKrystalOpenIndex(krystalV3.data.values()),
+        isV3LpProtocol,
+      );
+      for (const d of phantomResult.dropped) {
+        console.log(
+          `[Krystal phantom filter] dropping ${d.protocol.name} ${d.chain} ` +
+            `pool ${d.lpTokenId} ($${d.currentUsd.toFixed(2)}) — no NFT, not in Krystal open`,
+        );
+      }
+      working = phantomResult.positions;
+    }
     // 2026-05-28 (MMaksimuk no-date audit, Stage 1): Non-LP opener override.
     // Проставляет openedAt / ageDays / APR для не-LP позиций без даты,
     // используя Etherscan-detected дату первого receipt transfer. Guards
@@ -518,6 +550,69 @@ export function useComputedPositions(): ComputedPositions {
     krystalClosedHook.closedKeys,
     nonLpOpener.data,
     loadedList,
+  ]);
+
+  // ── A3.2 dev-only golden capture ──────────────────────────────────────
+  // Publish the EXACT assembled ReplayInput pieces the pipeline just consumed
+  // to `window.__capflowGolden`, so the fixture-export tooling can freeze a
+  // marked position's inputs and the offline harness replays them byte-for-
+  // byte (parity = same inputs → same number). DEV-only, zero prod surface.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as { __capflowGolden?: unknown }).__capflowGolden = {
+      wallets: loadedList.map((l) => ({
+        wallet: l.wallet,
+        ops: l.ops,
+        live: l.live ?? null,
+      })),
+      histPrices: Array.from(walletHistPrices.histPrices.entries()),
+      costBasisOverrideByHash: Array.from(costBasisOverrideByHash.entries()),
+      lotMethodology,
+      nonLpOpenerByKey: Array.from(nonLpOpener.data.entries()),
+      cexCostBasisByHash: Array.from(cexCostBasisByHash.entries()),
+      // V3 override inputs (raw — contain bigints; tagged at capture time).
+      v3PositionMap: Array.from(v3.data.entries()),
+      v3CostBasis: Array.from(v3CostBasisHook.data.entries()),
+      // Krystal V3 (authoritative LP startUsd) — plain JSON, no bigints.
+      krystalV3ByTokenId: Array.from(krystalV3.data.entries()),
+      krystalTxByTokenId: Array.from(krystalTxHook.data.entries()),
+      positions: positions.map((p) => ({
+        id: p.id,
+        chain: p.chain,
+        protocolId: p.protocol.id,
+        protocolName: p.protocol.name,
+        lpTokenId: p.lpTokenId ?? null,
+        matchedV3TokenId: p.matchedV3TokenId ?? null,
+        openHash: p.openHash ?? null,
+        walletId: p.walletId,
+        startUsd: p.startUsd,
+        netStartUsd: p.netStartUsd,
+        currentUsd: p.currentUsd,
+        netPnlUsd: p.netPnlUsd,
+        coverageIncomplete: p.coverageIncomplete ?? false,
+        supplyTokens: (p.supplyTokens ?? []).map((t) => ({
+          symbol: t.symbol,
+          amount: t.amount,
+          startUsd: t.startUsd,
+          currentUsd: t.currentUsd,
+          avgBuyPrice: t.avgBuyPrice,
+          priceSource: t.priceSource,
+          fallbackUsd: t.fallbackUsd,
+        })),
+      })),
+    };
+  }, [
+    loadedList,
+    walletHistPrices.histPrices,
+    costBasisOverrideByHash,
+    lotMethodology,
+    nonLpOpener.data,
+    cexCostBasisByHash,
+    v3.data,
+    v3CostBasisHook.data,
+    krystalV3.data,
+    krystalTxHook.data,
+    positions,
   ]);
 
   return {

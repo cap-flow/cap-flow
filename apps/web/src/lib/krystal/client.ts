@@ -35,6 +35,70 @@ function parseCreditHeaders(h: Headers): KrystalCreditMeter | undefined {
   return { before, cost, left };
 }
 
+// ─── Retry/backoff на 429/503 ─────────────────────────────────────────────
+// Krystal cloud имеет rate-limit (429) + upstream-proxy отдаёт 503 при
+// transient недоступности ключа. До фикса любой 429/503 → throw → Krystal-
+// override пропускался → fee откатывался на DeBank → «—» (api_usage показал
+// 240× 429 на рефреше). Прерывисто: часть позиций 200, часть 429 в одном
+// бурсте (closed-pools allSettled + per-NFT /transactions + open — параллельно).
+// Ретраим transient-статусы с экспоненциальным backoff (+ уважаем Retry-After),
+// после исчерпания попыток отдаём последний response (caller бросит как раньше
+// → graceful degradation). НЕ ретраим 401/402/404 (постоянные).
+const RETRYABLE_STATUSES = new Set([429, 503]);
+const MAX_RETRY_ATTEMPTS = 3;
+const BASE_BACKOFF_MS = 300;
+const MAX_BACKOFF_MS = 4000;
+
+/** Retry-After → ms. Поддержка delta-seconds (число) и HTTP-date. null если нет/невалидно. */
+export function parseRetryAfterMs(headerValue: string | null): number | null {
+  if (!headerValue) return null;
+  const trimmed = headerValue.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Math.min(Number(trimmed) * 1000, 60_000);
+  }
+  const dateMs = Date.parse(trimmed);
+  if (Number.isFinite(dateMs)) {
+    const delta = dateMs - Date.now();
+    return delta > 0 ? Math.min(delta, 60_000) : 0;
+  }
+  return null;
+}
+
+export interface KrystalFetchDeps {
+  /** Инъекция для тестов (default = apiFetch). */
+  fetchImpl?: (path: string, init: RequestInit) => Promise<Response>;
+  /** Инъекция для тестов (default = setTimeout-sleep) — детерминированные тесты без реальных задержек. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * apiFetch с ретраем transient-статусов (429/503). Возвращает финальный
+ * Response (caller сам разбирает статусы 401/402/404/ok как раньше). Респектит
+ * Retry-After, иначе экспоненциальный backoff 300→600→1200ms (cap 4s).
+ * AbortError из fetchImpl пробрасывается без ретрая (loop ломается).
+ */
+export async function krystalFetchWithRetry(
+  path: string,
+  init: RequestInit,
+  deps: KrystalFetchDeps = {},
+): Promise<Response> {
+  const fetchImpl = deps.fetchImpl ?? apiFetch;
+  const sleep =
+    deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let attempt = 0;
+  for (;;) {
+    const res = await fetchImpl(path, init);
+    if (!RETRYABLE_STATUSES.has(res.status) || attempt >= MAX_RETRY_ATTEMPTS) {
+      return res;
+    }
+    const retryAfter = parseRetryAfterMs(res.headers.get("Retry-After"));
+    const backoff =
+      retryAfter ?? Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** attempt);
+    attempt += 1;
+    await sleep(backoff);
+  }
+}
+
 /**
  * Получить все OPEN Uniswap V3 / V4 LP позиции для одного wallet.
  *
@@ -55,7 +119,7 @@ export async function fetchKrystalUniswapV3Positions(
   });
   const path = `/v1/upstream/krystal/v1/positions?${qs.toString()}`;
 
-  const res = await apiFetch(path, {
+  const res = await krystalFetchWithRetry(path, {
     method: "GET",
     ...(options?.signal && { signal: options.signal }),
   });
@@ -112,7 +176,7 @@ export async function fetchKrystalClosedV3Positions(
   const qs = new URLSearchParams(qsParams);
   const path = `/v1/upstream/krystal/v1/positions?${qs.toString()}`;
 
-  const res = await apiFetch(path, {
+  const res = await krystalFetchWithRetry(path, {
     method: "GET",
     ...(options?.signal && { signal: options.signal }),
   });
@@ -157,7 +221,7 @@ export async function fetchKrystalPositionTransactions(args: {
   }
   const path = `/v1/upstream/krystal/v1/positions/${args.chainId}/${npm}-${tokenIdStr}/transactions`;
 
-  const res = await apiFetch(path, {
+  const res = await krystalFetchWithRetry(path, {
     method: "GET",
     ...(args.options?.signal && { signal: args.options.signal }),
   });

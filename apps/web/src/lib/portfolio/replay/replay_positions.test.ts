@@ -11,10 +11,25 @@ import { replayPositions, type ReplayInput } from "./replay_positions";
 import {
   fixtureToReplayInput,
   findGoldenPosition,
+  matchesAnchor,
   withinTolerance,
+  type GoldenAssertion,
   type GoldenFixture,
 } from "./golden_fixture";
 import simpleAaveEth from "../__fixtures__/golden/simple-aave-eth.json";
+
+/** Normalize a fixture to its list of asserted anchors (multi or single). */
+function assertionsOf(f: GoldenFixture): GoldenAssertion[] {
+  if (f.anchors && f.anchors.length > 0) return f.anchors;
+  return [
+    {
+      label: f.label,
+      anchor: f.position.anchor,
+      match: f.position.match,
+      expected: f.expected,
+    },
+  ];
+}
 
 // A3.2: auto-glob every committed golden fixture so newly-seeded anchors
 // (curated on the test account → exported to this dir) are picked up by the
@@ -32,41 +47,52 @@ describe("replayPositions — golden fixtures (offline)", () => {
   for (const f of FIXTURES) {
     describe(`golden: ${f.label}`, () => {
       const { positions } = replayPositions(fixtureToReplayInput(f));
-      const pos = findGoldenPosition(positions, f);
 
-      it("locates the anchored position", () => {
-        expect(pos, `no position matched anchor ${JSON.stringify(f.position.anchor)}`).toBeDefined();
-      });
+      for (const a of assertionsOf(f)) {
+        describe(a.label, () => {
+          const pos = positions.find((p) =>
+            matchesAnchor(p, a.anchor, a.match),
+          );
 
-      it("startUsd is the cost basis, within tolerance", () => {
-        if (f.expected.startUsd === undefined) return;
-        expect(pos).toBeDefined();
-        const ok = withinTolerance(
-          pos!.startUsd,
-          f.expected.startUsd,
-          f.expected.toleranceAbsUsd,
-          f.expected.tolerancePct,
-        );
-        expect(
-          ok,
-          `startUsd=${pos!.startUsd} expected≈${f.expected.startUsd}`,
-        ).toBe(true);
-      });
+          it("locates the anchored position", () => {
+            expect(
+              pos,
+              `no position matched anchor ${JSON.stringify(a.anchor)}`,
+            ).toBeDefined();
+          });
 
-      it("currentUsd (live) within tolerance", () => {
-        if (f.expected.currentUsd === undefined) return;
-        expect(pos).toBeDefined();
-        const cur = pos!.supplyTokens.reduce((s, t) => s + t.currentUsd, 0);
-        const ok = withinTolerance(
-          cur,
-          f.expected.currentUsd,
-          f.expected.toleranceAbsUsd,
-          f.expected.tolerancePct,
-        );
-        expect(ok, `currentUsd=${cur} expected≈${f.expected.currentUsd}`).toBe(
-          true,
-        );
-      });
+          it("startUsd is the cost basis, within tolerance", () => {
+            if (a.expected.startUsd === undefined) return;
+            expect(pos).toBeDefined();
+            const ok = withinTolerance(
+              pos!.startUsd,
+              a.expected.startUsd,
+              a.expected.toleranceAbsUsd,
+              a.expected.tolerancePct,
+            );
+            expect(
+              ok,
+              `startUsd=${pos!.startUsd} expected≈${a.expected.startUsd}`,
+            ).toBe(true);
+          });
+
+          it("currentUsd (live) within tolerance", () => {
+            if (a.expected.currentUsd === undefined) return;
+            expect(pos).toBeDefined();
+            const cur = pos!.supplyTokens.reduce((s, t) => s + t.currentUsd, 0);
+            const ok = withinTolerance(
+              cur,
+              a.expected.currentUsd,
+              a.expected.toleranceAbsUsd,
+              a.expected.tolerancePct,
+            );
+            expect(
+              ok,
+              `currentUsd=${cur} expected≈${a.expected.currentUsd}`,
+            ).toBe(true);
+          });
+        });
+      }
     });
   }
 

@@ -63,8 +63,47 @@ export interface NonLpOpener {
   /**
    * Stage 2a: startUsd если OUT-side весь в USD-стейблах (Σ × $1). null если
    * OUT пустой ИЛИ содержит non-stable (нужен Stage 2b historical price).
+   * УЖЕ помножен на `receiptNetFraction` (cost basis ОСТАВШЕЙСЯ доли позиции).
    */
   startUsd: number | null;
+  /**
+   * Stage 2d (partial withdrawal): доля receipt-токена, ОСТАВШАЯСЯ в позиции =
+   * `(Σ receipt IN − Σ receipt OUT) / Σ receipt IN`. Пользователь может вывести
+   * ЧАСТЬ активов (`lp_remove`): тогда cost basis ОСТАВШЕЙСЯ позиции = gross
+   * deposit × этой доли. 1 = ничего не выведено; 0 = полный выход. Применяется
+   * к startUsd (stable + volatile). См. POS-007 GMX (3 депозита $7122 − вывод
+   * 1157 GM → правильный cb $5268, а не $7122).
+   */
+  receiptNetFraction?: number;
+}
+
+/**
+ * Доля receipt-токена, оставшаяся в позиции после возможных частичных выводов.
+ * `Σ(receipt IN на wallet) − Σ(receipt OUT с wallet)` / `Σ(receipt IN)`.
+ * Clamp [0,1]; если IN==0 → 1 (нет данных о receipt → не масштабируем).
+ */
+function receiptNetFraction(
+  transfers: ReadonlyArray<{
+    from: string;
+    to: string;
+    contractAddress: string;
+    value: string;
+    tokenDecimal: number;
+  }>,
+  lp: string,
+  walletLower: string,
+): number {
+  let inAmt = 0;
+  let outAmt = 0;
+  for (const t of transfers) {
+    if (t.contractAddress !== lp) continue;
+    const amt = Number(t.value) / 10 ** t.tokenDecimal;
+    if (!(amt > 0)) continue;
+    if (t.to === walletLower) inAmt += amt;
+    else if (t.from === walletLower) outAmt += amt;
+  }
+  if (!(inAmt > 0)) return 1;
+  return Math.max(0, Math.min(1, (inAmt - outAmt) / inAmt));
 }
 
 /**
@@ -312,13 +351,16 @@ export function resolveOpenersFromTransfers(
       walletLower,
       lp,
     );
+    const frac = receiptNetFraction(sorted, lp, walletLower);
+    const grossStartUsd = startUsdFromStableOut(openedInTokens);
     out.set(lp, {
       openedAt: hit.timeStamp,
       openBlock: hit.blockNumber,
       txHash: hit.hash,
       receiptAmount: Number(hit.value) / 10 ** hit.tokenDecimal,
       openedInTokens,
-      startUsd: startUsdFromStableOut(openedInTokens),
+      startUsd: grossStartUsd != null ? grossStartUsd * frac : null,
+      receiptNetFraction: frac,
     });
   }
   return out;
@@ -333,10 +375,23 @@ export function resolveOpenerBlocksFromAlchemy(
   transfers: readonly AlchemyTransfer[],
   receiptTokens: readonly string[],
   wallet: string,
-): Map<string, { blockNumber: number; hash: string; openedInTokens: OpenedInToken[] }> {
+): Map<
+  string,
+  {
+    blockNumber: number;
+    hash: string;
+    openedInTokens: OpenedInToken[];
+    receiptNetFraction: number;
+  }
+> {
   const out = new Map<
     string,
-    { blockNumber: number; hash: string; openedInTokens: OpenedInToken[] }
+    {
+      blockNumber: number;
+      hash: string;
+      openedInTokens: OpenedInToken[];
+      receiptNetFraction: number;
+    }
   >();
   const walletLower = wallet.toLowerCase();
   const sorted = [...transfers].sort((a, b) => a.blockNumber - b.blockNumber);
@@ -378,10 +433,20 @@ export function resolveOpenerBlocksFromAlchemy(
       if (prev) prev.amount += t.amount;
       else bySym.set(t.contractAddress, { address: t.contractAddress, symbol: t.symbol, amount: t.amount });
     }
+    // Stage 2d: partial-withdrawal netting (Alchemy amounts).
+    let inAmt = 0;
+    let outAmt = 0;
+    for (const t of sorted) {
+      if (t.contractAddress !== lp || !(t.amount > 0)) continue;
+      if (t.to === walletLower) inAmt += t.amount;
+      else if (t.from === walletLower) outAmt += t.amount;
+    }
+    const frac = inAmt > 0 ? Math.max(0, Math.min(1, (inAmt - outAmt) / inAmt)) : 1;
     out.set(lp, {
       blockNumber: hit.blockNumber,
       hash: hit.hash,
       openedInTokens: Array.from(bySym.values()),
+      receiptNetFraction: frac,
     });
   }
   return out;
@@ -432,13 +497,16 @@ async function resolveOpenersViaProvider(
     for (const [lp, b] of blocks) {
       const ts = tsByBlock.get(b.blockNumber);
       if (ts == null) continue;
+      const grossStartUsd = startUsdFromStableOut(b.openedInTokens);
       out.set(lp, {
         openedAt: ts,
         openBlock: b.blockNumber,
         txHash: b.hash,
         receiptAmount: 0,
         openedInTokens: b.openedInTokens,
-        startUsd: startUsdFromStableOut(b.openedInTokens),
+        startUsd:
+          grossStartUsd != null ? grossStartUsd * b.receiptNetFraction : null,
+        receiptNetFraction: b.receiptNetFraction,
       });
     }
     return out;
@@ -493,7 +561,7 @@ async function fillVolatileStartUsd(
     }
     if (!allPriced) continue;
     const startUsd = startUsdFromPricedOut(op.openedInTokens, priceByAddress);
-    if (startUsd != null) op.startUsd = startUsd;
+    if (startUsd != null) op.startUsd = startUsd * (op.receiptNetFraction ?? 1);
   }
 }
 

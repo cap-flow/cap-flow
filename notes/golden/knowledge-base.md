@@ -200,7 +200,64 @@ guard'а**. `uncoveredAmount` из `getPositionLotCostBasis` есть, но в s
 
 ---
 
+## 3a. Скептическая верификация живого golden-набора (1s/2s/3s, 2026-05-31)
+
+11 помеченных позиций перепроверены независимо (реестр + on-chain source, попытка
+ОПРОВЕРГНУТЬ owner-число). Результат:
+
+| Live POS | Тип | expected $ | derived $ | вердикт |
+|---|---|---|---|---|
+| POS-001 | Morpho PT-apyUSD | 3481.31 | 3481.31 | ✅ confirmed (engineTraced=true, чисто) |
+| POS-002 | Morpho PT-apxUSD | 1405.00 | 1405.00 | ✅ confirmed (чисто) |
+| POS-003 | Avantis jUSDC(swap) | 1737.25 | 1737.25 | ✅ число верно; ⚠ derivation STALE (full-wallet WAC, не swap-recipe) → перегенерить |
+| POS-004 | Morpho wSPYx | 1084.09 | 1085.07 | ✅ confirmed (Δ0.09%); ⚠ engineTraced=false (spot-fallback), число ок |
+| POS-005 | GMX GLV[WBTC-USDC] | 1300.00 | 1300.00 | ✅ confirmed (мой фикс verified) |
+| POS-006 | Uni V3 EURC+USDC | 1121.82 | 1121.78 | ✅ confirmed (EURC@$1.158 верно) |
+| POS-007 | GMX GM[WBTC-USDC] | 1498.80 | 1498.80 | ⏬ число верно, но engineTraced=false → **ДЕМОТИРОВАТЬ** (owner: по ошибке) |
+| POS-008 | Uni V3 PAXG+USDC | 1180.86 | 1181.57 | ✅ confirmed (Δ0.06%) |
+| POS-009 | Uni V3 USDC+WBTC | 1568.45 | 1567.65 | ⚠ **needs-review**: число ок (Δ0.05%) но через opaque fallback; реестр WBTC@$73.75k vs истина $66k (movement.usd sync-time, B1) |
+| POS-010 | Uni V3 PAXG+USDC (0x5ae13b) | **228.11** | **~1393** | ❌ **DISCREPANCY −83.6%** — число НЕВЕРНО |
+| POS-011 | Uni V3 XAUt+USDT | 159.12 | 158.82 | ✅ confirmed (Δ0.19%, transferred-in NFT) |
+
+**❌ POS-010 — root cause (важно):** значение $228.11 захвачено из СЛОМАННОГО
+cost-basis WAC-fallback (PAXG mispriced $11.42 vs реальные ~$4540, 1-й PAXG-депозит
+uncovered, только 60.95 из 716 USDC засчитаны). Реальная позиция = 2 депозита
+PAXG+USDC ≈ $1393. **Почему fallback, а не Krystal:** golden помечен 11:18:01 —
+ровно в окне Krystal **429 rate-limit** (api_usage 429 на 11:16-17) → Krystal-данные
+отсутствовали → откат на битый cost-basis. **Это прямое следствие 429-бага, который
+теперь исправлен** (retry/backoff). → После рефреша (Krystal здоров) **перепометить
+POS-010** из корректного live-числа (Krystal `depositTotalUsd`).
+Caveat: агент при выводе ~$1393 ссылался на NFT 1219136 (это NFT POS-008, пул
+0xb431c7) — возможна путаница NFT между POS-008/010; точное число брать из живого
+Krystal после рефреша, не из $228 и не слепо $1393.
+
+**Урок (подтверждает протокол):** owner ошибся на 2 из 11 (POS-007 mistake, POS-010
+wrong value) — эталон НЕ принимать на веру оправдалось. LP-позиции ОБЯЗАНЫ браться
+из Krystal; cost-basis fallback при `engineTraced=false`/`uncovered>0` на covered-LP
+даёт мусор. Golden нельзя метить во время Krystal-outage (429/503).
+
 ## 3. Сводная таблица
+
+> ⚠️ **НУМЕРАЦИЯ POS-NNN ПЕРЕГРУЖЕНА — читать перед использованием таблицы (2026-05-31).**
+> Эта таблица (§1–§3) — РАННИЙ golden-набор на кошельках **Murat/Artur**. Текущий
+> ЖИВОЙ эталонный набор — в БД `golden_cases` на кошельках **1s/2s/3s (lex Bob)** и
+> НЕ совпадает по номерам. Один `POS-NNN` может означать РАЗНЫЕ позиции в разных
+> наборах. **Авторитет — только `golden_cases` (per-position, по `market_key`),
+> НЕ номер.** Пример коллизии: `POS-007` = (а) здесь GMX V2 $5 262,80 WETH
+> (Murat/Artur); (б) в §4b — lex Uniswap V3 NFT 1197028, fee $80,38; (в) в живой
+> БД — см. ниже. Это три РАЗНЫЕ позиции.
+>
+> 🔧 **POS-007 (живой golden_cases, wallet 1s) — ИСПРАВЛЕНИЕ статуса (owner 2026-05-31):**
+> Живой `POS-007` = **GMX V2 GM[WBTC-USDC]** (arb, market `0x47c031236e19d024b42f8ae6780e44a573170703`),
+> открыт 1498,8 USDC → 682,83 GM. `startUsd $1498.80` — **верно** (= внесённые USDC,
+> сверено по реестру). **НО:** (1) `fee = 0` — это **by-design** (GMX GM не имеет
+> отдельного потока комиссий; доходность растёт в цене GM → PnL; **Krystal GMX НЕ
+> покрывает** — это НЕ Krystal-LP); (2) `engineTraced=false`, `fallbackUsd $834.24`
+> из $1498.80 (per-token GM-декомпозиция через spot-fallback — известный артефакт,
+> §6) → **неполный провенанс** → по инварианту §5 п.6 НЕ годится как «чистый» эталон.
+> Owner подтвердил: **помечен golden ПО ОШИБКЕ** (спутан с Krystal-LP). →
+> **ДЕМОТИРОВАТЬ** из golden (снять отметку в `golden_cases` через UI — мой DB-доступ
+> read-only). Настоящие Krystal-LP эталоны — uniswap3: POS-006/008/009/010/011.
 
 | POS | Протокол | startUsd | netStartUsd | non-stable trace | traced |
 |---|---|---|---|---|---|
@@ -425,6 +482,95 @@ openedInTokens из nonlp-детектора, если DeBank отдаёт **о�
 `lpTokenId` для 3 рынков (тогда `extractOpenedInTokens` соберёт все залоги). Если
 после рефреша «Внесено» снова смешано — патчить детектор/override (скоуп по
 collateral или skip receipt-less singleton).
+
+## 6c. POS-026 Velodrome CL gauge-staked — ✅ ВЕРИФИЦИРОВАНО on-chain (2026-06-01)
+
+**Позиция:** Velodrome V3 (Slipstream CL) на Optimism, WETH/WBTC, NFT `3427934`,
+wallet MMaksimuk 1 (`0x10b850c3`). Отображаемый `startUsd = $235.97`,
+`coverageIncomplete=false`. **Krystal эту позицию НЕ отдаёт** → нельзя сверить через Krystal.
+
+**Почему Krystal молчит (root cause — подтверждён on-chain):**
+`ownerOf(3427934)` на NPM `0x416b433906b1B72FA758e166e239c43d68dC6F29`
+(Velodrome Slipstream NonfungiblePositionManager, OP) = **`0xcf2a0adade4138d7ea6ebc4c143dbe4c98d9a65a`** —
+это **gauge-контракт** (= наш `lpTokenId`/`market_key` позиции). NFT застейкан в gauge,
+владелец = gauge, НЕ кошелёк. Krystal `/v1/positions?wallet=` ищет по ownership
+кошелька → застейканную NFT не видит. (Подтверждает [[capflow_velodrome_gauge_backlog]].)
+
+**Алгоритм проверки cost basis для gauge-staked CL (ПРОВЕРЕН, фиксируем для протокола):**
+Standard V3 cost basis override (`v3_cost_basis_override.ts` + Etherscan
+IncreaseLiquidity events + slot0) **РАБОТАЕТ для gauge-staked NFT**, потому что
+Etherscan/Alchemy читают сырые `IncreaseLiquidity` events по `(NFT-контракт, tokenId)`,
+а это **НЕ зависит от текущего владельца** (gauge). Krystal — зависит (по wallet) → падает.
+**Вывод-правило: для Velodrome/Aerodrome gauge-staked CL → cost basis из on-chain
+V3-пути (Etherscan events + slot0), НЕ из Krystal.** Krystal = primary только для
+non-staked LP (owner=wallet).
+
+**On-chain реконструкция (mint tx `0x0ae402fb…`, block `139599679`, ~2025-08-11):**
+- ERC721 Transfer `0x0 → 0x10b850c3` tokenId `3427934` (mint NFT) ✓
+- WETH (`0x4200…0006`) out `0.026906698721609552` → pool `0x319c0dd3…`
+- WBTC (`0x68f180fc…`) out `0.001` → pool
+- `IncreaseLiquidity` event на NPM, tokenId `3427934`, эти же amounts.
+- Цена на блок (slot0/hist): `0.0269 WETH (~$121) + 0.001 WBTC (~$115) = $235.97`.
+- Код (`V3CostBasisResult`): `totalDeposited0=0.0269069 WETH`, `totalDeposited1=0.001 WBTC`,
+  `totalDepositUsd=235.968`, `eventCount={increase:1,decrease:0}`, `hasHistPrices=true`,
+  `mintTxHash=0x0ae402fb…`. **Точь-в-точь с on-chain.** ✅
+- Метод верификации (durable): `ownerOf(NFT)`=gauge=`lpTokenId` → mint-tx receipt
+  (Alchemy `ethGetTransactionReceipt`, op) → WETH+WBTC amounts → цена на блок → startUsd.
+
+**Эталон POS-026 = $235.97 ПОДТВЕРЖДЁН.** NPM Velodrome Slipstream (OP) =
+`0x416b433906b1B72FA758e166e239c43d68dC6F29`.
+
+## 6d. POS-014 (kind=WRONG) — mis-attached open_hash → bogus startUsd (диагноз 2026-06-01)
+
+**Owner-комментарий (provenance_note):** «требует проверки что это за позиция и как она
+появилась… если её на самом деле нету… выяснить почему она открылась». issue=`start_usd`.
+
+**Позиция:** base Uniswap V3 **VIRTUAL/USDC**, wallet MMaksimuk 1 (`0x10b850c3`),
+lpTokenId/pool `0x529d2863…`, DeBank показывает open `currentUsd $24.33`, startUsd $15.88,
+`matchedV3TokenId=null`.
+
+**Диагноз (on-chain, 2026-06-01):**
+1. Pool `0x529d2863` token0=`0x0b3e3284…` (**VIRTUAL**), token1=`0x833589fc…` (**USDC**) → пул реальный VIRTUAL/USDC. ✓
+2. **`open_hash` `0x2ef493f8…` НЕ от этой позиции!** Эта tx (Uniswap V3 NPM base `0x03a520b3…`)
+   минтит NFT `4222876` и вносит **0.1399 WETH + 5.55 USDC** в пул **`0x6c561b44`** (WETH/USDC) —
+   ДРУГОЙ пул, не VIRTUAL/USDC. → open_hash прикреплён к неверной позиции.
+3. → **startUsd $15.88 посчитан от ЧУЖОЙ tx** (WETH/USDC депозита), не от VIRTUAL/USDC. Bogus.
+4. `matchedV3TokenId=null` — V3 cost-basis override НЕ нашёл NFT для VIRTUAL/USDC позиции
+   (упал на неверный opener-fallback).
+5. **Krystal вернул 0 base-позиций** для кошелька (только 12 uniswap/pancake eth/arb) → эту
+   VIRTUAL/USDC он НЕ видит (closed? вне покрытия?). DeBank всё ещё показывает $24.33.
+
+**Вывод:** провенанс POS-014 сломан (open_hash от другого пула → startUsd bogus). Вероятно
+ЛИБО closed-dust фантом (Krystal омитит, DeBank residual $24.33 выше dust-порога фильтра),
+ЛИБО реальная позиция со сломанным cost-basis matching. **Для финального вердикта phantom-vs-real:
+найти фактический NFT кошелька в пуле `0x529d2863` и проверить liquidity (`positions(tokenId)`).**
+Класс бага: opener/cost-basis matching привязал open_hash чужого пула → bogus startUsd +
+возможный near-dust phantom не отфильтрован. (Owner пометил wrong корректно.)
+
+**✅ ФИКС РЕАЛИЗОВАН (2026-06-01): Krystal-absent V3 phantom filter.** Owner: фантомов
+не должно отображаться. Найдено 2 класса фантомов: (1) **POS-014 WETH/USDC** `0x6c561b44` —
+Krystal знает CLOSED, residual $9.72 (старый `filterClosedDustPositions` не сработал —
+CLOSED-fetch вернул ПУСТО из-за rate-limit 429, ненадёжен); (2) **POS-039 VIRTUAL/USDC**
+`0x529d2863` — Krystal не знает ВООБЩЕ. **Решение** (`apps/web/src/lib/krystal/phantom_filter.ts`):
+использовать PRIMARY (open) Krystal-набор как надёжный сигнал. Дропаем V3-LP позицию если:
+`matchedV3TokenId=null` (наш движок не нашёл NFT) + `lpTokenId` есть + `currentUsd<$50` +
+chain ∈ KRYSTAL_COVERED_CHAINS + Krystal вернул ≥1 open для кошелька (fail-soft) + пул НЕ в
+Krystal-open-наборе. Ловит ОБА класса (closed → нет в open; absent → нет в open). **Safety:**
+gauge-staked CL (POS-026, есть matchedV3TokenId) НЕ трогается; Krystal down → no-op; uncovered
+chain → keep; large → keep. Тесты `phantom_filter.test.ts` 8/8; web 610/610. **Verified live:
+51→49 позиций, оба фантома исчезли, Velodrome gauge сохранён.** Старый `filterClosedDustPositions`
+оставлен (дополняет), но новый надёжнее (primary open-set vs флаки closed-fetch).
+
+**✅ ВЕРДИКТ (2026-06-01): POS-014 = DeBank-only ФАНТОМ.** Krystal CLOSED-список кошелька на base
+= 6 закрытых позиций (WETH/USDC `0xd0b53d`/`0x6c561b44`, USR/USDC, CBETH/WETH aerodrome) — среди них
+**NFT `4222876` (WETH/USDC, тот самый из mis-attached open_hash, CLOSED, dep $401.67)**. Но
+**VIRTUAL/USDC позиции `0x529d2863` у Krystal НЕТ ВООБЩЕ** (ни open, ни closed), хотя Krystal
+полностью индексирует остальные base-V3 позиции кошелька. + наш движок `matchedV3TokenId=null`
+(NFT не нашёл). → **позиция существует ТОЛЬКО в DeBank ($24.33), Krystal её не знает → DeBank
+misreport/phantom.** Фикс-направление: closed-dust фильтр должен ловить DeBank-only позиции,
+которых нет в Krystal (covered-протокол) — расширить `filterClosedDustPositions` сигналом
+«covered-протокол, но Krystal не вернул ни open ни closed → подозрение на phantom». startUsd
+$15.88 — артефакт неверного opener-fallback (даже не равен mis-attached-tx $401.67).
 
 ## 6. Внутренние заметки реализации (отображаемые числа = эталон)
 

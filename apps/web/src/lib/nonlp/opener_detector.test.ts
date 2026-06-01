@@ -311,17 +311,47 @@ describe("Stage 2: OUT-side startUsd in resolveOpenersFromTransfers", () => {
     expect(op.openedInTokens).toHaveLength(1);
   });
 
-  it("Stage 2c: withdraw-tx (receipt OUT) НЕ считается депозитом", () => {
+  it("Stage 2c: withdraw-tx (receipt OUT) НЕ считается депозитом, и FULL exit → cost basis 0", () => {
     const transfers = [
-      // deposit: 100 USDC out + receipt mint
+      // deposit: 100 USDC out + receipt mint (1 unit)
       tx({ hash: "0xd", timeStamp: 1, from: WALLET, to: "0xvault", contractAddress: USDC, value: "100000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
       tx({ hash: "0xd", timeStamp: 1, from: "0x0000000000000000000000000000000000000000", to: WALLET, contractAddress: VAULT, value: "1", tokenDecimal: 0, tokenSymbol: "v" }),
-      // withdraw: receipt OUT (from wallet, contract==VAULT) + USDC возврат
+      // withdraw FULL: receipt OUT (from wallet) + USDC возврат
       tx({ hash: "0xw", timeStamp: 2, from: WALLET, to: "0xvault", contractAddress: VAULT, value: "1", tokenDecimal: 0, tokenSymbol: "v" }),
       tx({ hash: "0xw", timeStamp: 2, from: "0xvault", to: WALLET, contractAddress: USDC, value: "40000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
     ];
-    const out = resolveOpenersFromTransfers(transfers, [VAULT], WALLET);
-    expect(out.get(VAULT)!.startUsd).toBe(100); // только депозит, без withdraw
+    const op = resolveOpenersFromTransfers(transfers, [VAULT], WALLET).get(VAULT)!;
+    // withdraw USDC (40) НЕ добавляется как депозит; полный вывод receipt → net 0 → cb 0.
+    expect(op.startUsd).toBe(0);
+    expect(op.receiptNetFraction).toBe(0);
+  });
+
+  it("partial withdrawal: cost basis netted by withdrawn receipt fraction (POS-007 GMX)", () => {
+    // 2 депозита × 100 USDC → 100 GM каждый (в отдельных fill-tx, async).
+    // Затем вывод 100 GM из 200 → осталось 50% → startUsd = 200 × 0.5 = 100.
+    const GM = "0x77b2ec357b56c7d05a87971db0188dbb0c7836a5";
+    const transfers = [
+      tx({ hash: "0xreq1", timeStamp: 1000, from: WALLET, to: VAULT, contractAddress: USDC, value: "100000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xfill1", timeStamp: 1004, from: ZERO, to: WALLET, contractAddress: GM, value: "100000000000000000000", tokenDecimal: 18, tokenSymbol: "GM" }),
+      tx({ hash: "0xreq2", timeStamp: 2000, from: WALLET, to: VAULT, contractAddress: USDC, value: "100000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xfill2", timeStamp: 2004, from: ZERO, to: WALLET, contractAddress: GM, value: "100000000000000000000", tokenDecimal: 18, tokenSymbol: "GM" }),
+      // вывод: 100 GM из кошелька (lp_remove)
+      tx({ hash: "0xwd", timeStamp: 3000, from: WALLET, to: VAULT, contractAddress: GM, value: "100000000000000000000", tokenDecimal: 18, tokenSymbol: "GM" }),
+    ];
+    const op = resolveOpenersFromTransfers(transfers, [GM], WALLET).get(GM)!;
+    expect(op.receiptNetFraction).toBeCloseTo(0.5, 5);
+    expect(op.startUsd).toBe(100); // 200 gross × 0.5 net, НЕ 200
+  });
+
+  it("no withdrawal: cost basis НЕ масштабируется (fraction 1)", () => {
+    const GM = "0x77b2ec357b56c7d05a87971db0188dbb0c7836a5";
+    const transfers = [
+      tx({ hash: "0xreq1", timeStamp: 1000, from: WALLET, to: VAULT, contractAddress: USDC, value: "100000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+      tx({ hash: "0xfill1", timeStamp: 1004, from: ZERO, to: WALLET, contractAddress: GM, value: "100000000000000000000", tokenDecimal: 18, tokenSymbol: "GM" }),
+    ];
+    const op = resolveOpenersFromTransfers(transfers, [GM], WALLET).get(GM)!;
+    expect(op.receiptNetFraction).toBe(1);
+    expect(op.startUsd).toBe(100);
   });
 
   it("Stage 2c: Alchemy path тоже суммирует multi-deposit OUT-side", () => {
