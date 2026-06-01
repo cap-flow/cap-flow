@@ -55,6 +55,9 @@ export * from "./chain_operation_annotations.js";
 // Admin-editable upstream API key overrides (Phase S6 / 2026-05-14).
 export * from "./integration_secrets.js";
 
+// Admin-tunable app settings: rate limits, quotas, cache TTL, pagination (2026-06).
+export * from "./app_settings.js";
+
 // CEX exchange API connections per user (2026-05-14).
 export * from "./cex_accounts.js";
 

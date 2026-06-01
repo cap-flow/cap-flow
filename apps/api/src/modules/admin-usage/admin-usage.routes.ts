@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Env } from "../../config/env.js";
 import { UnauthorizedError } from "../../core/errors.js";
 import type { IApiUsageRepository } from "../api-usage/api-usage.repository.js";
+import type { AppSettingsService } from "../app-settings/app-settings.service.js";
 import type { TokenBucket } from "../redis/token-bucket.js";
 
 const summaryQuerySchema = z.object({
@@ -64,6 +65,11 @@ interface AdminUsageRoutesOptions {
   readonly repo: IApiUsageRepository;
   readonly bucket: TokenBucket;
   readonly env: Env;
+  /**
+   * Опционально: live-квоты из app-settings (админ-настройки). Если передан —
+   * лимиты читаются отсюда (с override), иначе fallback на env-дефолты.
+   */
+  readonly appSettings?: AppSettingsService;
 }
 
 export async function adminUsageRoutes(
@@ -134,11 +140,27 @@ export async function adminUsageRoutes(
     async (req) => {
       const u = req.user;
       if (!u) throw new UnauthorizedError();
+      // Live-квоты из app-settings (если сервис передан), иначе env-дефолты.
+      const s = opts.appSettings;
+      const quota = async (settingKey: string, envVal: number): Promise<number> =>
+        s ? s.getNumber(settingKey) : envVal;
       const providers: Array<{ name: string; limit: number }> = [
-        { name: "coingecko", limit: opts.env.QUOTA_COINGECKO_PER_DAY },
-        { name: "debank", limit: opts.env.QUOTA_DEBANK_PER_DAY },
-        { name: "alchemy", limit: opts.env.QUOTA_ALCHEMY_PER_DAY },
-        { name: "etherscan", limit: opts.env.QUOTA_ETHERSCAN_PER_DAY },
+        {
+          name: "coingecko",
+          limit: await quota("quota.coingeckoPerDay", opts.env.QUOTA_COINGECKO_PER_DAY),
+        },
+        {
+          name: "debank",
+          limit: await quota("quota.debankPerDay", opts.env.QUOTA_DEBANK_PER_DAY),
+        },
+        {
+          name: "alchemy",
+          limit: await quota("quota.alchemyPerDay", opts.env.QUOTA_ALCHEMY_PER_DAY),
+        },
+        {
+          name: "etherscan",
+          limit: await quota("quota.etherscanPerDay", opts.env.QUOTA_ETHERSCAN_PER_DAY),
+        },
       ];
       const rows = await Promise.all(
         providers.map(async (p) => {

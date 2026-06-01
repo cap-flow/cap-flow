@@ -181,6 +181,14 @@ export async function fetchAllHistory(
   items: DeBankHistoryItem[];
   tokens: Record<string, DeBankToken>;
   projects: Record<string, DeBankProject>;
+  /**
+   * `true`, если пагинация дошла до естественного конца истории (пустая или
+   * неполная страница, либо `stopWhen` догнал уже известную tx). `false`, если
+   * цикл упёрся в `maxPages` (история, вероятно, длиннее — усечена). Call-site
+   * использует это, чтобы пометить кэш `historyComplete` и в следующий раз
+   * грузить лишь инкремент (несколько страниц).
+   */
+  reachedEnd: boolean;
 }> {
   const items: DeBankHistoryItem[] = [];
   const tokens: Record<string, DeBankToken> = {};
@@ -188,21 +196,22 @@ export async function fetchAllHistory(
 
   let startTime: number | undefined = undefined;
   let lastSeenTime = Number.POSITIVE_INFINITY;
-  // H13 (2026-05-14): default cut from 50 → 25 pages.
-  //
-  // Rationale:
-  //   - 25 pages × 20 tx = 500 most-recent operations. Covers months-to-
-  //     years for the typical retail user (few-tx-per-week pattern).
-  //   - Burning 50 DeBank credits PER user-load was wasteful given the
-  //     `stopWhen` incremental cache: cron + auto-refresh already pull
-  //     anything new in 1-3 pages, so the 50-page burn was only useful
-  //     on the FIRST observation of a wallet — and even then 500 ops
-  //     usually covers the relevant cost-basis history.
-  //   - Power users with vitalik-scale histories pass `maxPages: 100`
-  //     (or higher) explicitly through the call site.
-  //
-  // Synced with `apps/api/src/modules/integrations/debank.ts` defaults
-  // so the two ends agree on credit budget.
+  // Стал ли выход из цикла «естественным» (история закончилась) или это упор
+  // в maxPages-cap. По умолчанию false → если for-loop отработал все maxPages
+  // итераций без natural-break, история усечена.
+  let reachedEnd = false;
+  // Стратегия (2026-06, замена H13-компромисса):
+  //   - ПЕРВАЯ загрузка кошелька (call-site передаёт большой cap, напр. 500):
+  //     грузим историю ДО ЕСТЕСТВЕННОГО КОНЦА, чтобы не терять старшие лоты
+  //     (раньше обрыв на 25 стр. = 500 ops → cost basis активных юзеров
+  //     был неполным).
+  //   - ИНКРЕМЕНТ (есть кэш/server-hydration → активен `stopWhen`): call-site
+  //     передаёт малый cap (напр. 5). `stopWhen` стопит на первой известной
+  //     tx, малый cap — явный предохранитель.
+  // Конкретные значения настраиваются админом (knobs
+  // `debank.historyMaxPagesFirstLoad` / `debank.historyMaxPagesIncremental`)
+  // и прокидываются сюда из call-site. `?? 25` — safe fallback для прочих
+  // вызовов без явного maxPages.
   const maxPages = args.maxPages ?? 25;
 
   for (let page = 0; page < maxPages; page++) {
@@ -227,6 +236,8 @@ export async function fetchAllHistory(
         Object.assign(tokens, data.token_dict);
         Object.assign(projects, data.project_dict);
         args.onPage?.({ ...data, history_list: newItems }, page);
+        // Догнали уже известную tx → дальше только синканое, история «полна».
+        reachedEnd = true;
         break;
       }
     }
@@ -237,17 +248,36 @@ export async function fetchAllHistory(
 
     args.onPage?.(data, page);
 
-    if (data.history_list.length === 0) break;
+    if (data.history_list.length === 0) {
+      reachedEnd = true;
+      break;
+    }
 
     const tail = data.history_list[data.history_list.length - 1]!;
-    if (tail.time_at >= lastSeenTime) break;
+    if (tail.time_at >= lastSeenTime) {
+      reachedEnd = true;
+      break;
+    }
     lastSeenTime = tail.time_at;
 
-    if (data.history_list.length < 20) break;
+    if (data.history_list.length < 20) {
+      reachedEnd = true;
+      break;
+    }
     startTime = tail.time_at;
   }
 
-  return { items, tokens, projects };
+  // No silent caps: если упёрлись в maxPages, не достигнув конца — историю
+  // могли усечь. Логируем, чтобы усечение было видно (важно для cost basis).
+  if (!reachedEnd) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[debank] history pagination hit maxPages=${maxPages} cap for ` +
+        `${args.address} — loaded ${items.length} ops, older history may be truncated`,
+    );
+  }
+
+  return { items, tokens, projects, reachedEnd };
 }
 
 /* ------------------------- Live state: balances --------------------------- */

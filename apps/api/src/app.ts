@@ -24,6 +24,9 @@ import { adminAuditRoutes } from "./modules/admin-audit/admin-audit.routes.js";
 import { AdminAuditService } from "./modules/admin-audit/admin-audit.service.js";
 import { adminIntegrationsRoutes } from "./modules/admin-integrations/admin-integrations.routes.js";
 import { AdminIntegrationsService } from "./modules/admin-integrations/admin-integrations.service.js";
+import { AppSettingsService } from "./modules/app-settings/app-settings.service.js";
+import { adminAppSettingsRoutes } from "./modules/app-settings/app-settings.routes.js";
+import { meAppConfigRoutes } from "./modules/app-settings/me-app-config.routes.js";
 import {
   decryptSecret,
   deriveKey,
@@ -377,6 +380,16 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   const adminOperationsService = new AdminOperationsService(app.db);
   const adminMetricsService = new AdminMetricsService(app.db);
   const adminIntegrationsService = new AdminIntegrationsService(app.db, env);
+  // Admin-настраиваемые кнобы (rate limits, квоты, cache TTL, DeBank history,
+  // авто-рефреш). Прогреваем снапшот, чтобы live-геттеры (rate-limit) сразу
+  // читали актуальные значения. Резилиентен к не-мигрированной таблице.
+  const appSettingsService = new AppSettingsService(app.db, env);
+  await appSettingsService.warm().catch((e: unknown) => {
+    app.log.warn(
+      { err: (e as Error).message },
+      "[app-settings] warm failed, using defaults",
+    );
+  });
   const adminAuditService = new AdminAuditService(app.db);
   const adminTechAuditService = new AdminTechAuditService(app.db);
 
@@ -714,6 +727,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         repo: apiUsageRepo,
         bucket: tokenBucket,
         env,
+        appSettings: appSettingsService,
         prefix: "/admin/api-usage",
       });
       await api.register(adminInviteRoutes, {
@@ -780,6 +794,15 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(publicFeatureFlagsRoutes, {
         service: featureFlagsService,
         prefix: "/me/feature-flags",
+      });
+      await api.register(adminAppSettingsRoutes, {
+        service: appSettingsService,
+        audit: app.audit,
+        prefix: "/admin/app-settings",
+      });
+      await api.register(meAppConfigRoutes, {
+        service: appSettingsService,
+        prefix: "/me/app-config",
       });
       await api.register(telegramRoutes, {
         service: telegramService,
@@ -866,15 +889,29 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       // override in .env for QA without re-deploying code. Hard
       // sanity check that hour ≥ minute so a misconfig can't lock
       // every user out forever.
-      const perMinute = env.UPSTREAM_RATE_PER_MIN;
-      const perHour = Math.max(env.UPSTREAM_RATE_PER_HOUR, perMinute);
+      // Live-геттеры: лимиты читаются из app-settings на КАЖДОМ запросе, так
+      // что админ меняет их из UI без рестарта. Hour всегда ≥ minute, чтобы
+      // легитимный всплеск не залочил юзера навсегда.
       const upstreamRateLimit = new UpstreamRateLimitService(
         new RedisRateLimitStore(app.redis),
-        { perMinute, perHour }
+        {
+          perMinute: () =>
+            appSettingsService.getSnapshotSync<number>("upstream.ratePerMin"),
+          perHour: () => {
+            const min =
+              appSettingsService.getSnapshotSync<number>("upstream.ratePerMin");
+            const hour =
+              appSettingsService.getSnapshotSync<number>("upstream.ratePerHour");
+            return Math.max(hour, min);
+          },
+        }
       );
       app.log.info(
-        { perMinute, perHour },
-        "[upstream-proxy] rate-limit configured"
+        {
+          perMinute: env.UPSTREAM_RATE_PER_MIN,
+          perHour: Math.max(env.UPSTREAM_RATE_PER_HOUR, env.UPSTREAM_RATE_PER_MIN),
+        },
+        "[upstream-proxy] rate-limit configured (live via app-settings)"
       );
       await api.register(upstreamProxyRoutes, {
         service: upstreamProxy,

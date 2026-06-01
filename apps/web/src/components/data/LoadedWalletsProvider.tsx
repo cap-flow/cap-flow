@@ -57,6 +57,7 @@ import type {
   PortfolioSnapshot,
 } from "@/lib/portfolio/types";
 import { useIntegrations } from "@/lib/integrations";
+import { useAppConfig } from "@/features/app-config/hooks";
 import { useWallets, type SavedWallet, type WalletChain } from "@/lib/wallets";
 import { useAuth } from "@/features/auth/AuthProvider";
 import { chainOpsApi, type ChainOpInput } from "@/features/chain-ops/api";
@@ -102,6 +103,19 @@ import {
  */
 const ENABLE_NON_EVM_PROVIDERS = false;
 
+/**
+ * Дефолты пагинации истории DeBank. Переопределяются админ-настройками
+ * (`debank.historyMaxPagesFirstLoad` / `debank.historyMaxPagesIncremental`)
+ * через `useAppConfig()`; эти константы — fallback до загрузки конфига и для
+ * сред без backend-настроек.
+ *   - FIRST_LOAD: первый бэкфилл кошелька — грузим до конца истории.
+ *   - INCREMENTAL: при наличии полного кэша тянем лишь новое сверху.
+ */
+const HISTORY_MAX_PAGES_FIRST_LOAD_DEFAULT = 500;
+const HISTORY_MAX_PAGES_INCREMENTAL_DEFAULT = 5;
+/** Мин. интервал авто-рефреша (дефолт; переопределяется настройкой). */
+const AUTO_REFRESH_MIN_INTERVAL_MS_DEFAULT = 60 * 60 * 1000;
+
 export interface Loaded {
   wallet: SavedWallet;
   ops: ClassifiedOp[];
@@ -109,6 +123,14 @@ export interface Loaded {
   loadedAt: number;
   /** Текущее on-chain состояние, чейн-нейтрально (EVM + Solana). */
   live?: LiveSnapshot;
+  /**
+   * `true`, если история кошелька была пагинирована до естественного конца
+   * (полный бэкфилл). Управляет выбором `maxPages` при следующей загрузке:
+   *   - `true`  → инкремент (малый cap, тянем лишь новое сверху);
+   *   - не-true → полный бэкфилл (большой cap) — старшие операции ещё не все.
+   * Только EVM/DeBank; для Solana/CoinStats не выставляется.
+   */
+  historyComplete?: boolean;
 }
 
 interface LoadProgress {
@@ -209,6 +231,23 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Настройки пагинации/рефреша из backend app-config (см. useAppConfig ниже).
+  // Держим в ref, чтобы стабильный `load` useCallback читал свежие значения
+  // без пересоздания. Дефолты — fallback до загрузки конфига.
+  const appConfigRef = useRef({
+    historyMaxPagesFirstLoad: HISTORY_MAX_PAGES_FIRST_LOAD_DEFAULT,
+    historyMaxPagesIncremental: HISTORY_MAX_PAGES_INCREMENTAL_DEFAULT,
+    autoRefreshMinIntervalMs: AUTO_REFRESH_MIN_INTERVAL_MS_DEFAULT,
+  });
+  // Подтягиваем admin-настройки (frontend-кнобы) и держим их в ref, чтобы
+  // стабильный `load` и авто-рефреш читали свежие значения без пересоздания.
+  const { config: appConfig } = useAppConfig();
+  appConfigRef.current = {
+    historyMaxPagesFirstLoad: appConfig.historyMaxPagesFirstLoad,
+    historyMaxPagesIncremental: appConfig.historyMaxPagesIncremental,
+    autoRefreshMinIntervalMs: appConfig.autoRefreshMinIntervalMs,
+  };
+
   const keyFor = useCallback(
     (chain: WalletChain): string => {
       if (chain === "sol") return integrations.heliusApiKey.trim();
@@ -282,6 +321,9 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
 
       try {
         let newOps: ClassifiedOp[];
+        // Для EVM/DeBank: завершён ли полный бэкфилл истории (см. ниже).
+        // undefined для не-EVM — там флаг не ведём.
+        let historyComplete: boolean | undefined;
         const ownAddresses = new Set(
           wallets.list.map((w) => w.address.toLowerCase()),
         );
@@ -304,10 +346,23 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
           const tokens: Record<string, DeBankToken> = {};
           const projects: Record<string, DeBankProject> = {};
           const cex: Record<string, { id: string; name: string }> = {};
-          await fetchAllHistory(
+          // Полный бэкфилл vs инкремент. Инкремент — ТОЛЬКО когда предыдущая
+          // загрузка дотянула историю до конца (`historyComplete === true`).
+          // Иначе (нет кэша ИЛИ прошлый бэкфилл упёрся в cap) делаем полный
+          // бэкфилл с БОЛЬШИМ cap и БЕЗ stopWhen — иначе stopWhen стопнулся бы
+          // на первой известной (свежей) tx и не дотянул бы пропущенное старое.
+          const cfg = appConfigRef.current;
+          const isIncremental = cached?.historyComplete === true;
+          const historyMaxPages = isIncremental
+            ? cfg.historyMaxPagesIncremental
+            : cfg.historyMaxPagesFirstLoad;
+          const useStopWhen =
+            isIncremental && (knownHashes != null || serverLatestOpTime !== null);
+          const histRes = await fetchAllHistory(
             {
               address: wallet.address,
               accessKey: apiKey,
+              maxPages: historyMaxPages,
               onPage: (page, idx) => {
                 allHistory.push(...page.history_list);
                 Object.assign(tokens, page.token_dict);
@@ -319,7 +374,7 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
                   loaded: allHistory.length,
                 });
               },
-              ...((knownHashes || serverLatestOpTime !== null) && {
+              ...(useStopWhen && {
                 stopWhen: (it: DeBankHistoryItem) => {
                   // hash-based stop: дешёвый — точное совпадение по id.
                   if (knownHashes && knownHashes.has(it.id)) return true;
@@ -337,6 +392,9 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
             },
             ctrl.signal,
           );
+          // Инкремент-режим уже подразумевает полную историю в кэше → остаётся
+          // complete. Полный бэкфилл: complete только если дошли до конца.
+          historyComplete = isIncremental ? true : histRes.reachedEnd;
           newOps = classifyHistory(allHistory, {
             ownAddresses,
             selfAddress: wallet.address.toLowerCase(),
@@ -993,6 +1051,11 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
           loadedAt: Date.now(),
         };
         if (live) payload.live = live;
+        // Полнота истории (EVM/DeBank). Сохраняем в payload+кэш, чтобы
+        // следующая загрузка выбрала инкремент вместо полного бэкфилла.
+        if (historyComplete !== undefined) {
+          payload.historyComplete = historyComplete;
+        }
         setLoadedById((prev) => ({ ...prev, [wallet.id]: payload }));
         // Персистентный кэш: при следующем заходе данные подтянутся без API.
         // Explore-кошельки (id `explore::…`) — НЕ кэшируем: это разовая
@@ -1058,20 +1121,71 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
     setBusyId(null);
   }, []);
 
-  // Авто-обновление кошельков раз в час. При первой загрузке (когда кэша нет)
-  // данные подтянутся через `useEffect` ниже; затем тикаем каждый час.
-  // Пользователь может в любой момент дёрнуть «Обновить» — отдельный path.
-  const AUTO_REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 1 час
+  // Авто-обновление кошельков — ТОЛЬКО когда пользователь реально в сервисе.
+  //
+  // Раньше: слепой setInterval раз в час крутился всегда, даже для свёрнутой
+  // вкладки / offline / неактивного юзера → жёг DeBank-кредиты впустую.
+  //
+  // Теперь: рефреш срабатывает по «возврату в сервис» (вкладка снова видима,
+  // фокус окна, восстановление сети) + лёгкий 5-мин тик как будильник. Каждый
+  // триггер проходит через `maybeRefresh`, который гейтит:
+  //   • вкладка должна быть видима (`visibilityState==='visible'`);
+  //   • online (`navigator.onLine`);
+  //   • не идёт другая загрузка (`abortRef`);
+  //   • прошло ≥ autoRefreshMinIntervalMs с последнего обновления.
+  // Анкер троттлинга = самый свежий `loadedAt` среди кошельков (или штамп
+  // последней попытки) → естественно не чаще 1/час и без рефреша на свежем
+  // кэше при простом reload. «Обновить» вручную — отдельный path (loadAll).
   const loadAllRef = useRef(loadAll);
   loadAllRef.current = loadAll;
+  const loadedByIdRef = useRef(loadedById);
+  loadedByIdRef.current = loadedById;
+  const lastAutoRefreshRef = useRef<number>(0);
   useEffect(() => {
     if (wallets.list.length === 0) return;
-    const interval = window.setInterval(() => {
-      // Не запускаем если уже идёт загрузка.
-      if (abortRef.current) return;
+
+    const maybeRefresh = () => {
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState !== "visible"
+      ) {
+        return; // вкладка скрыта — юзер не в сервисе
+      }
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
+        return; // offline — нет смысла
+      }
+      if (abortRef.current) return; // загрузка уже идёт
+      const loaded = Object.values(loadedByIdRef.current);
+      if (loaded.length === 0) return; // первичную загрузку делает bootstrap
+      const freshest = Math.max(
+        lastAutoRefreshRef.current,
+        ...loaded.map((l) => l.loadedAt),
+      );
+      const minInterval = appConfigRef.current.autoRefreshMinIntervalMs;
+      if (Date.now() - freshest < minInterval) return; // ещё рано
+      // Штампуем попытку ДО запуска — чтобы при сбое не ретраить каждый тик.
+      lastAutoRefreshRef.current = Date.now();
       void loadAllRef.current();
-    }, AUTO_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(interval);
+    };
+
+    const onVisible = () => {
+      if (document.visibilityState === "visible") maybeRefresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", maybeRefresh);
+    window.addEventListener("online", maybeRefresh);
+    // Будильник раз в 5 минут: сам гейтит по visibility + min-interval, так что
+    // реальный рефреш — не чаще раза в час и только для видимой вкладки.
+    const interval = window.setInterval(maybeRefresh, 5 * 60 * 1000);
+    // Проверка при входе в сервис (вдруг кэш уже устарел > min-interval).
+    maybeRefresh();
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", maybeRefresh);
+      window.removeEventListener("online", maybeRefresh);
+      window.clearInterval(interval);
+    };
   }, [wallets.list.length]);
 
   const forget = useCallback((walletId: string) => {
@@ -1821,5 +1935,10 @@ async function tryHydrateFromServer(
     ops,
     snapshot,
     loadedAt: Date.now(),
+    // Серверный chain_operations стор канонично полон (наполняется через
+    // pushOpsToServer ПОСЛЕ полного бэкфилла). Поэтому гидратацию с сервера
+    // считаем «история полна» → следующий DeBank-pull идёт дешёвым инкрементом,
+    // а не повторным полным бэкфиллом на каждом свежем устройстве.
+    historyComplete: true,
   };
 }

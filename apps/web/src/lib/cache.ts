@@ -51,6 +51,11 @@
  *          больше не суммируется в общий deposited.
  *        — DeBank spam-filter closed-by-default + $1000 cap на
  *          unflagged tokens — защита от регрессии Bob's $539k phantom.
+ *   v12 — История: добавлено поле `historyComplete` в payload `Loaded`.
+ *        Старый кэш (без флага) трактуется как «бэкфилл не завершён» → при
+ *        следующем заходе история догружается до конца (полный бэкфилл),
+ *        затем переходит на дешёвый инкремент (несколько страниц). Бамп
+ *        версии нужен, чтобы не считать legacy-кэш «полным» по ошибке.
  *   v11 — M7 (2026-05-14): per-user namespacing.
  *        Key format: `capflow.cache.v11.user.<userId>.wallet.<walletId>`.
  *        Защищает от cross-user data leak на shared-device, impersonation
@@ -60,7 +65,7 @@
  *        пока explicit cleanup на user-change не отрабатывал.
  */
 
-const CACHE_VERSION = 11;
+const CACHE_VERSION = 12;
 const BASE_PREFIX = `capflow.cache.v${CACHE_VERSION}.`;
 const LEGACY_PREFIX = "capflow.cache.wallet.";
 
