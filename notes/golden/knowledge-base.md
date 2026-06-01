@@ -636,3 +636,63 @@ WBTC/ETH).
 КОНТАМИНИРОВАН (все WBTC-свопы за 4 месяца показывали одну цену $73,253). Cost basis
 движок берёт ВЕРНО — с **out-side (уплаченные стейблы)**, не с receive-side. При
 ручной сверке cost basis всегда смотреть, ЧТО уплачено, а не оценку полученного.
+
+## 8. ЭТАЛОННАЯ МЕТОДИКА РАСЧЁТА (reference — сервер ОБЯЗАН следовать)
+
+> **Главное (owner 2026-06-01):** анкор замораживает ЧИСЛО, но число — следствие.
+> Истина — это МЕТОДИКА вывода позиции из реестра операций. Сервер должен считать
+> позицию **по правилу ниже**, а не случайно совпадать с замороженным числом.
+> Перепроверено по полному реестру всех 14 эталонных позиций testakk.
+
+### Сквозные инварианты (для ВСЕХ типов)
+1. **Cost basis = Σ acquisition-cost − Σ withdrawals** (вывод списывается по WAC
+   выводимого актива), а НЕ «Σ депозитов». См. [[capflow_partial_withdrawal_accounting]].
+2. **Acquisition cost = что УПЛАЧЕНО** (out-side свопа: стейблы/отданный актив),
+   а НЕ оценка полученного (receive-side `movement.usd` бывает контаминирован —
+   все WBTC-свопы artur за 4 мес. показывали одну цену $73,253; см. §7).
+3. **Cost basis ≠ supply-time value.** Стоимость залога в момент внесения в
+   протокол (lend_supply `movement.usd`) — это НЕ cost basis. Cost basis = во
+   сколько актив ОБОШЁЛСЯ при покупке (lot-traced), а не сколько стоил при вносе.
+4. **`netStartUsd` = `startUsd` − долг** (для leverage-lending: Fluid/Morpho с borrow).
+5. **Методология лотов = LIFO** (текущая, `lotMethodology`). Потребление лота
+   зависит от ПОРЯДКА операций во времени (acquisition ↔ supply interleaving).
+
+### По типам позиций
+
+**A. GMX V2 (async-fill, receipt GM/GLV)** — `arb_gmx2`
+`startUsd = linkedCostBasisUsd` = Σ стейблов, уплаченных в **request-tx (Tx A)**,
+прилинкованных к **fill-tx (Tx B)** (`async_deposit_linker.ts`). Круглые числа
+($200/$5000/$9000) легитимны — это round-депозиты стейблов. Частичный вывод
+(`lp_remove` GM) вычитается по WAC.
+- Эталон: artur `0x77b2ec35` — депозиты linked $5006+$1202+$924 = $7132 (4445 GM),
+  вывод 1157 GM × WAC $1.604 = $1856, остаток cb = **$5268.32** (POS-007).
+
+**B. Morpho (receipt-less lending, protocol-токен залог)** — `arb_morphoblue`
+Залог — protocol-токен (`GLV [WETH-USDC]`), который DeBank раскладывает на
+underlying (WETH+USDC). `startUsd` = lot-traced acquisition-cost **поданного
+protocol-токена** (GLV), НЕ decomposed underlying и НЕ supply-time value.
+`findDecomposedProtocolCollateral` скоупит cost basis по GLV (POS-014 фикс).
+- Эталон: artur `0x6c247b1f` — supply 11287+2768 = 14,055 GLV × WAC $1.537 = **$21,595.94**.
+
+**C. Fluid (multi-collateral vault, decomposed по активу)** — `arb_fluid`
+Один vault-receipt (`0x324c5dc1`) = по ОДНОЙ позиции-строке на каждый залоговый
+актив (ETH-строка + WBTC-строка). `startUsd` каждой = **LIFO acquisition-cost
+лотов этого актива, потреблённых supply-операциями** — НЕ supply-time стоимость.
+- Эталон artur WBTC: куплено 0.369 WBTC за Σ стейблов **ровно $30,000**
+  (5000+5000+10000+10000); supply 0.368 → cb **$30,000** (supply-time было бы $26,958).
+- Эталон artur ETH: 14.10 ETH, LIFO потребление лотов ~$2283/ETH → cb **$32,296.72**
+  (live-движок). ⚠ Оффлайн-replay даёт $33,709 (+4.4%) — это пробел тест-harness
+  (неполный вход lot-pipeline), НЕ ошибка ЯДРА: ядро (`packages/ucb`) на полном
+  live-входе считает $32,296.72 верно. См. §7 + task #18.
+
+**D. Uniswap V3 (LP NFT)** — `arb_uniswap3` / `uniswap3` / `arb_uniswap4`
+`startUsd = Krystal performance.totalDepositValue` (deposit-time priced —
+**авторитет для LP**, [[capflow_data_source_authority]]). Движок дублирует через
+Etherscan V3 cost basis (IncreaseLiquidity + slot0) — должны совпадать.
+- Эталон: murat NFT 5417064 = Krystal **$240.83** ≈ движок $241.07; NFT 5417054 = $146.86 ≈ $146.90.
+
+### Что это даёт серверу
+Сервер-порт (UCB на `packages/ucb`) ОБЯЗАН воспроизводить A-D из реестра. Если
+будущая правка даст другое число — сверять не с замороженным анкором, а с ЭТОЙ
+методикой: «откуда взялось, какое правило нарушено». Анкоры (§7) — лишь
+автоматический сторож, ловящий отклонение от методики.
