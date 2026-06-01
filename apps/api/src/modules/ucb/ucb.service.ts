@@ -35,6 +35,11 @@ import { applyLendingCostBasisOverride } from "@cap-flow/ucb/lending_cost_basis_
 import {
   applyCexInheritanceCostBasisOverride,
 } from "@cap-flow/ucb/cex_inheritance_cost_basis_override";
+import { applyKrystalV3Override } from "@cap-flow/ucb/krystal/override";
+import type {
+  KrystalV3Summary,
+  KrystalTransactionsSummary,
+} from "@cap-flow/ucb/krystal/adapter";
 import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
 import type { ClassifiedOp } from "@cap-flow/ucb/types";
 import type { LiveSnapshot } from "@cap-flow/ucb/live";
@@ -77,6 +82,12 @@ export interface UcbComputeDeps {
    * basis (mirrors the client's `cexCostBasisByHash`). Empty → guarded no-op.
    */
   cexCostBasisByHash?: ReadonlyMap<string, CexCostBasisMatch>;
+  /**
+   * B3: Krystal V3 summaries by tokenId (authoritative startUsd for covered LP =
+   * Σ DEPOSIT) + per-NFT transactions. Empty → guarded no-op.
+   */
+  krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
+  krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
   /** FIFO/LIFO/WAC/HIFO — defaults to the client default. */
   lotMethodology?: LotMethodology;
 }
@@ -157,6 +168,22 @@ export async function computePositions(
     ).positions;
   }
 
-  // V3 + Krystal (B3) / non-LP opener (B4) remain guarded no-ops here.
+  // ── Step 4.7: Krystal V3 override (B3) ──
+  // AUTHORITATIVE startUsd for covered V3 LP (Krystal Σ DEPOSIT) + sets
+  // matchedV3TokenId. Guarded: empty map → slice no-op. The V3 cost-basis
+  // override (slot0/Etherscan) stays deferred (needs v3PositionMap from B3 step6).
+  if (deps.krystalV3ByTokenId && deps.krystalV3ByTokenId.size > 0) {
+    const walletAddressById = new Map<string, string>(
+      wallets.map((w) => [w.wallet.id, w.wallet.address]),
+    );
+    working = applyKrystalV3Override(
+      working,
+      deps.krystalV3ByTokenId,
+      walletAddressById,
+      deps.krystalTxByTokenId,
+    );
+  }
+
+  // V3 cost-basis (B3 step6/7) / non-LP opener (B4) remain guarded no-ops here.
   return working;
 }

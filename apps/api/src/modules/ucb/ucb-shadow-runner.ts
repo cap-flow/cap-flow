@@ -15,6 +15,10 @@
  */
 import type { LiveSnapshot } from "@cap-flow/ucb/live";
 import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
+import type {
+  KrystalV3Summary,
+  KrystalTransactionsSummary,
+} from "@cap-flow/ucb/krystal/adapter";
 
 import {
   adaptDeBankLive,
@@ -53,6 +57,8 @@ export interface ShadowServiceLike {
       trigger: UcbShadowTrigger;
       liveByWalletId?: ReadonlyMap<string, LiveSnapshot>;
       cexCostBasisByHash?: ReadonlyMap<string, CexCostBasisMatch>;
+      krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
+      krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
     },
   ): Promise<RunShadowResult>;
 }
@@ -64,6 +70,14 @@ export interface CexCostBasisSource {
   ): Promise<ReadonlyMap<string, CexCostBasisMatch>>;
 }
 
+/** B3: server-side Krystal V3 enrichment for an account. */
+export interface KrystalV3SourceLike {
+  forAccount(accountId: string): Promise<{
+    krystalV3ByTokenId: ReadonlyMap<string, KrystalV3Summary>;
+    krystalTxByTokenId: ReadonlyMap<string, KrystalTransactionsSummary>;
+  }>;
+}
+
 export interface UcbShadowRunnerDeps {
   debank: DeBankRawSource;
   walletSource: WalletAddressSource;
@@ -71,6 +85,8 @@ export interface UcbShadowRunnerDeps {
   flags: FlagResolver;
   /** B2 (optional): when present, CEX-origin positions inherit exchange cost basis. */
   cexSource?: CexCostBasisSource;
+  /** B3 (optional): when present, covered V3 LP gets Krystal startUsd + matchedV3TokenId. */
+  krystalSource?: KrystalV3SourceLike;
 }
 
 export class UcbShadowRunner {
@@ -102,6 +118,22 @@ export class UcbShadowRunner {
       }
     }
 
+    // B3: Krystal V3 enrichment (fail-soft — Krystal outage must not block).
+    let krystalV3ByTokenId: ReadonlyMap<string, KrystalV3Summary> | undefined;
+    let krystalTxByTokenId:
+      | ReadonlyMap<string, KrystalTransactionsSummary>
+      | undefined;
+    if (this.deps.krystalSource) {
+      try {
+        const k = await this.deps.krystalSource.forAccount(accountId);
+        krystalV3ByTokenId = k.krystalV3ByTokenId;
+        krystalTxByTokenId = k.krystalTxByTokenId;
+      } catch {
+        krystalV3ByTokenId = undefined;
+        krystalTxByTokenId = undefined;
+      }
+    }
+
     const wallets = await this.deps.walletSource.evmWalletsForAccount(accountId);
     const liveByWalletId = new Map<string, LiveSnapshot>();
     for (const w of wallets) {
@@ -128,6 +160,8 @@ export class UcbShadowRunner {
       trigger,
       liveByWalletId,
       ...(cexCostBasisByHash !== undefined && { cexCostBasisByHash }),
+      ...(krystalV3ByTokenId !== undefined && { krystalV3ByTokenId }),
+      ...(krystalTxByTokenId !== undefined && { krystalTxByTokenId }),
     });
   }
 }

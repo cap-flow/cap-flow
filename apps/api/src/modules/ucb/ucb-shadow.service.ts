@@ -12,6 +12,10 @@
 import type { LiveSnapshot } from "@cap-flow/ucb/live";
 import type { LotMethodology } from "@cap-flow/ucb/lots/types";
 import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
+import type {
+  KrystalV3Summary,
+  KrystalTransactionsSummary,
+} from "@cap-flow/ucb/krystal/adapter";
 
 import {
   computePositions,
@@ -64,6 +68,9 @@ export class UcbShadowService {
       liveByWalletId?: ReadonlyMap<string, LiveSnapshot>;
       /** B2: CEX withdrawal cost basis by tx hash (built by the runner). */
       cexCostBasisByHash?: ReadonlyMap<string, CexCostBasisMatch>;
+      /** B3: Krystal V3 summaries + per-NFT transactions (built by the runner). */
+      krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
+      krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
     },
   ): Promise<RunShadowResult> {
     const on = await this.deps.flags.enabled(UCB_SERVER_SHADOW_FLAG, {
@@ -84,6 +91,12 @@ export class UcbShadowService {
         lotMethodology,
         ...(opts.cexCostBasisByHash !== undefined && {
           cexCostBasisByHash: opts.cexCostBasisByHash,
+        }),
+        ...(opts.krystalV3ByTokenId !== undefined && {
+          krystalV3ByTokenId: opts.krystalV3ByTokenId,
+        }),
+        ...(opts.krystalTxByTokenId !== undefined && {
+          krystalTxByTokenId: opts.krystalTxByTokenId,
         }),
       });
       const { id } = await this.deps.shadowRepo.insertResult({

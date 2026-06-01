@@ -74,6 +74,9 @@ import { CexCostBasisService } from "./modules/cex/cex.cost-basis.service.js";
 import { HistoricalFxService } from "./modules/cex/historical-fx.service.js";
 import { DepositSeedsRepository } from "./modules/cex/deposit-seeds.repository.js";
 import { DepositSeedsService } from "./modules/cex/deposit-seeds.service.js";
+import { UpstreamProxyService } from "./modules/upstream-proxy/upstream-proxy.service.js";
+import { KrystalClient } from "./modules/integrations/krystal.js";
+import { KrystalV3Source } from "./modules/ucb/krystal-v3.source.js";
 
 const REFRESH_EVERY_MS = 60 * 60 * 1000; // 1 hour
 /** `@cap-flow/ucb` engine version stamp for shadow rows (B5). */
@@ -225,12 +228,25 @@ async function main(): Promise<void> {
       return m;
     },
   };
+  // B3: Krystal V3 enrichment over the upstream proxy (KC-APIKey + retry).
+  const upstreamProxy = new UpstreamProxyService({
+    DEBANK_API_KEY: env.DEBANK_API_KEY,
+    HELIUS_API_KEY: env.HELIUS_API_KEY,
+    ETHERSCAN_API_KEY: env.ETHERSCAN_API_KEY,
+    ALCHEMY_API_KEY: env.ALCHEMY_API_KEY,
+    KRYSTAL_API_KEY: env.KRYSTAL_API_KEY,
+  });
+  const ucbKrystalSource = new KrystalV3Source({
+    client: new KrystalClient(upstreamProxy),
+    walletSource: ucbWalletSource,
+  });
   const ucbShadowRunner = new UcbShadowRunner({
     debank: ucbDebankSource,
     walletSource: ucbWalletSource,
     shadowService: ucbShadowService,
     flags: featureFlagsService,
     cexSource: ucbCexSource,
+    krystalSource: ucbKrystalSource,
   });
 
   const billingRepo = new BillingRepository(dbClient.db);
