@@ -14,6 +14,7 @@ import type { FastifyInstance } from "fastify";
 
 import { UnauthorizedError } from "../../core/errors.js";
 import type { ApiUsageRepository } from "../api-usage/api-usage.repository.js";
+import type { FeatureFlagsService } from "../feature-flags/feature-flags.service.js";
 import type { WalletsRepository } from "../wallets/wallets.repository.js";
 
 import {
@@ -35,7 +36,20 @@ interface UpstreamProxyRoutesOptions {
   readonly rateLimit: UpstreamRateLimitService;
   /** IDOR guard: confirms forwarded addresses belong to caller. */
   readonly wallets: WalletsRepository;
+  /**
+   * Опционально: резолвер feature-flags для гейта внешних API. Если флаг
+   * `BLOCK_NON_ADMIN_FLAG` включён (global/per-user), НЕ-админам отдаём 403 —
+   * чтобы временно отключить весь upstream-трафик всем кроме админа.
+   */
+  readonly featureFlags?: FeatureFlagsService;
 }
+
+/**
+ * Когда этот server-flag включён (admin → Feature flags → Global ON), все
+ * НЕ-админы получают 403 на любой upstream-запрос. Админы не затронуты.
+ * Ключ синхронизирован с frontend-реестром `CLIENT_FEATURE_FLAGS`.
+ */
+const BLOCK_NON_ADMIN_FLAG = "capflow.feature.blockUpstreamApiForNonAdmins";
 
 const SUPPORTED_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"] as const;
 type SupportedMethod = (typeof SUPPORTED_METHODS)[number];
@@ -74,6 +88,36 @@ export async function upstreamProxyRoutes(
       const provider = params.provider;
       const upstreamPath = params["*"] ?? "";
       const method = req.method.toUpperCase() as SupportedMethod;
+
+      // Feature-flag kill-switch: когда включён `BLOCK_NON_ADMIN_FLAG`, любой
+      // НЕ-админ получает 403 на upstream. Админы проходят без резолва флага.
+      // Это «рубильник» чтобы временно отключить весь внешний API-трафик всем
+      // кроме админа (экономия кредитов / инцидент).
+      if (opts.featureFlags && u.role !== "admin") {
+        const blocked = await opts.featureFlags
+          .enabled(BLOCK_NON_ADMIN_FLAG, { userId: u.id })
+          .catch(() => false); // флаг недоступен → не блокируем (fail-open)
+        if (blocked) {
+          reply.code(403);
+          void opts.apiUsage
+            .insert({
+              userId: u.id,
+              accountId: null,
+              provider: `upstream:${provider}`,
+              endpoint: `${method} ${upstreamPath.slice(0, 200)}`,
+              httpStatus: 403,
+              durationMs: 0,
+              cacheHit: 0,
+              error: "blocked_non_admin",
+            })
+            .catch(() => undefined);
+          return reply.send({
+            error: "upstream_disabled",
+            message:
+              "Доступ к внешним API временно отключён администратором.",
+          });
+        }
+      }
 
       // Per-user rate-limit — protects admin's upstream API quotas
       // (DeBank Pro, Helius paid, Alchemy paid). Fixed-window dual-bucket

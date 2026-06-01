@@ -21,6 +21,7 @@ export interface IAccountsRepository {
   findAllActive(): Promise<AccountRow[]>;
   countActiveByOwner(ownerId: string): Promise<number>;
   findPrimaryByOwner(ownerId: string): Promise<AccountRow | null>;
+  getOwnerLastLoginAt(accountId: string): Promise<Date | null | undefined>;
   create(input: CreateAccountInput): Promise<AccountRow>;
   update(id: string, patch: UpdateAccountInput): Promise<AccountRow | null>;
   archive(id: string, when: Date): Promise<AccountRow | null>;
@@ -85,6 +86,26 @@ export class AccountsRepository implements IAccountsRepository {
       )
       .limit(1);
     return rows[0] ?? null;
+  }
+
+  /**
+   * Последний вход владельца аккаунта (для серверного cron-гейтинга
+   * неактивных юзеров). Возвращает:
+   *   - `Date`      — время последнего входа;
+   *   - `null`      — владелец ни разу не логинился (`last_login_at IS NULL`);
+   *   - `undefined` — аккаунт не найден.
+   */
+  async getOwnerLastLoginAt(
+    accountId: string,
+  ): Promise<Date | null | undefined> {
+    const rows = await this.db
+      .select({ lastLoginAt: schema.users.lastLoginAt })
+      .from(schema.accounts)
+      .innerJoin(schema.users, eq(schema.accounts.ownerId, schema.users.id))
+      .where(eq(schema.accounts.id, accountId))
+      .limit(1);
+    if (rows.length === 0) return undefined;
+    return rows[0]!.lastLoginAt;
   }
 
   async create(input: CreateAccountInput): Promise<AccountRow> {

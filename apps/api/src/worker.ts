@@ -30,6 +30,7 @@ import {
   type EvmHistoryFetcher,
   type SolanaHistoryFetcher,
 } from "./modules/classifier/chain_classifier.service.js";
+import { AppSettingsService } from "./modules/app-settings/app-settings.service.js";
 import { FeatureFlagsRepository } from "./modules/feature-flags/feature-flags.repository.js";
 import { FeatureFlagsService } from "./modules/feature-flags/feature-flags.service.js";
 import { DeBankClient } from "./modules/integrations/debank.js";
@@ -87,6 +88,15 @@ async function main(): Promise<void> {
   const heliusClient = new HeliusClient(env.HELIUS_API_KEY);
   const operationsRepo = new OperationsRepository(dbClient.db);
   const chainOpsRepo = new ChainOpsRepository(dbClient.db);
+  // Live admin-настройки (для cron-гейта неактивных юзеров). Отдельный инстанс
+  // от API — кэш TTL ~10s подхватывает правки из админки через БД.
+  const appSettingsService = new AppSettingsService(dbClient.db, env);
+  await appSettingsService.warm().catch((e: unknown) => {
+    logger.warn(
+      { err: (e as Error).message },
+      "[app-settings] warm failed in worker, using defaults",
+    );
+  });
 
   // Feature-flags resolver — needed by ChainClassifierService (P5.7).
   // A dedicated ioredis connection (separate from BullMQ's) backs the
@@ -132,7 +142,11 @@ async function main(): Promise<void> {
     chainClassifier,
     chainOpsRepo, // UCB B5.5: persist classified ops в chain_operations
   );
-  const processor = new PortfolioRefreshProcessor(refreshService);
+  const processor = new PortfolioRefreshProcessor(refreshService, {
+    appSettings: appSettingsService,
+    accounts: accountsRepo,
+    logger,
+  });
   const refreshQueue = new PortfolioRefreshQueue(bullConn);
 
   const billingRepo = new BillingRepository(dbClient.db);
