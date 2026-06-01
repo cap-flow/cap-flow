@@ -59,6 +59,7 @@ import { UcbShadowRepository } from "./modules/ucb/ucb-shadow.repository.js";
 import { UcbShadowService } from "./modules/ucb/ucb-shadow.service.js";
 import {
   UcbShadowRunner,
+  type CexCostBasisSource,
   type DeBankRawSource,
   type EvmWalletRow,
   type WalletAddressSource,
@@ -67,6 +68,12 @@ import type {
   DeBankComplexProtocol,
   DeBankTokenBalance,
 } from "./modules/ucb/debank-live.adapter.js";
+import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
+import { CexRepository } from "./modules/cex/cex.repository.js";
+import { CexCostBasisService } from "./modules/cex/cex.cost-basis.service.js";
+import { HistoricalFxService } from "./modules/cex/historical-fx.service.js";
+import { DepositSeedsRepository } from "./modules/cex/deposit-seeds.repository.js";
+import { DepositSeedsService } from "./modules/cex/deposit-seeds.service.js";
 
 const REFRESH_EVERY_MS = 60 * 60 * 1000; // 1 hour
 /** `@cap-flow/ucb` engine version stamp for shadow rows (B5). */
@@ -196,11 +203,34 @@ async function main(): Promise<void> {
       return out;
     },
   };
+  // B2: server-side CEX withdrawal cost basis (account → ownerId → computeForUser),
+  // mapped to the same `cexCostBasisByHash` shape the client builds.
+  const ucbCexCostBasis = new CexCostBasisService(
+    new CexRepository(dbClient.db),
+    new HistoricalFxService(dbClient.db),
+    new DepositSeedsService(new DepositSeedsRepository(dbClient.db), audit),
+  );
+  const ucbCexSource: CexCostBasisSource = {
+    byHashForAccount: async (accountId) => {
+      const m = new Map<string, CexCostBasisMatch>();
+      const account = await accountsRepo.findById(accountId);
+      if (!account) return m;
+      for (const c of await ucbCexCostBasis.computeForUser(account.ownerId)) {
+        m.set(c.txHash.toLowerCase(), {
+          costBasisUsd: c.costBasisUsd,
+          source: c.source,
+          asset: c.asset,
+        });
+      }
+      return m;
+    },
+  };
   const ucbShadowRunner = new UcbShadowRunner({
     debank: ucbDebankSource,
     walletSource: ucbWalletSource,
     shadowService: ucbShadowService,
     flags: featureFlagsService,
+    cexSource: ucbCexSource,
   });
 
   const billingRepo = new BillingRepository(dbClient.db);

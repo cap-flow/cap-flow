@@ -44,6 +44,7 @@ function makeRunner(over: {
   flagOn?: boolean;
   runForAccount?: ShadowServiceLike["runForAccount"];
   debank?: DeBankRawSource;
+  cexSource?: import("./ucb-shadow-runner.js").CexCostBasisSource;
 } = {}) {
   const flags: FlagResolver = { enabled: async () => over.flagOn ?? true };
   const runForAccount =
@@ -56,6 +57,7 @@ function makeRunner(over: {
       walletSource,
       shadowService,
       flags,
+      ...(over.cexSource && { cexSource: over.cexSource }),
     }),
     runForAccount,
   };
@@ -96,5 +98,37 @@ describe("UcbShadowRunner.run", () => {
     expect(protoIds).toContain("arb_fluid");
     expect(protoIds).toContain("arb_gmx2");
     expect(protoIds).toContain("arb_uniswap3");
+  });
+
+  it("B2: cexSource result flows into runForAccount (cexCostBasisByHash)", async () => {
+    const cexMap = new Map([
+      ["0xabc", { costBasisUsd: 1234, source: "inherited", asset: "ETH" }],
+    ]);
+    const byHashForAccount = vi.fn(async () => cexMap);
+    let captured: unknown;
+    const runForAccount = vi.fn(async (_acc: string, opts: { cexCostBasisByHash?: unknown }) => {
+      captured = opts.cexCostBasisByHash;
+      return { skipped: false, id: "s1", positionCount: 0 };
+    }) as unknown as ShadowServiceLike["runForAccount"];
+    const { runner } = makeRunner({ runForAccount, cexSource: { byHashForAccount } });
+
+    await runner.run("acc-7");
+    expect(byHashForAccount).toHaveBeenCalledWith("acc-7");
+    expect(captured).toBe(cexMap);
+  });
+
+  it("B2: cexSource failure is swallowed (shadow still runs, no cex map)", async () => {
+    let opts: { cexCostBasisByHash?: unknown } | undefined;
+    const runForAccount = vi.fn(async (_acc: string, o: { cexCostBasisByHash?: unknown }) => {
+      opts = o;
+      return { skipped: false, id: "s1", positionCount: 0 };
+    }) as unknown as ShadowServiceLike["runForAccount"];
+    const { runner } = makeRunner({
+      runForAccount,
+      cexSource: { byHashForAccount: async () => { throw new Error("cex down"); } },
+    });
+    const r = await runner.run("acc");
+    expect(r.skipped).toBe(false); // shadow still ran
+    expect(opts?.cexCostBasisByHash).toBeUndefined(); // fail-soft → no cex map
   });
 });

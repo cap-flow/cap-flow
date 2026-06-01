@@ -13,6 +13,15 @@ import { createDbClient } from "@cap-flow/db";
 
 import { DeBankClient } from "../src/modules/integrations/debank.js";
 import { WalletsRepository } from "../src/modules/wallets/wallets.repository.js";
+import { AccountsRepository } from "../src/modules/accounts/accounts.repository.js";
+import { AuditRepository } from "../src/modules/audit/audit.repository.js";
+import { AuditService } from "../src/modules/audit/audit.service.js";
+import { CexRepository } from "../src/modules/cex/cex.repository.js";
+import { CexCostBasisService } from "../src/modules/cex/cex.cost-basis.service.js";
+import { HistoricalFxService } from "../src/modules/cex/historical-fx.service.js";
+import { DepositSeedsRepository } from "../src/modules/cex/deposit-seeds.repository.js";
+import { DepositSeedsService } from "../src/modules/cex/deposit-seeds.service.js";
+import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
 import { OpPricingService } from "../src/modules/ucb/op-pricing.service.js";
 import { OpPricingRepository } from "../src/modules/ucb/op-pricing.repository.js";
 import { UcbOpsRepository } from "../src/modules/ucb/ucb-ops.repository.js";
@@ -20,6 +29,7 @@ import { UcbShadowRepository } from "../src/modules/ucb/ucb-shadow.repository.js
 import { UcbShadowService } from "../src/modules/ucb/ucb-shadow.service.js";
 import {
   UcbShadowRunner,
+  type CexCostBasisSource,
   type DeBankRawSource,
   type EvmWalletRow,
   type WalletAddressSource,
@@ -70,11 +80,35 @@ const walletSource: WalletAddressSource = {
     return out;
   },
 };
+// B2: real server-side CEX cost basis (full service, like the client endpoint).
+const auditSvc = new AuditService(new AuditRepository(dbClient.db));
+const cexCostBasisSvc = new CexCostBasisService(
+  new CexRepository(dbClient.db),
+  new HistoricalFxService(dbClient.db),
+  new DepositSeedsService(new DepositSeedsRepository(dbClient.db), auditSvc),
+);
+const accountsRepo = new AccountsRepository(dbClient.db);
+const cexSource: CexCostBasisSource = {
+  byHashForAccount: async (accountId) => {
+    const m = new Map<string, CexCostBasisMatch>();
+    const account = await accountsRepo.findById(accountId);
+    if (!account) return m;
+    for (const c of await cexCostBasisSvc.computeForUser(account.ownerId)) {
+      m.set(c.txHash.toLowerCase(), {
+        costBasisUsd: c.costBasisUsd,
+        source: c.source,
+        asset: c.asset,
+      });
+    }
+    return m;
+  },
+};
 const runner = new UcbShadowRunner({
   debank: debankSource,
   walletSource,
   shadowService,
   flags: alwaysOn,
+  cexSource,
 });
 
 // ── load client golden anchors (the verified client values) ──

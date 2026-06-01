@@ -32,6 +32,10 @@ import {
   type OpenPosition,
 } from "@cap-flow/ucb/open_positions";
 import { applyLendingCostBasisOverride } from "@cap-flow/ucb/lending_cost_basis_override";
+import {
+  applyCexInheritanceCostBasisOverride,
+} from "@cap-flow/ucb/cex_inheritance_cost_basis_override";
+import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
 import type { ClassifiedOp } from "@cap-flow/ucb/types";
 import type { LiveSnapshot } from "@cap-flow/ucb/live";
 import type { SavedWallet } from "@cap-flow/ucb/wallet";
@@ -67,6 +71,12 @@ export interface UcbComputeDeps {
   resolvedAnnotations?: readonly ResolvedAnnotation[];
   /** Merged cost-basis overrides by tx hash (manual > server CEX). */
   costBasisOverrideByHash?: ReadonlyMap<string, number>;
+  /**
+   * B2: CEX withdrawal cost basis keyed by lowercased tx hash — lets a position
+   * whose supplied asset arrived from a CEX inherit the exchange-side WAC cost
+   * basis (mirrors the client's `cexCostBasisByHash`). Empty → guarded no-op.
+   */
+  cexCostBasisByHash?: ReadonlyMap<string, CexCostBasisMatch>;
   /** FIFO/LIFO/WAC/HIFO — defaults to the client default. */
   lotMethodology?: LotMethodology;
 }
@@ -134,7 +144,19 @@ export async function computePositions(
     costBasisOverrideByHash,
   );
 
-  // CEX (B2) / V3 + Krystal (B3) / non-LP opener (B4) are guarded no-ops with
-  // absent inputs — deliberately not applied in this B1-only slice.
-  return lendingResult.positions;
+  // ── Step 4: CEX inheritance override (B2) ──
+  // Positions whose supplied asset arrived from a CEX inherit the exchange-side
+  // cost basis. Guarded: empty map → no-op (the override itself early-returns).
+  let working = lendingResult.positions;
+  if (deps.cexCostBasisByHash && deps.cexCostBasisByHash.size > 0) {
+    working = applyCexInheritanceCostBasisOverride(
+      working,
+      opsByWallet,
+      deps.cexCostBasisByHash,
+      histPrices,
+    ).positions;
+  }
+
+  // V3 + Krystal (B3) / non-LP opener (B4) remain guarded no-ops here.
+  return working;
 }

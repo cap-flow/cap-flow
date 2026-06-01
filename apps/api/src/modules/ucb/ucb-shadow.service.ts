@@ -11,6 +11,7 @@
  */
 import type { LiveSnapshot } from "@cap-flow/ucb/live";
 import type { LotMethodology } from "@cap-flow/ucb/lots/types";
+import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
 
 import {
   computePositions,
@@ -61,6 +62,8 @@ export class UcbShadowService {
     opts: {
       trigger: UcbShadowTrigger;
       liveByWalletId?: ReadonlyMap<string, LiveSnapshot>;
+      /** B2: CEX withdrawal cost basis by tx hash (built by the runner). */
+      cexCostBasisByHash?: ReadonlyMap<string, CexCostBasisMatch>;
     },
   ): Promise<RunShadowResult> {
     const on = await this.deps.flags.enabled(UCB_SERVER_SHADOW_FLAG, {
@@ -79,6 +82,9 @@ export class UcbShadowService {
       const positions = await computePositions(wallets, {
         opPricingService: this.deps.opPricingService,
         lotMethodology,
+        ...(opts.cexCostBasisByHash !== undefined && {
+          cexCostBasisByHash: opts.cexCostBasisByHash,
+        }),
       });
       const { id } = await this.deps.shadowRepo.insertResult({
         accountId,

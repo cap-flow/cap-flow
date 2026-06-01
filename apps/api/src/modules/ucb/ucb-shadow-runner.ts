@@ -14,6 +14,7 @@
  * WalletsRepository → WalletAddressSource, worker → run()) are the remaining glue.
  */
 import type { LiveSnapshot } from "@cap-flow/ucb/live";
+import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
 
 import {
   adaptDeBankLive,
@@ -51,8 +52,16 @@ export interface ShadowServiceLike {
     opts: {
       trigger: UcbShadowTrigger;
       liveByWalletId?: ReadonlyMap<string, LiveSnapshot>;
+      cexCostBasisByHash?: ReadonlyMap<string, CexCostBasisMatch>;
     },
   ): Promise<RunShadowResult>;
+}
+
+/** B2: server-side CEX withdrawal cost basis for an account (by tx hash). */
+export interface CexCostBasisSource {
+  byHashForAccount(
+    accountId: string,
+  ): Promise<ReadonlyMap<string, CexCostBasisMatch>>;
 }
 
 export interface UcbShadowRunnerDeps {
@@ -60,6 +69,8 @@ export interface UcbShadowRunnerDeps {
   walletSource: WalletAddressSource;
   shadowService: ShadowServiceLike;
   flags: FlagResolver;
+  /** B2 (optional): when present, CEX-origin positions inherit exchange cost basis. */
+  cexSource?: CexCostBasisSource;
 }
 
 export class UcbShadowRunner {
@@ -79,6 +90,17 @@ export class UcbShadowRunner {
       accountId,
     });
     if (!on) return { skipped: true };
+
+    // B2: CEX withdrawal cost basis (fail-soft — CEX errors must not block the
+    // shadow; positions just won't inherit exchange cost basis).
+    let cexCostBasisByHash: ReadonlyMap<string, CexCostBasisMatch> | undefined;
+    if (this.deps.cexSource) {
+      try {
+        cexCostBasisByHash = await this.deps.cexSource.byHashForAccount(accountId);
+      } catch {
+        cexCostBasisByHash = undefined;
+      }
+    }
 
     const wallets = await this.deps.walletSource.evmWalletsForAccount(accountId);
     const liveByWalletId = new Map<string, LiveSnapshot>();
@@ -105,6 +127,7 @@ export class UcbShadowRunner {
     return this.deps.shadowService.runForAccount(accountId, {
       trigger,
       liveByWalletId,
+      ...(cexCostBasisByHash !== undefined && { cexCostBasisByHash }),
     });
   }
 }
