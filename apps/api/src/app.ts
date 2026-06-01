@@ -47,6 +47,8 @@ import {
 } from "./modules/chain-ops/chain-ops.repository.js";
 import { ChainOpsService } from "./modules/chain-ops/chain-ops.service.js";
 import { chainOpsRoutes } from "./modules/chain-ops/chain-ops.routes.js";
+import { ucbRoutes } from "./modules/ucb/ucb.routes.js";
+import { UcbShadowRepository } from "./modules/ucb/ucb-shadow.repository.js";
 import { AnnotationsRepository } from "./modules/chain-ops/annotations.repository.js";
 import { AnnotationsService } from "./modules/chain-ops/annotations.service.js";
 import { annotationsRoutes } from "./modules/chain-ops/annotations.routes.js";
@@ -708,6 +710,12 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(chainOpsRoutes, {
         service: chainOpsService,
         prefix: "/chain-ops",
+      });
+      // UCB B5: shadow-diff observability surface (account-scoped).
+      await api.register(ucbRoutes, {
+        accounts: accountsService,
+        shadowRepo: new UcbShadowRepository(app.db),
+        prefix: "/accounts",
       });
       await api.register(annotationsRoutes, {
         service: annotationsService,
