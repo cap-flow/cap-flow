@@ -588,3 +588,36 @@ $15.88 — артефакт неверного opener-fallback (даже не р
   USDC может выйти ≠$1; Σ per-token vs total ±$20) — внутренний артефакт
   декомпозиции. Отображаемый **total startUsd верен**. Per-token avgBuyPrice не
   выводится как авторитетное число.
+
+## 7. Offline replay-фикстуры testakk (захват 2026-06-01)
+
+14 эталонных позиций testakk зафиксированы в offline replay-регрессе после
+повторной верификации КАЖДОЙ от реестра операций (golden-verification protocol —
+на веру не берём даже размеченный эталон):
+
+- **GMX V2 ×7** — `startUsd = linkedCostBasisUsd` (Σ стейблов, уплаченных в
+  request-tx async-fill). Круглые $200/$300/$5000/$9000 = легитимные round-депозиты
+  (не баг). POS-007 (artur `0x77b2ec35`) нетит вывод 1157 GM → **$5268.32**.
+- **Morpho ×1** (artur `0x6c247b1f`, POS-014) — залог = protocol-токен **GLV
+  [WETH-USDC]**, который DeBank раскладывает на WETH+USDC; cost basis lot-трейсится
+  по GLV → **$21,595.94** (фикс `findDecomposedProtocolCollateral`).
+- **Uniswap V3 ×2** (murat) — сверено с Krystal `totalDepositValue`
+  ($240.83 / $146.86 ≈ движок $241.07 / $146.90).
+- **Fluid ×4** — cost basis = Σ стейблов уплачено (artur WBTC ровно **$30,000** =
+  5000+5000+10000+10000; ETH LIFO lot-трейс $32,296.72; murat $1068.53/$1533.14).
+  Все подтверждены.
+
+**Захвачено в replay (10/14):** `__fixtures__/golden/artur-1.json` (3 GMX + Morpho),
+`murat-1.json` (4 GMX + 2 V3). Каждый анкор проверяет locate + startUsd + currentUsd.
+Builder: `scripts/build-artur-murat-fixtures.mjs`.
+
+**Fluid ×4 отложены:** один receipt `0x324c5dc1` = 2 декомпозированные позиции на
+кошелёк (ETH + WBTC залог); у harness нет match-типа, чтобы их различить.
+Follow-up: добавить match-тип `supplySymbol` (anchor по `supplyTokens[0].symbol`),
+тогда заякорить и 4 Fluid. Значения уже верифицированы (см. выше), задача — только
+механика анкоринга.
+
+**Ключевой урок верификации:** `movement.usd` на receive-side свопов в dev-hook
+КОНТАМИНИРОВАН (все WBTC-свопы за 4 месяца показывали одну цену $73,253). Cost basis
+движок берёт ВЕРНО — с **out-side (уплаченные стейблы)**, не с receive-side. При
+ручной сверке cost basis всегда смотреть, ЧТО уплачено, а не оценку полученного.
