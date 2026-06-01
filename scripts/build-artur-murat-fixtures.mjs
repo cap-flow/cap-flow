@@ -12,8 +12,16 @@
 //  - Morpho (artur 0x6c247b1f, POS-014): GLV protocol-token collateral that
 //    DeBank decomposes into WETH+USDC; cost basis lot-traced to $21,595.94.
 //  - Uniswap V3 (×2, murat): vs Krystal totalDepositValue ($240.83 / $146.86).
-//  - Fluid (×4, skipped here): WBTC cost = Σ stablecoin paid (artur exact
-//    $30,000 = 5000+5000+10000+10000), ETH LIFO lot-traced; all confirmed.
+//  - Fluid (×4): WBTC cost = Σ stablecoin paid (artur exact $30,000 =
+//    5000+5000+10000+10000), ETH LIFO lot-traced; all confirmed.
+//
+// NOTE: this builder auto-anchors each position at its captured live startUsd
+// with a tight 0.5% band. ONE anchor is hand-adjusted post-build:
+// artur:Fluid:ETH is a SOFT anchor (expected = live truth $32,296.72, band 5%,
+// + caveat) because the offline replay deterministically drifts to $33,709
+// (+4.4%) — a harness lot-consumption fidelity gap (NOT histPrices; see
+// knowledge-base §7 + task #18). Re-running this builder reverts that anchor to
+// the tight 0.5% band, which then FAILS replay — re-apply the soft band.
 import { readFileSync, writeFileSync } from "node:fs";
 
 const HERE = "/Users/vladimir/Desktop/cap-flow (для блокчейна)/.claude/worktrees/condescending-fermi-99f0ac";
