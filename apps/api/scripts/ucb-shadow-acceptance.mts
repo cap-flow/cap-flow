@@ -22,6 +22,9 @@ import { HistoricalFxService } from "../src/modules/cex/historical-fx.service.js
 import { DepositSeedsRepository } from "../src/modules/cex/deposit-seeds.repository.js";
 import { DepositSeedsService } from "../src/modules/cex/deposit-seeds.service.js";
 import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
+import { UpstreamProxyService } from "../src/modules/upstream-proxy/upstream-proxy.service.js";
+import { KrystalClient } from "../src/modules/integrations/krystal.js";
+import { KrystalV3Source } from "../src/modules/ucb/krystal-v3.source.js";
 import { OpPricingService } from "../src/modules/ucb/op-pricing.service.js";
 import { OpPricingRepository } from "../src/modules/ucb/op-pricing.repository.js";
 import { UcbOpsRepository } from "../src/modules/ucb/ucb-ops.repository.js";
@@ -103,12 +106,25 @@ const cexSource: CexCostBasisSource = {
     return m;
   },
 };
+// B3: real Krystal V3 enrichment over the upstream proxy.
+const upstreamProxy = new UpstreamProxyService({
+  DEBANK_API_KEY: process.env.DEBANK_API_KEY,
+  HELIUS_API_KEY: process.env.HELIUS_API_KEY,
+  ETHERSCAN_API_KEY: process.env.ETHERSCAN_API_KEY,
+  ALCHEMY_API_KEY: process.env.ALCHEMY_API_KEY,
+  KRYSTAL_API_KEY: process.env.KRYSTAL_API_KEY,
+});
+const krystalSource = new KrystalV3Source({
+  client: new KrystalClient(upstreamProxy),
+  walletSource,
+});
 const runner = new UcbShadowRunner({
   debank: debankSource,
   walletSource,
   shadowService,
   flags: alwaysOn,
   cexSource,
+  krystalSource,
 });
 
 // ── load client golden anchors (the verified client values) ──
