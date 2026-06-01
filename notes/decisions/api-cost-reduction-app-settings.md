@@ -80,6 +80,17 @@ rate limits, квоты per-provider, cache TTL, retry, DeBank history maxPages,
 вкладка «Настройки» в `ApiUsagePage` (релейбл → «Расходы и настройки API»)
 + `SettingsPanel` (группы, валидация min/max, source-бейдж, restart-хинт).
 
+### 4. Kill-switch: отключить внешние API всем кроме админа
+Feature-flag `capflow.feature.blockUpstreamApiForNonAdmins` (управляется в
+admin → Feature flags, карточка с Off/Per-user/Global). При Global ON
+`upstream-proxy.routes` отдаёт **403** любому НЕ-админу на любой upstream-запрос
+(гейт сразу после `requireAuth`, до rate-limit; событие пишется в `api_usage`
+с `error='blocked_non_admin'`). Админы (`role==='admin'`) проходят без резолва
+флага. Резолв через `featureFlagsService.enabled(KEY,{userId})`
+(user>account>global), применяется ~30с (TTL кэша флагов), fail-open при ошибке.
+Ключ синхронизирован с frontend-реестром `CLIENT_FEATURE_FLAGS`. Назначение:
+временно срубить весь внешний трафик (экономия кредитов / инцидент).
+
 Плюс: спам-фильтр в Реестре операций использует `isJunkOp`
 (phantom/scam_airdrop) поверх символьных эвристик `looksLikeSpam`.
 

@@ -45,6 +45,14 @@ export interface ClientFeatureFlag {
  */
 export const CLIENT_FEATURE_FLAGS: readonly ClientFeatureFlag[] = [
   {
+    key: "capflow.feature.blockUpstreamApiForNonAdmins",
+    label: "🛑 Отключить внешние API для не-админов",
+    description:
+      "Рубильник: при включении (рекомендуется режим Global) ВСЕ не-админы получают 403 на любой запрос к внешним API через upstream-proxy (DeBank, Alchemy, Helius, Etherscan, Krystal). Админы продолжают работать. Резолвится на сервере (user > account > global), применяется в течение ~30с (TTL кэша флагов). Используй для временной экономии кредитов / на время инцидента. ⚠ Пока включён — у обычных юзеров не будут грузиться балансы/история/позиции.",
+    defaultValue: false,
+    category: "experimental",
+  },
+  {
     key: "capflow.feature.lendingAudit",
     label: "Lending on-chain audit (auto-fix)",
     description:
