@@ -227,5 +227,20 @@ export function buildSettingsCatalog(env: Env): SettingDefinition[] {
       max: 24 * 60 * 60 * 1000,
       hotReload: "live",
     },
+
+    /* ------------------- Серверный cron-рефреш (backend) ------------------ */
+    {
+      key: "portfolio.refreshSkipInactiveDays",
+      scope: "backend",
+      group: "Авто-рефреш",
+      label: "Не рефрешить неактивных юзеров (дней)",
+      description:
+        "Серверный cron НЕ обновляет портфели юзеров, не заходивших N дней. 0 = выключено (рефрешить всех). 30 = пропускать тех, кто не заходил 30+ дней. Ручной рефреш (кнопка) работает всегда. Применяется в течение ~10с.",
+      valueType: "number",
+      defaultValue: 30,
+      min: 0,
+      max: 365,
+      hotReload: "live",
+    },
   ];
 }

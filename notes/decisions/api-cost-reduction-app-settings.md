@@ -39,11 +39,23 @@ vs упёрлись в `maxPages`). Call-site в `LoadedWalletsProvider`:
 не делали дорогой повторный бэкфилл. `CACHE_VERSION 11→12`. Усечение
 логируется (no silent caps).
 
-### 2. Авто-рефреш — activity-gating
-Слепой `setInterval(1ч)` заменён на `maybeRefresh()`, гейтящий по
+### 2. Авто-рефреш — activity-gating (frontend + backend cron)
+**Frontend:** слепой `setInterval(1ч)` заменён на `maybeRefresh()`, гейтящий по
 `visibilityState==='visible'` + `navigator.onLine` + троттлу (анкер = самый
 свежий `loadedAt` или штамп попытки). Триггеры: `visibilitychange`, `focus`,
 `online` + 5-мин будильник. Скрытая вкладка / offline → ничего.
+
+**Backend cron:** серверный `worker.ts` планирует повторяющийся refresh на
+каждый активный аккаунт (BullMQ, 1ч). Гейт неактивных стоит в
+`PortfolioRefreshProcessor` (на ИСПОЛНЕНИИ задачи, не на bootstrap — иначе
+расписание, заданное раз при старте, игнорировало бы изменение активности):
+для `trigger==='cron'` смотрим `lastLoginAt` владельца аккаунта; если он не
+заходил ≥ N дней — задачу пропускаем (DeBank не зовём), логируем. Ручной
+рефреш (admin/user) НЕ гейтится. N = knob `portfolio.refreshSkipInactiveDays`
+(дефолт 30, 0 = выкл.), читается live через свой `AppSettingsService` в
+воркере (TTL ~10s подхватывает правки из админки через БД). Консервативно:
+N=0 / `last_login_at IS NULL` / ошибка lookup'а → рефрешим.
+`AccountsRepository.getOwnerLastLoginAt` джойнит accounts→users.
 
 ### 3. app_settings — admin-настраиваемые кнобы
 Новая таблица `app_settings` (key-value, env-fallback; миграция **0026**,
