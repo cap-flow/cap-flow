@@ -90,10 +90,18 @@ export async function upstreamProxyRoutes(
       const method = req.method.toUpperCase() as SupportedMethod;
 
       // Feature-flag kill-switch: когда включён `BLOCK_NON_ADMIN_FLAG`, любой
-      // НЕ-админ получает 403 на upstream. Админы проходят без резолва флага.
-      // Это «рубильник» чтобы временно отключить весь внешний API-трафик всем
-      // кроме админа (экономия кредитов / инцидент).
-      if (opts.featureFlags && u.role !== "admin") {
+      // НЕ-админ получает 403 на upstream. Это «рубильник» чтобы временно
+      // отключить весь внешний API-трафик всем кроме админа (экономия
+      // кредитов / инцидент).
+      //
+      // Админ проходит без резолва флага. Сюда же относится impersonation:
+      // когда админ «заходит в аккаунт юзера», `req.user.role` становится
+      // ролью ЦЕЛЕВОГО юзера ("user"), но реальный актор — админ (это видно
+      // по `req.user.impersonation`). Чтобы админ мог обновлять кошельки/
+      // позиции внутри чужого аккаунта при включённом рубильнике — трактуем
+      // impersonation как админский доступ.
+      const actingAsAdmin = u.role === "admin" || u.impersonation != null;
+      if (opts.featureFlags && !actingAsAdmin) {
         const blocked = await opts.featureFlags
           .enabled(BLOCK_NON_ADMIN_FLAG, { userId: u.id })
           .catch(() => false); // флаг недоступен → не блокируем (fail-open)
