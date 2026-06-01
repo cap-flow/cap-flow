@@ -369,6 +369,37 @@ CREATE TABLE receipt_token_transfers (
 > routes, NOT NestJS controllers — auth + body DTO → `findLatestForAccount` +
 > `diffShadowPositions` + `updateDiffSummary`). Both touch the running app
 > (core refresh path + route registration), best done with app-context care.
+>
+> **⚙️ ROUTE CORE DONE (2026-06-01).** `ucb-shadow-diff.handler.ts::runShadowDiff`
+> (framework-free: findLatest → diffShadowPositions → updateDiffSummary, surfaces
+> `no_shadow` vs zero-divergence; 3 tests). api ucb now **33/33**, tsc clean.
+> **TRUE REMAINDER (all app-integration — needs a running-app/integration harness
+> this env lacks; deliberately NOT half-built):**
+> - **6a — DeBank→LiveSnapshot adapter port (the real piece-6 blocker, newly
+>   surfaced).** The engine needs `@cap-flow/ucb` `LiveSnapshot` to build
+>   positions, but the server's `portfolio-refresh.service.ts` only assembles
+>   DeBank-shaped data (its "Slice 5"). The client adapter `apps/web/.../portfolio/
+>   live_adapters.ts` (765 LOC, 5 adapters; PURE — no React/localStorage) is
+>   web-only. Port the EVM path `adaptDeBankLive` (~200 LOC) into a shared/server
+>   pure module. ⚠ No raw-DeBank test fixture exists (golden fixtures freeze the
+>   OUTPUT `live`, not the DeBank INPUT) → capture a raw DeBank summary for a
+>   testakk wallet to gate the port byte-for-byte vs the client.
+> - **6b — composition-root DI + refresh call.** Instantiate `UcbShadowService`
+>   (+ UcbOpsRepository, UcbShadowRepository, OpPricingService, FeatureFlagsService,
+>   engineVersion) where services are wired; call `runForAccount(accountId,
+>   {trigger:'refresh', liveByWalletId})` in `refreshAccount` after the live
+>   snapshot (built via 6a), fail-soft.
+> - **7-attach — Fastify route.** `ucb.routes.ts`: `route.addHook('preHandler',
+>   app.requireAuth)`; `route.post('/ucb/shadow-diff', {schema:{body}}, ...)` →
+>   resolve accountId from `req.user`, call `runShadowDiff`. Register in the app +
+>   inject the repo. Body = client `OpenPosition[]` (loose `z.array(z.unknown())`
+>   — internal shadow endpoint).
+>
+> **State:** every TESTABLE B5 unit is built + gated (compute engine, comparator,
+> table+migration, loader, repo, worker-service, route-core — 33 tests). What's
+> left is purely binding them into the live Fastify app + the BullMQ refresh path
+> + the one ported adapter — integration work that belongs in a session with the
+> app running and a raw-DeBank capture in hand.
 
 **Sub-tasks**
 - Migration `0029_ucb_shadow_results.sql` — **user-scoped** (row-level isolation):
