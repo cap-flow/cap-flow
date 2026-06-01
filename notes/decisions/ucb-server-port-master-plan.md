@@ -327,6 +327,28 @@ CREATE TABLE receipt_token_transfers (
 
 ### Stage B5 — Server `ucb.service` orchestrator (shadow mode) — the keystone
 
+> **⚙️ B5 COMPUTE-ONLY SCAFFOLD DONE (2026-06-01, dynamic-workflow pick).** The
+> keystone slice that proves **server computes client-identical numbers** landed.
+> `apps/api/src/modules/ucb/ucb.service.ts::computePositions(wallets, deps)` —
+> imports ONLY from `@cap-flow/ucb` (subpaths: `ucb_pipeline`, `open_positions`,
+> `lending_cost_basis_override`, types), mirrors `replay_positions.ts` steps 1→3:
+> (1) `runUcbPipelineForWallet` per wallet → lot tracker, (2) `buildOpenPositions`
+> (empty V3-lp histPrices), (3) `applyLendingCostBasisOverride`. `histPrices` from
+> B1 via an injected `OpPriceSource` (DB-free, structurally `OpPricingService`).
+> CEX(B2)/V3(B3)/non-LP(B4) are deliberate guarded no-ops (absent inputs) — a
+> non-V3/non-CEX position computes IDENTICALLY to the client. **Test-first proof**
+> `ucb.service.shadow-replay.test.ts` (3 tests) on frozen golden fixtures
+> (`__fixtures__/ucb-shadow/`): synthetic Aave startUsd=$2000 (cost basis, not
+> $3000 spot) **+ real testakk Fluid WBTC startUsd=$1068.53 (server == client,
+> ±0.5%)** + determinism R4 (100%→byte-identical). Gate: `@cap-flow/ucb` dist +
+> api ucb tests **9/9** + tsc clean (ucb). **NO DB write, NO route, NO flag** in
+> this slice. **Deferred B5 follow-ups:** `0029_ucb_shadow_results` migration +
+> write path; `ClassifiedOp` loader from `chain_operations.raw` (R13 filter) +
+> refresh-worker wiring; `POST /ucb/shadow-diff` comparator; `capflow.feature.
+> ucbServerShadow` flag; B2/B3/B4 override-input parity. Picked over B2-cex
+> (shadow-glue, no consumer until B5) / B1-wiring (lower altitude) / B3-v3 (heavy
+> React extraction) by the assessment workflow (value 5, risk 2, achievable-now).
+
 **Sub-tasks**
 - Migration `0029_ucb_shadow_results.sql` — **user-scoped** (row-level isolation):
 

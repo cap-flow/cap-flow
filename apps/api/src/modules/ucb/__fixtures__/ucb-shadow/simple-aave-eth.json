@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "label": "SIMPLE-AAVE-ETH",
+  "methodologyVersion": "ucb-2026-05-30",
+  "lotMethodology": "FIFO",
+  "position": {
+    "anchor": {
+      "chain": "eth",
+      "protocolId": "eth_aave3",
+      "marketKey": null,
+      "openHash": null
+    },
+    "match": "protocolId"
+  },
+  "input": {
+    "wallets": [
+      {
+        "wallet": {
+          "id": "w1",
+          "name": "Golden Test Wallet",
+          "address": "0x1111111111111111111111111111111111111111",
+          "chain": "evm",
+          "createdAt": 1700000000
+        },
+        "ops": [
+          {
+            "seq": 0,
+            "hash": "0xbuy",
+            "chain": "eth",
+            "time": 1700000000,
+            "status": "ok",
+            "type": "swap",
+            "protocol": null,
+            "movement": [
+              {
+                "direction": "out",
+                "symbol": "USDC",
+                "tokenId": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                "amount": 2000,
+                "usd": 2000,
+                "isStable": true,
+                "isProtocolToken": false
+              },
+              {
+                "direction": "in",
+                "symbol": "WETH",
+                "tokenId": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                "amount": 1,
+                "usd": 2000,
+                "isStable": false,
+                "isProtocolToken": false
+              }
+            ],
+            "netUsd": 0,
+            "gasUsd": 0,
+            "counterparty": null,
+            "feePayer": "0x1111111111111111111111111111111111111111",
+            "fnName": null,
+            "approveSpender": null,
+            "approveSymbol": null
+          },
+          {
+            "seq": 1,
+            "hash": "0xsupply",
+            "chain": "eth",
+            "time": 1700001000,
+            "status": "ok",
+            "type": "lend_supply",
+            "protocol": { "id": "eth_aave3", "name": "Aave V3", "category": "lending" },
+            "movement": [
+              {
+                "direction": "out",
+                "symbol": "WETH",
+                "tokenId": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                "amount": 1,
+                "usd": 2000,
+                "isStable": false,
+                "isProtocolToken": false
+              }
+            ],
+            "netUsd": 0,
+            "gasUsd": 0,
+            "counterparty": null,
+            "feePayer": "0x1111111111111111111111111111111111111111",
+            "fnName": null,
+            "approveSpender": null,
+            "approveSymbol": null
+          }
+        ],
+        "live": {
+          "totalUsd": 3000,
+          "tokens": [],
+          "positions": [
+            {
+              "protocolId": "eth_aave3",
+              "protocolName": "Aave V3",
+              "chain": "eth",
+              "walletId": "w1",
+              "walletName": "Golden Test Wallet",
+              "category": "lending",
+              "itemName": "Lending",
+              "netUsd": 3000,
+              "assetUsd": 3000,
+              "debtUsd": 0,
+              "supply": [
+                {
+                  "symbol": "WETH",
+                  "amount": 1,
+                  "usd": 3000,
+                  "tokenId": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+                }
+              ],
+              "borrow": [],
+              "rewards": []
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "expected": {
+    "startUsd": 2000,
+    "currentUsd": 3000,
+    "toleranceAbsUsd": 1,
+    "tolerancePct": 0.02
+  },
+  "provenance": {
+    "sourceOfTruth": "manual",
+    "note": "Synthetic anchor: 1 WETH bought for $2000 (swap USDC->WETH), supplied to Aave V3, now worth $3000. Exercises lot acquire + WETH->ETH normalization + lending FIFO consume. startUsd must be the $2000 cost basis, NOT the $3000 live spot."
+  }
+}
