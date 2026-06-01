@@ -45,6 +45,14 @@ export interface ClientFeatureFlag {
  */
 export const CLIENT_FEATURE_FLAGS: readonly ClientFeatureFlag[] = [
   {
+    key: "capflow.feature.ucbServerShadow",
+    label: "UCB server shadow (B5) — серверный расчёт позиций",
+    description:
+      "СЕРВЕРНЫЙ флаг (читает refresh-worker, НЕ клиент). Когда ON для аккаунта — worker после refresh дополнительно считает позиции каноническим @cap-flow/ucb движком на сервере и пишет в таблицу `ucb_shadow_results` (shadow, НЕ отдаётся в UI). Сверка server==client — через POST /accounts/:id/ucb/shadow-diff. ⚠ Включать через СЕРВЕРНУЮ секцию ниже (scope account/global), а НЕ client-localStorage toggle. Требует запущенный worker (`npm run dev:worker`). Полностью инертен пока OFF. Default OFF.",
+    defaultValue: false,
+    category: "experimental",
+  },
+  {
     key: "capflow.feature.lendingAudit",
     label: "Lending on-chain audit (auto-fix)",
     description:
