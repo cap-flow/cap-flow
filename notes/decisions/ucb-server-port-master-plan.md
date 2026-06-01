@@ -348,6 +348,27 @@ CREATE TABLE receipt_token_transfers (
 > ucbServerShadow` flag; B2/B3/B4 override-input parity. Picked over B2-cex
 > (shadow-glue, no consumer until B5) / B1-wiring (lower altitude) / B3-v3 (heavy
 > React extraction) by the assessment workflow (value 5, risk 2, achievable-now).
+>
+> **⚙️ B5 FOLLOW-UP BUILDING BLOCKS DONE (2026-06-01, scout-workflow plan).** All
+> reusable B5 pieces landed + gated (api ucb 35/35, tsc clean), each its own
+> commit: (1) `shadow-diff.ts` pure comparator (client vs server startUsd deltas,
+> stable composite key, 7 tests); (2) `ucb_shadow_results` table (migration 0030
+> applied, account-scoped FK-cascade); (3) `ucb-ops.repository.ts` loader
+> (chain_operations.raw → UcbComputeWallet[], R13 filter, op_time ASC, pure core
+> tested, 5); (4) `ucb-shadow.repository.ts` write+read+diff-update (pure mappers,
+> 4); (5) `ucb-shadow.service.ts` flag-gated compute+store orchestration,
+> fail-soft, `UCB_SERVER_SHADOW_FLAG` const (5). **NOTE: scout workflow assessed
+> the WRONG worktree** (session-root `romantic-brahmagupta` @0024, not
+> `condescending-fermi` @0029 where the work is — special-char path broke agent
+> nav) → its "Step 0: port foundation" was a false alarm + migration renumbered
+> 0026→0030; implemented inline instead. **REMAINING (final app-integration, NOT
+> yet done):** (6) instantiate `UcbShadowService` in the composition root + call
+> `runForAccount` in `PortfolioRefreshService.refreshAccount` after the live
+> snapshot, mapping refresh-internal live → `@cap-flow/ucb` `LiveSnapshot` per
+> wallet; (7) `POST /ucb/shadow-diff` route (`.routes.ts` pattern — api uses
+> routes, NOT NestJS controllers — auth + body DTO → `findLatestForAccount` +
+> `diffShadowPositions` + `updateDiffSummary`). Both touch the running app
+> (core refresh path + route registration), best done with app-context care.
 
 **Sub-tasks**
 - Migration `0029_ucb_shadow_results.sql` — **user-scoped** (row-level isolation):
