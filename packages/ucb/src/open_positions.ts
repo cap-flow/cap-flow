@@ -422,6 +422,17 @@ export interface OpenPosition {
     nativeApr: number | null;
   }[];
   /**
+   * Снятые fee'и в разбивке по токенам (Σ amount/usd по `feesClaimedHistory`).
+   * Заполняется `applyKrystalV3Override` когда доступен Krystal `/transactions`;
+   * optional т.к. base `buildOne` его не выставляет (undefined до override) —
+   * surfaced под strict typecheck при порте krystal-override в @cap-flow/ucb.
+   */
+  feesClaimedByToken?: {
+    symbol: string;
+    amount: number;
+    usd: number;
+  }[];
+  /**
    * Сколько USD текущей стоимости позиции профинансировано из кредитных
    * средств. По умолчанию `0` (свои); выставляется в `currentUsd` через
    * ручную метку в UI (см. `credit_overrides.ts`).
