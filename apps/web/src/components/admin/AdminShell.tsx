@@ -78,7 +78,7 @@ const ADMIN_NAV: AdminNavGroup[] = [
       { to: "/admin/tech-audit", label: "Тех. аудит", icon: ShieldAlert },
       { to: "/admin/queue", label: "Очередь", icon: ActivityIcon },
       { to: "/admin/health", label: "Health", icon: HeartPulse },
-      { to: "/admin/api-usage", label: "Расходы API", icon: DollarSign },
+      { to: "/admin/api-usage", label: "Расходы и настройки API", icon: DollarSign },
       { to: "/admin/integrations", label: "Интеграции", icon: KeyRound },
     ],
   },

@@ -12,9 +12,12 @@ import type {
   ApiUsageRecent,
   ApiUsageSummary,
 } from "@/features/admin/api-usage/api";
+import { SettingsPanel } from "@/features/admin/app-settings/SettingsPanel";
 import { cn } from "@/lib/utils";
 
 import { PageHeader } from "./_PageHeader";
+
+type Tab = "costs" | "settings";
 
 const WINDOWS = [
   { hours: 1, label: "1ч" },
@@ -24,6 +27,7 @@ const WINDOWS = [
 ];
 
 export function AdminApiUsagePage(): JSX.Element {
+  const [tab, setTab] = useState<Tab>("costs");
   const [hours, setHours] = useState(24);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
 
@@ -41,22 +45,86 @@ export function AdminApiUsagePage(): JSX.Element {
   return (
     <div>
       <PageHeader
-        title="Расходы API"
-        description="Per-provider summary · топ-юзеры · последние вызовы · квоты."
+        title="Расходы и настройки API"
+        description="Расходы по провайдерам · квоты · тюнинг кнобов (rate limits, кэш, пагинация)."
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              summary.refetch();
-              recent.refetch();
-            }}
-          >
-            Обновить
-          </Button>
+          tab === "costs" ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                summary.refetch();
+                recent.refetch();
+              }}
+            >
+              Обновить
+            </Button>
+          ) : null
         }
       />
 
+      {/* Вкладки: расходы (дашборд) и настройки (тюнинг кнобов). */}
+      <div className="mb-4 inline-flex rounded-md border border-border bg-card/40 p-1">
+        {([
+          { id: "costs", label: "Расходы" },
+          { id: "settings", label: "Настройки" },
+        ] as const).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTab(t.id)}
+            className={cn(
+              "rounded px-3 py-1 text-xs font-medium transition-colors",
+              tab === t.id
+                ? "bg-accent text-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "settings" ? (
+        <SettingsPanel />
+      ) : (
+        <CostsTab
+          hours={hours}
+          setHours={setHours}
+          summary={summary}
+          recent={recent}
+          usersById={usersById}
+          selectedUserId={selectedUserId}
+          setSelectedUserId={setSelectedUserId}
+          quotas={quotas}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Вкладка «Расходы» — прежний дашборд (windows + provider + users + recent). */
+function CostsTab({
+  hours,
+  setHours,
+  summary,
+  recent,
+  usersById,
+  selectedUserId,
+  setSelectedUserId,
+  quotas,
+}: {
+  hours: number;
+  setHours: (h: number) => void;
+  summary: ReturnType<typeof useApiUsageSummary>;
+  recent: ReturnType<typeof useApiUsageRecent>;
+  usersById: Map<string, { email: string | null; name: string | null }>;
+  selectedUserId: string | null;
+  setSelectedUserId: (id: string | null) => void;
+  quotas: ReturnType<typeof useApiUsageQuotas>;
+}): JSX.Element {
+  return (
+    <>
       <div className="mb-4 inline-flex rounded-md border border-border bg-card/40 p-1">
         {WINDOWS.map((w) => (
           <button
@@ -112,7 +180,7 @@ export function AdminApiUsagePage(): JSX.Element {
           usersById={usersById}
         />
       </section>
-    </div>
+    </>
   );
 }
 

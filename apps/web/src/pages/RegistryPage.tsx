@@ -50,6 +50,7 @@ import {
 } from "@/lib/coinstats_chains";
 import type { ClassifiedOp } from "@/lib/portfolio/types";
 import { looksLikeSpam } from "@/lib/portfolio/spl_tokens";
+import { isJunkOp } from "@/lib/portfolio/junk_filter";
 import { tokenFamily } from "@/lib/portfolio/protocols";
 import { useLoadedListWithBridges } from "@/lib/portfolio/use_bridge_detection";
 import {
@@ -474,6 +475,12 @@ export function RegistryPage(): JSX.Element {
       }
       // 1) Спам-фильтр
       if (hideSpam) {
+        // Провалидированная junk-классификация (та же, что отсекает мусор из
+        // cost basis / аналитики через isJunkOp): scam_airdrop, dust,
+        // unknown_phantom (получение токена с USD≈$0, который looksLikeSpam
+        // по символу не ловит), mev_failure, empty_movement.
+        if (isJunkOp(o)) return false;
+
         // Approve без движения и без spender'а (либо вообще без token_approve)
         // = бесполезный шум: ни сумм, ни кому approve.
         if (o.type === "approve" && o.movement.length === 0) return false;

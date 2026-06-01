@@ -75,8 +75,14 @@ export class RedisRateLimitStore implements RateLimitStore {
 /* ------------------------- service ---------------------------------------- */
 
 export interface RateLimitConfig {
-  readonly perMinute: number;
-  readonly perHour: number;
+  /**
+   * Per-minute cap. Может быть числом ИЛИ геттером — геттер позволяет читать
+   * live-значение из admin-настроек (`AppSettingsService`) на каждом запросе,
+   * так что админ меняет лимит без рестарта API.
+   */
+  readonly perMinute: number | (() => number);
+  /** Per-hour cap. Число или live-геттер (см. perMinute). */
+  readonly perHour: number | (() => number);
   /** Override for testing. Defaults to `Date.now`. */
   readonly clock?: () => number;
 }
@@ -100,6 +106,11 @@ export class UpstreamRateLimitService {
     this.clock = cfg.clock ?? (() => Date.now());
   }
 
+  /** Резолвим число-или-геттер в актуальное значение лимита. */
+  private resolve(v: number | (() => number)): number {
+    return typeof v === "function" ? v() : v;
+  }
+
   async check(userId: string): Promise<RateLimitDecision> {
     const now = this.clock();
     const minBucket = Math.floor(now / MINUTE_MS);
@@ -111,12 +122,14 @@ export class UpstreamRateLimitService {
     const minCount = await this.store.incrAndExpire(minKey, 65);
     const hourCount = await this.store.incrAndExpire(hourKey, 3605);
 
-    const minOk = minCount <= this.cfg.perMinute;
-    const hourOk = hourCount <= this.cfg.perHour;
+    const perMinute = this.resolve(this.cfg.perMinute);
+    const perHour = this.resolve(this.cfg.perHour);
+    const minOk = minCount <= perMinute;
+    const hourOk = hourCount <= perHour;
     const allowed = minOk && hourOk;
 
-    const remainingMinute = Math.max(0, this.cfg.perMinute - minCount);
-    const remainingHour = Math.max(0, this.cfg.perHour - hourCount);
+    const remainingMinute = Math.max(0, perMinute - minCount);
+    const remainingHour = Math.max(0, perHour - hourCount);
 
     let retryAfterSeconds = 0;
     if (!allowed) {
