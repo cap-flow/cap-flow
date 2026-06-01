@@ -65,3 +65,6 @@ export * from "./cex_deposit_seeds.js";
 // UCB server-port enablers (Epic A1): golden-case oracle + anomaly findings.
 export * from "./golden_cases.js";
 export * from "./anomaly_flags.js";
+
+// UCB B5: server-computed canonical positions, shadow sink (account-scoped).
+export * from "./ucb_shadow_results.js";
