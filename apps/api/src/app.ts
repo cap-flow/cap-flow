@@ -48,6 +48,7 @@ import {
 import { ChainOpsService } from "./modules/chain-ops/chain-ops.service.js";
 import { chainOpsRoutes } from "./modules/chain-ops/chain-ops.routes.js";
 import { ucbRoutes } from "./modules/ucb/ucb.routes.js";
+import { ucbAdminRoutes } from "./modules/ucb/ucb-admin.routes.js";
 import { UcbShadowRepository } from "./modules/ucb/ucb-shadow.repository.js";
 import { AnnotationsRepository } from "./modules/chain-ops/annotations.repository.js";
 import { AnnotationsService } from "./modules/chain-ops/annotations.service.js";
@@ -726,6 +727,14 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(goldenRoutes, {
         service: goldenService,
         prefix: "/admin/golden",
+      });
+      // Admin UCB debug: on-demand server compute for any account/email.
+      await api.register(ucbAdminRoutes, {
+        db: app.db,
+        env,
+        accountsRepo,
+        authRepo,
+        prefix: "/admin/ucb",
       });
       await api.register(syncCoverageRoutes, {
         service: syncCoverageService,
