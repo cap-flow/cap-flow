@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { adminAllPositionsApi } from "./api";
+import { adminAllPositionsApi, type ComputeMethodology } from "./api";
 
 export function useAllPositions() {
   return useQuery({
@@ -13,7 +13,7 @@ export function useAllPositions() {
 export function useComputeAll() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => adminAllPositionsApi.computeAll(),
+    mutationFn: (methodology: ComputeMethodology) => adminAllPositionsApi.computeAll(methodology),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["admin", "all-positions"] }),
   });
 }

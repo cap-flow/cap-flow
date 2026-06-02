@@ -35,7 +35,10 @@ const computeAllSchema = z.object({
 });
 export type ComputeAllResult = z.infer<typeof computeAllSchema>;
 
+export type ComputeMethodology = "auto" | "FIFO" | "LIFO" | "WAC" | "HIFO";
+
 export const adminAllPositionsApi = {
   list: () => api.get("/v1/admin/ucb/all-positions", responseSchema),
-  computeAll: () => api.post("/v1/admin/ucb/compute-all", {}, computeAllSchema),
+  computeAll: (methodology: ComputeMethodology) =>
+    api.post("/v1/admin/ucb/compute-all", { methodology }, computeAllSchema),
 };

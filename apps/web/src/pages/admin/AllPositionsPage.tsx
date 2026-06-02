@@ -17,7 +17,7 @@ import { positionKey } from "@cap-flow/ucb/identity";
 import { MarkGoldenDialog } from "@/components/admin/MarkGoldenDialog";
 import { useAdminPortfolios } from "@/features/admin/portfolios/hooks";
 import { useAllPositions, useComputeAll } from "@/features/admin/all-positions/hooks";
-import type { AllPositionItem } from "@/features/admin/all-positions/api";
+import type { AllPositionItem, ComputeMethodology } from "@/features/admin/all-positions/api";
 
 import { PageHeader } from "./_PageHeader";
 
@@ -41,7 +41,6 @@ const COLUMNS: { id: string; label: string }[] = [
   { id: "totalAssets", label: "Итого активы" },
   { id: "totalPnl", label: "Total PnL" },
   { id: "totalApr", label: "Total APR" },
-  { id: "weight", label: "Вес %" },
 ];
 
 const SIGNED = new Set(["pnl", "totalPnl", "totalApr"]);
@@ -61,6 +60,32 @@ function Cell({ p, id, ctx }: { p: OpenPosition; id: string; ctx: CellContext })
   return (
     <td className={`px-2 py-1.5 text-center ${color}`}>
       {values.length === 0 ? "—" : values.map((v, i) => <div key={i}>{v}</div>)}
+    </td>
+  );
+}
+
+/** Short deterministic 5-char tag of the full positionKey (copy gives the full). */
+function shortHash(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) >>> 0;
+  return h.toString(36).slice(0, 5).padStart(5, "0");
+}
+
+function KeyCell({ p }: { p: OpenPosition }): JSX.Element {
+  const key = positionKey(p);
+  return (
+    <td className="px-2 py-1.5 text-left whitespace-nowrap">
+      <span className="inline-flex items-center gap-1">
+        <span className="font-mono text-[11px]" title={key}>{shortHash(key)}</span>
+        <button
+          type="button"
+          onClick={() => void navigator.clipboard?.writeText(key)}
+          title={`Копировать ключ: ${key}`}
+          className="text-muted-foreground hover:text-foreground"
+        >
+          ⧉
+        </button>
+      </span>
     </td>
   );
 }
@@ -94,6 +119,7 @@ export function AdminAllPositionsPage(): JSX.Element {
   const [valueFilters, setValueFilters] = useState<Record<string, string[]>>({});
   const [rangeFilters, setRangeFilters] = useState<Record<string, RangeFilter>>({});
   const [markTarget, setMarkTarget] = useState<OpenPosition | null>(null);
+  const [computeMethodology, setComputeMethodology] = useState<ComputeMethodology>("auto");
 
   const items = q.data?.items ?? [];
 
@@ -162,9 +188,21 @@ export function AdminAllPositionsPage(): JSX.Element {
         description="Единый реестр открытых позиций со всех аккаунтов (серверный канонический расчёт), в том же виде и с теми же фильтрами, что и пользовательский список. Обновляется по мере пересчёта воркером."
         actions={
           <div className="flex items-center gap-2">
+            <select
+              value={computeMethodology}
+              onChange={(e) => setComputeMethodology(e.target.value as ComputeMethodology)}
+              className="rounded-md border border-border bg-background px-2 py-1.5 text-xs"
+              title="Методика для пересчёта"
+            >
+              <option value="auto">методика юзера</option>
+              <option value="FIFO">FIFO</option>
+              <option value="LIFO">LIFO</option>
+              <option value="WAC">WAC</option>
+              <option value="HIFO">HIFO</option>
+            </select>
             <Button
               size="sm"
-              onClick={() => computeAll.mutate()}
+              onClick={() => computeAll.mutate(computeMethodology)}
               disabled={computeAll.isPending}
               title="Посчитать серверные позиции для всех аккаунтов (медленно — live-фетчи)"
             >
@@ -241,6 +279,7 @@ export function AdminAllPositionsPage(): JSX.Element {
               <tr>
                 <th className="px-2 py-1.5 text-center">★</th>
                 <th className="px-2 py-1.5 text-left">ID</th>
+                <th className="px-2 py-1.5 text-left">Ключ</th>
                 <th className="px-2 py-1.5 text-left">Владелец</th>
                 {COLUMNS.map((c) => (
                   <th key={c.id} className="px-2 py-1.5 text-center whitespace-nowrap">
@@ -294,9 +333,8 @@ export function AdminAllPositionsPage(): JSX.Element {
                         ★
                       </button>
                     </td>
-                    <td className="px-2 py-1.5 text-left font-mono text-[11px]" title={positionKey(p)}>
-                      {p.id}
-                    </td>
+                    <td className="px-2 py-1.5 text-left font-mono text-[11px]">{p.id}</td>
+                    <KeyCell p={p} />
                     <td className="px-2 py-1.5 text-left whitespace-nowrap">{it?.ownerEmail ?? it?.accountName ?? it?.accountId.slice(0, 8)}</td>
                     {COLUMNS.map((c) => (
                       <Cell key={c.id} p={p} id={c.id} ctx={cellCtx} />

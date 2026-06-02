@@ -89,10 +89,15 @@ export async function ucbAdminRoutes(
   route.get("/all-positions", async () => allPositions.list());
 
   // Compute the canonical positions for ALL active accounts (populate the
-  // registry locally before the prod flag flip). Each account computes under its
-  // owner's saved methodology. Slow (live fetch per account) — admin-only, manual.
-  route.post("/compute-all", async () => {
+  // registry locally before the prod flag flip). `methodology: "auto"` (default)
+  // computes each account under its owner's saved choice; a fixed FIFO/LIFO/WAC/
+  // HIFO forces all accounts under that mode (what-if). Slow — admin-only, manual.
+  const computeAllBody = z.object({
+    methodology: z.enum(["auto", "FIFO", "LIFO", "WAC", "HIFO"]).default("auto"),
+  });
+  route.post("/compute-all", { schema: { body: computeAllBody } }, async (req) => {
     const methRepo = new LotMethodologyRepository(opts.db);
+    const fixed = req.body.methodology !== "auto";
     const methodologyResolver = {
       forAccount: async (accountId: string) => {
         const a = await opts.accountsRepo.findById(accountId);
@@ -103,7 +108,9 @@ export async function ucbAdminRoutes(
     const stack = buildUcbRunnerStackFromDb(opts.db, opts.env, {
       flags: alwaysOn,
       engineVersion: "admin-compute-all",
-      methodologyResolver,
+      ...(fixed
+        ? { lotMethodology: req.body.methodology as LotMethodology }
+        : { methodologyResolver }),
     });
     const accounts = await opts.accountsRepo.findAllActive();
     let computed = 0;
