@@ -36,6 +36,8 @@ import {
   applyCexInheritanceCostBasisOverride,
 } from "@cap-flow/ucb/cex_inheritance_cost_basis_override";
 import { applyKrystalV3Override } from "@cap-flow/ucb/krystal/override";
+import { applyNonLpOpenerOverride } from "@cap-flow/ucb/apply_opener_override";
+import type { NonLpOpener } from "@cap-flow/ucb/non_lp_opener";
 import type {
   KrystalV3Summary,
   KrystalTransactionsSummary,
@@ -88,8 +90,25 @@ export interface UcbComputeDeps {
    */
   krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
   krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
+  /**
+   * B4: non-LP opener source — given the built positions, fetches the
+   * Etherscan/Alchemy receipt-token openers (+ OUT-side cost basis) and returns
+   * the `nonLpOpenerKey`-keyed map `applyNonLpOpenerOverride` consumes. Absent →
+   * guarded no-op (non-LP positions keep their UCB/DeBank values). Async I/O is
+   * consistent with `opPricingService` (this service is not pure compute).
+   */
+  nonLpOpenerSource?: NonLpOpenerSourceLike;
   /** FIFO/LIFO/WAC/HIFO — defaults to the client default. */
   lotMethodology?: LotMethodology;
+}
+
+/** Slice of `NonLpOpenerSource` the engine needs (injectable / stubable). */
+export interface NonLpOpenerSourceLike {
+  forPositions(
+    positions: readonly OpenPosition[],
+    walletAddressById: ReadonlyMap<string, string>,
+    signal?: AbortSignal,
+  ): Promise<Map<string, NonLpOpener>>;
 }
 
 /**
@@ -176,14 +195,15 @@ export async function computePositions(
     ).positions;
   }
 
+  const walletAddressById = new Map<string, string>(
+    wallets.map((w) => [w.wallet.id, w.wallet.address]),
+  );
+
   // ── Step 4.7: Krystal V3 override (B3) ──
   // AUTHORITATIVE startUsd for covered V3 LP (Krystal Σ DEPOSIT) + sets
   // matchedV3TokenId. Guarded: empty map → slice no-op. The V3 cost-basis
   // override (slot0/Etherscan) stays deferred (needs v3PositionMap from B3 step6).
   if (deps.krystalV3ByTokenId && deps.krystalV3ByTokenId.size > 0) {
-    const walletAddressById = new Map<string, string>(
-      wallets.map((w) => [w.wallet.id, w.wallet.address]),
-    );
     working = applyKrystalV3Override(
       working,
       deps.krystalV3ByTokenId,
@@ -192,6 +212,27 @@ export async function computePositions(
     );
   }
 
-  // V3 cost-basis (B3 step6/7) / non-LP opener (B4) remain guarded no-ops here.
+  // ── Step 4.8: non-LP opener override (B4) ──
+  // Mirrors the tail of useComputedPositions: for non-V3-LP positions, fetch the
+  // Etherscan/Alchemy receipt-token opener (date + OUT-side cost basis) and apply
+  // it AFTER Krystal (V3 LP is guarded out inside the override). Guarded: no
+  // source / empty map → no-op. Targets are derived from the post-Krystal
+  // positions, but chain/lpTokenId/walletId are override-invariant so the target
+  // set matches the client's `positionsRaw`-derived targets.
+  if (deps.nonLpOpenerSource) {
+    const openerByKey = await deps.nonLpOpenerSource.forPositions(
+      working,
+      walletAddressById,
+    );
+    if (openerByKey.size > 0) {
+      working = applyNonLpOpenerOverride(
+        working,
+        openerByKey,
+        walletAddressById,
+      ).positions;
+    }
+  }
+
+  // V3 cost-basis (B3 step6/7) remains a guarded no-op here.
   return working;
 }

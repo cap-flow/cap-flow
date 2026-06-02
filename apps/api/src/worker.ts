@@ -83,6 +83,13 @@ import { DepositSeedsService } from "./modules/cex/deposit-seeds.service.js";
 import { UpstreamProxyService } from "./modules/upstream-proxy/upstream-proxy.service.js";
 import { KrystalClient } from "./modules/integrations/krystal.js";
 import { KrystalV3Source } from "./modules/ucb/krystal-v3.source.js";
+import { EtherscanClient } from "./modules/integrations/etherscan.js";
+import {
+  AlchemyTransfersClient,
+  isAlchemyChainSupported,
+} from "./modules/integrations/alchemy-transfers.js";
+import { NonLpOpenerSource } from "./modules/ucb/non-lp-opener.source.js";
+import { fetchHistoricalPrices } from "./modules/classifier/defillama_prices.js";
 
 const REFRESH_EVERY_MS = 60 * 60 * 1000; // 1 hour
 /** `@cap-flow/ucb` engine version stamp for shadow rows (B5). */
@@ -174,12 +181,31 @@ async function main(): Promise<void> {
   // Computes canonical positions server-side via @cap-flow/ucb after each
   // refresh and stores them in ucb_shadow_results. NEVER serves; inert unless
   // `capflow.feature.ucbServerShadow` is ON for the account. Fail-soft.
+  // Upstream proxy (admin keys + retry) — shared by Krystal (B3) and the B4
+  // Etherscan/Alchemy opener fetch below.
+  const upstreamProxy = new UpstreamProxyService({
+    DEBANK_API_KEY: env.DEBANK_API_KEY,
+    HELIUS_API_KEY: env.HELIUS_API_KEY,
+    ETHERSCAN_API_KEY: env.ETHERSCAN_API_KEY,
+    ALCHEMY_API_KEY: env.ALCHEMY_API_KEY,
+    KRYSTAL_API_KEY: env.KRYSTAL_API_KEY,
+  });
+  // B4: non-LP opener source — Etherscan/Alchemy receipt-token openers + OUT-side
+  // cost basis for non-V3-LP positions. Injected into the shadow service; inert
+  // unless the shadow flag is ON (the service only computes when flagged).
+  const ucbNonLpOpenerSource = new NonLpOpenerSource({
+    etherscan: new EtherscanClient(upstreamProxy),
+    alchemy: new AlchemyTransfersClient(upstreamProxy),
+    fetchHistoricalPrices,
+    isAlchemyChainSupported,
+  });
   const ucbShadowService = new UcbShadowService({
     opsRepo: new UcbOpsRepository(dbClient.db),
     shadowRepo: new UcbShadowRepository(dbClient.db),
     opPricingService: new OpPricingService(new OpPricingRepository(dbClient.db)),
     flags: featureFlagsService,
     engineVersion: UCB_ENGINE_VERSION,
+    nonLpOpenerSource: ucbNonLpOpenerSource,
   });
   // Bind the DeBank client to the adapter's RAW input shape (same JSON, cast at
   // the boundary — mirrors the evmHistoryFetcher cast above).
@@ -237,13 +263,6 @@ async function main(): Promise<void> {
     },
   };
   // B3: Krystal V3 enrichment over the upstream proxy (KC-APIKey + retry).
-  const upstreamProxy = new UpstreamProxyService({
-    DEBANK_API_KEY: env.DEBANK_API_KEY,
-    HELIUS_API_KEY: env.HELIUS_API_KEY,
-    ETHERSCAN_API_KEY: env.ETHERSCAN_API_KEY,
-    ALCHEMY_API_KEY: env.ALCHEMY_API_KEY,
-    KRYSTAL_API_KEY: env.KRYSTAL_API_KEY,
-  });
   const ucbKrystalSource = new KrystalV3Source({
     client: new KrystalClient(upstreamProxy),
     walletSource: ucbWalletSource,

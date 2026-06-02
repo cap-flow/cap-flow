@@ -19,6 +19,7 @@ import type {
 
 import {
   computePositions,
+  type NonLpOpenerSourceLike,
   type OpPriceSource,
   type UcbComputeWallet,
 } from "./ucb.service.js";
@@ -41,6 +42,8 @@ export interface UcbShadowServiceDeps {
   flags: FlagResolver;
   /** `@cap-flow/ucb` pkg version + git sha — stamped on every result. */
   engineVersion: string;
+  /** B4: non-LP opener source (Etherscan/Alchemy fetch). Absent → no-op. */
+  nonLpOpenerSource?: NonLpOpenerSourceLike;
   lotMethodology?: LotMethodology;
 }
 
@@ -89,6 +92,9 @@ export class UcbShadowService {
       const positions = await computePositions(wallets, {
         opPricingService: this.deps.opPricingService,
         lotMethodology,
+        ...(this.deps.nonLpOpenerSource !== undefined && {
+          nonLpOpenerSource: this.deps.nonLpOpenerSource,
+        }),
         ...(opts.cexCostBasisByHash !== undefined && {
           cexCostBasisByHash: opts.cexCostBasisByHash,
         }),
