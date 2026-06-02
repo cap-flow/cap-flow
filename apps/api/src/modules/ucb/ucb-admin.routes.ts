@@ -20,6 +20,7 @@ import type { AuthRepository } from "../auth/auth.repository.js";
 
 import { buildUcbRunnerStackFromDb, type UcbStackEnv } from "./ucb-runner.factory.js";
 import { GoldenRepository } from "../golden/golden.repository.js";
+import { AdminAllPositionsService } from "./admin-all-positions.service.js";
 import {
   matchCanonical,
   runPostPortChecks,
@@ -80,6 +81,11 @@ export async function ucbAdminRoutes(
 ): Promise<void> {
   const route = app.withTypeProvider<ZodTypeProvider>();
   route.addHook("preHandler", app.requireAdminOrImpersonator);
+
+  const allPositions = new AdminAllPositionsService(opts.db);
+
+  // Global registry: every account's latest canonical positions + open anomalies.
+  route.get("/all-positions", async () => allPositions.list());
 
   route.post("/compute", { schema: { body: computeBody } }, async (req) => {
     const { account, methodology } = req.body;
