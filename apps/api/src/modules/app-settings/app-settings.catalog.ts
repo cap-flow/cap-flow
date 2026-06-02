@@ -227,6 +227,19 @@ export function buildSettingsCatalog(env: Env): SettingDefinition[] {
       max: 24 * 60 * 60 * 1000,
       hotReload: "live",
     },
+    {
+      key: "frontend.manualRefreshMinIntervalMs",
+      scope: "frontend",
+      group: "Авто-рефреш",
+      label: "Мин. интервал ручного обновления (мс)",
+      description:
+        "Как часто юзер может жать кнопку «Обновить». Не чаще раза в столько мс — чтобы не спамить запросами к DeBank. По умолчанию 1 час (3600000). 0 = без ограничения. Жёсткий потолок от злоупотреблений — общий rate-limit (см. выше).",
+      valueType: "number",
+      defaultValue: 60 * 60 * 1000,
+      min: 0,
+      max: 24 * 60 * 60 * 1000,
+      hotReload: "live",
+    },
 
     /* ------------------- Серверный cron-рефреш (backend) ------------------ */
     {
@@ -240,6 +253,19 @@ export function buildSettingsCatalog(env: Env): SettingDefinition[] {
       defaultValue: 30,
       min: 0,
       max: 365,
+      hotReload: "live",
+    },
+    {
+      key: "portfolio.refreshMinIntervalMin",
+      scope: "backend",
+      group: "Авто-рефреш",
+      label: "Мин. интервал серверного обновления (мин)",
+      description:
+        "Как часто серверный cron обновляет ОДИН аккаунт, не чаще раза в N минут. 60 = раз в час (по умолчанию). 360 = раз в 6 часов, 1440 = раз в сутки — меньше расходов DeBank, но данные менее свежие. Ручной рефреш (кнопка) не ограничивается. Применяется в течение ~10с.",
+      valueType: "number",
+      defaultValue: 60,
+      min: 5,
+      max: 10080,
       hotReload: "live",
     },
   ];

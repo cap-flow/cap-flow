@@ -3024,7 +3024,7 @@ function WalletBalancesBlock({
           </button>
           <button
             type="button"
-            onClick={() => void loadAll()}
+            onClick={() => void loadAll({ manual: true })}
             disabled={Boolean(busyId)}
             className={cn(
               "flex shrink-0 items-center justify-center rounded-md border border-border bg-secondary/40 text-foreground/80 transition-all hover:border-brand-cyan/50 hover:bg-secondary/70 hover:text-foreground disabled:cursor-wait disabled:opacity-60",
