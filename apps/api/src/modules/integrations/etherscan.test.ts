@@ -107,6 +107,57 @@ describe("EtherscanClient.fetchWalletTokenTransfers", () => {
   });
 });
 
+describe("EtherscanClient.fetchV3LiquidityEvents", () => {
+  const pad64 = (n: bigint) => n.toString(16).padStart(64, "0");
+  const logEntry = (liq: bigint, a0: bigint, a1: bigint, block: number, ts: number, hash: string) => ({
+    data: "0x" + pad64(liq) + pad64(a0) + pad64(a1),
+    blockNumber: "0x" + block.toString(16),
+    timeStamp: "0x" + ts.toString(16),
+    transactionHash: hash,
+  });
+
+  it("parses increase + decrease logs (amounts, block, time, tokenId)", async () => {
+    // proxy returns the SAME body for both topic queries here; increases use it,
+    // decreases get an explicit empty.
+    const forward = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 200,
+        body: okBody([logEntry(123n, 1_000_000_000_000_000_000n, 100_000_000n, 256, 0x60000000, "0xmint")]),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        body: okBody([logEntry(50n, 400_000_000_000_000_000n, 0n, 300, 0x60000100, "0xburn")]),
+      });
+    const client = new EtherscanClient({ forward } as unknown as EtherscanProxy);
+    const { increases, decreases } = await client.fetchV3LiquidityEvents("arb", "0xNPM", 5417064n);
+    expect(increases).toHaveLength(1);
+    expect(increases[0]).toMatchObject({
+      type: "increase",
+      tokenId: 5417064n,
+      blockNumber: 256n,
+      blockTime: 0x60000000,
+      txHash: "0xmint",
+      amount0Raw: 1_000_000_000_000_000_000n,
+      amount1Raw: 100_000_000n,
+    });
+    expect(decreases).toHaveLength(1);
+    expect(decreases[0]).toMatchObject({ type: "decrease", txHash: "0xburn", amount0Raw: 400_000_000_000_000_000n });
+    // topic1 = tokenId hex-padded
+    expect(forward.mock.calls[0]![0].query.topic1).toBe("0x" + pad64(5417064n));
+  });
+
+  it("'No records found' → empty events", async () => {
+    const forward = vi.fn(async () => ({
+      status: 200,
+      body: JSON.stringify({ status: "0", message: "No records found", result: "No records found" }),
+    }));
+    const r = await new EtherscanClient({ forward } as unknown as EtherscanProxy).fetchV3LiquidityEvents("eth", "0xNPM", 1n);
+    expect(r.increases).toEqual([]);
+    expect(r.decreases).toEqual([]);
+  });
+});
+
 describe("EtherscanClient.fetchTokenTransfers (per-contract)", () => {
   it("passes contractaddress + maps rows", async () => {
     const { proxy, forward } = proxyReturning(
