@@ -51,6 +51,7 @@ import { ucbRoutes } from "./modules/ucb/ucb.routes.js";
 import { ucbAdminRoutes } from "./modules/ucb/ucb-admin.routes.js";
 import { LotMethodologyRepository } from "./modules/preferences/lot-methodology.repository.js";
 import { lotMethodologyRoutes } from "./modules/preferences/lot-methodology.routes.js";
+import { anomalyAdminRoutes } from "./modules/anomaly/anomaly-admin.routes.js";
 import { UcbShadowRepository } from "./modules/ucb/ucb-shadow.repository.js";
 import { AnnotationsRepository } from "./modules/chain-ops/annotations.repository.js";
 import { AnnotationsService } from "./modules/chain-ops/annotations.service.js";
@@ -742,6 +743,13 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(lotMethodologyRoutes, {
         repo: new LotMethodologyRepository(app.db),
         prefix: "/me",
+      });
+      // Epic C: anomaly detector scan + flags (admin).
+      await api.register(anomalyAdminRoutes, {
+        db: app.db,
+        accountsRepo,
+        authRepo,
+        prefix: "/admin/anomaly",
       });
       await api.register(syncCoverageRoutes, {
         service: syncCoverageService,
