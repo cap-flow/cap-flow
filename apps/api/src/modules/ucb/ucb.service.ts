@@ -141,6 +141,14 @@ export async function computePositions(
       histPrices: new Map<string, number>(),
       costBasisOverrideByHash,
       lotsByWallet,
+      // Task #18: thread the FIFO/LIFO/WAC toggle into buildSupplyToken just
+      // like the client (use_computed_positions.ts). Without it buildSupplyToken
+      // fell back to "WAC" (open_positions.ts `methodology ?? "WAC"`) → lending
+      // supply cost basis was methodology-INDEPENDENT server-side, diverging from
+      // the client whenever the user picked LIFO/FIFO (artur ETH Fluid +4.4%).
+      // The lending override below is C7-skipped once buildSupplyToken yields a
+      // cost_basis result, so the methodology MUST reach buildSupplyToken to matter.
+      methodology: lotMethodology,
     },
   );
 

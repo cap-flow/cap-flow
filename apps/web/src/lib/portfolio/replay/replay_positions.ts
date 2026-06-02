@@ -150,6 +150,12 @@ export function replayPositions(input: ReplayInput): ReplayResult {
       histPrices: v3LpHistPrices,
       costBasisOverrideByHash,
       lotsByWallet,
+      // Task #18: forward the FIFO/LIFO/WAC toggle into buildSupplyToken, like
+      // use_computed_positions.ts. Without it buildSupplyToken fell back to "WAC"
+      // (open_positions.ts `methodology ?? "WAC"`) and lending startUsd was
+      // methodology-INDEPENDENT in the replay harness ($33,708 under any toggle),
+      // drifting +4.4% from the live client under LIFO (artur ETH Fluid).
+      methodology: lotMethodology,
     },
   );
 

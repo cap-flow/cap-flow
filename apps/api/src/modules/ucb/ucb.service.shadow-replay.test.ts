@@ -68,6 +68,40 @@ describe("ucb.service computePositions — B5 server/client parity (shadow)", ()
     );
   });
 
+  it("task #18: lending startUsd honors the FIFO/LIFO/WAC toggle (artur ETH Fluid)", async () => {
+    const fx = loadFixture("artur-1.json");
+    const ethLeg = (positions: Awaited<ReturnType<typeof computePositions>>) =>
+      positions.find(
+        (x) => /fluid/i.test(x.protocol.id) && x.supplyTokens[0]?.symbol === "ETH",
+      );
+
+    // The bug: computePositions dropped the methodology when calling
+    // buildOpenPositions, so buildSupplyToken fell back to "WAC" and the toggle
+    // was inert server-side ($33,708 under FIFO *and* LIFO *and* WAC), diverging
+    // +4.4% from the client whenever the user picked LIFO.
+    const lifo = ethLeg(
+      await computePositions(fx.input.wallets as UcbComputeWallet[], {
+        opPricingService: stubPricing(fx.input.histPrices ?? []),
+        lotMethodology: "LIFO",
+      }),
+    );
+    const wac = ethLeg(
+      await computePositions(fx.input.wallets as UcbComputeWallet[], {
+        opPricingService: stubPricing(fx.input.histPrices ?? []),
+        lotMethodology: "WAC",
+      }),
+    );
+    expect(lifo, "artur ETH Fluid leg computed").toBeDefined();
+    expect(wac, "artur ETH Fluid leg computed").toBeDefined();
+
+    // The toggle now flows through to the supply-token cost basis: LIFO ≠ WAC.
+    expect(Math.abs(lifo!.startUsd - wac!.startUsd)).toBeGreaterThan(100);
+    // LIFO reproduces the client-verified golden anchor to the cent ($32,296.72).
+    expect(Math.abs(lifo!.startUsd - 32296.72)).toBeLessThanOrEqual(1);
+    // WAC stays the legacy methodology-independent value ($33,708.57).
+    expect(Math.abs(wac!.startUsd - 33708.57)).toBeLessThanOrEqual(1);
+  });
+
   it("deterministic (R4): identical inputs → byte-identical output", async () => {
     const fx = loadFixture("murat-1.json");
     const a = await run(fx);

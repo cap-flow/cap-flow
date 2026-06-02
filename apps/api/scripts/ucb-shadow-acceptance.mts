@@ -60,6 +60,11 @@ const shadowService = new UcbShadowService({
   opPricingService: new OpPricingService(new OpPricingRepository(dbClient.db)),
   flags: alwaysOn,
   engineVersion: "acceptance-run",
+  // The golden anchors (artur-1/murat-1) were captured with the client's
+  // FIFO/LIFO/WAC toggle on LIFO, so the shadow run must compute under LIFO to
+  // reproduce them apples-to-apples (task #18). Production per-user methodology
+  // persistence is a B6 concern.
+  lotMethodology: "LIFO",
 });
 const debankSource: DeBankRawSource = {
   complexProtocolList: async (a) =>
