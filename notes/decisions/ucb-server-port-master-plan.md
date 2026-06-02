@@ -308,6 +308,14 @@ CREATE TABLE v3_position_snapshots (
 
 ### Stage B4 — Persist receipt-token transfers → port lending + non-LP opener
 
+> ✅ **DONE 2026-06-02** (non-LP opener half). Implemented WITHOUT migration 0028
+> first: the runner fetches Etherscan/Alchemy live each run (parity proven →
+> the cache table is now an optional perf follow-up, not a correctness blocker).
+> Commits `84cd784`→`c1da985`. Live verify 14/0/0; probe map=8/override=7;
+> POS-007 GMX GM $5268.32 = OUT-side $7122.80 × netFrac 0.7396. See
+> `resume-2026-06-02.md` top banner. The `lendingAudit` half stays deferred
+> (client flag default OFF → low parity value). Plan below kept for reference.
+
 **Sub-tasks**
 - Migration `0028_receipt_token_transfers.sql` — shared (no `user_id`), keyed by chain+token+tx:
 
