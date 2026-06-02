@@ -25,6 +25,13 @@ import type { CexCostBasisMatch } from "@cap-flow/ucb/position_coverage";
 import { UpstreamProxyService } from "../src/modules/upstream-proxy/upstream-proxy.service.js";
 import { KrystalClient } from "../src/modules/integrations/krystal.js";
 import { KrystalV3Source } from "../src/modules/ucb/krystal-v3.source.js";
+import { EtherscanClient } from "../src/modules/integrations/etherscan.js";
+import {
+  AlchemyTransfersClient,
+  isAlchemyChainSupported,
+} from "../src/modules/integrations/alchemy-transfers.js";
+import { NonLpOpenerSource } from "../src/modules/ucb/non-lp-opener.source.js";
+import { fetchHistoricalPrices } from "../src/modules/classifier/defillama_prices.js";
 import { OpPricingService } from "../src/modules/ucb/op-pricing.service.js";
 import { OpPricingRepository } from "../src/modules/ucb/op-pricing.repository.js";
 import { UcbOpsRepository } from "../src/modules/ucb/ucb-ops.repository.js";
@@ -54,12 +61,29 @@ const debankClient = new DeBankClient(process.env.DEBANK_API_KEY);
 const walletsRepo = new WalletsRepository(dbClient.db);
 const shadowRepo = new UcbShadowRepository(dbClient.db);
 
+// B3/B4: upstream proxy (admin keys + retry), shared by Krystal + Etherscan/Alchemy.
+const upstreamProxy = new UpstreamProxyService({
+  DEBANK_API_KEY: process.env.DEBANK_API_KEY,
+  HELIUS_API_KEY: process.env.HELIUS_API_KEY,
+  ETHERSCAN_API_KEY: process.env.ETHERSCAN_API_KEY,
+  ALCHEMY_API_KEY: process.env.ALCHEMY_API_KEY,
+  KRYSTAL_API_KEY: process.env.KRYSTAL_API_KEY,
+});
+// B4: non-LP opener source (Etherscan/Alchemy receipt-token openers + OUT-side).
+const nonLpOpenerSource = new NonLpOpenerSource({
+  etherscan: new EtherscanClient(upstreamProxy),
+  alchemy: new AlchemyTransfersClient(upstreamProxy),
+  fetchHistoricalPrices,
+  isAlchemyChainSupported,
+});
+
 const shadowService = new UcbShadowService({
   opsRepo: new UcbOpsRepository(dbClient.db),
   shadowRepo,
   opPricingService: new OpPricingService(new OpPricingRepository(dbClient.db)),
   flags: alwaysOn,
   engineVersion: "acceptance-run",
+  nonLpOpenerSource,
   // The golden anchors (artur-1/murat-1) were captured with the client's
   // FIFO/LIFO/WAC toggle on LIFO, so the shadow run must compute under LIFO to
   // reproduce them apples-to-apples (task #18). Production per-user methodology
@@ -112,13 +136,6 @@ const cexSource: CexCostBasisSource = {
   },
 };
 // B3: real Krystal V3 enrichment over the upstream proxy.
-const upstreamProxy = new UpstreamProxyService({
-  DEBANK_API_KEY: process.env.DEBANK_API_KEY,
-  HELIUS_API_KEY: process.env.HELIUS_API_KEY,
-  ETHERSCAN_API_KEY: process.env.ETHERSCAN_API_KEY,
-  ALCHEMY_API_KEY: process.env.ALCHEMY_API_KEY,
-  KRYSTAL_API_KEY: process.env.KRYSTAL_API_KEY,
-});
 const krystalSource = new KrystalV3Source({
   client: new KrystalClient(upstreamProxy),
   walletSource,
