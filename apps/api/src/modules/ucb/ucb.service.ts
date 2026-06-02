@@ -37,6 +37,11 @@ import {
 } from "@cap-flow/ucb/cex_inheritance_cost_basis_override";
 import { applyKrystalV3Override } from "@cap-flow/ucb/krystal/override";
 import { applyNonLpOpenerOverride } from "@cap-flow/ucb/apply_opener_override";
+import { applyV3CostBasisOverride } from "@cap-flow/ucb/v3_cost_basis_override";
+import type {
+  V3CostBasisResult,
+  V3Position,
+} from "@cap-flow/ucb/v3_types";
 import type { NonLpOpener } from "@cap-flow/ucb/non_lp_opener";
 import type {
   KrystalV3Summary,
@@ -98,6 +103,12 @@ export interface UcbComputeDeps {
    * consistent with `opPricingService` (this service is not pure compute).
    */
   nonLpOpenerSource?: NonLpOpenerSourceLike;
+  /**
+   * B3-full: non-Krystal V3 cost basis source (Etherscan events + slot0 pricing).
+   * Runs FIRST (right after build, before lending) — mirrors the client. Absent →
+   * guarded no-op. Krystal-covered V3 still gets its authoritative startUsd later.
+   */
+  v3EnrichmentSource?: V3EnrichmentSourceLike;
   /** FIFO/LIFO/WAC/HIFO — defaults to the client default. */
   lotMethodology?: LotMethodology;
 }
@@ -109,6 +120,19 @@ export interface NonLpOpenerSourceLike {
     walletAddressById: ReadonlyMap<string, string>,
     signal?: AbortSignal,
   ): Promise<Map<string, NonLpOpener>>;
+}
+
+/** Slice of `V3EnrichmentSource` the engine needs (injectable / stubable). */
+export interface V3EnrichmentSourceLike {
+  forPositions(
+    positions: readonly OpenPosition[],
+    walletAddressById: ReadonlyMap<string, string>,
+    signal?: AbortSignal,
+  ): Promise<{
+    v3PositionMap: Map<string, V3Position[]>;
+    v3CostBasis: Map<string, V3CostBasisResult>;
+  }>;
+  resolveDeploymentIds(chainCode: string, protocolName: string): string[];
 }
 
 /**
@@ -171,11 +195,35 @@ export async function computePositions(
     },
   );
 
+  const walletAddressById = new Map<string, string>(
+    wallets.map((w) => [w.wallet.id, w.wallet.address]),
+  );
+
+  // ── Step 2.5: V3 cost basis override (B3-full) — FIRST in the chain ──
+  // Mirrors the client (use_computed_positions.ts: applyV3CostBasisOverride runs
+  // right after build, before lending). Authoritative non-Krystal V3 LP cost
+  // basis from on-chain IncreaseLiquidity events + slot0 pricing (Velodrome gauge
+  // etc.). Guarded: no source / empty maps → no-op. Krystal-covered V3 still gets
+  // its authoritative startUsd from the Krystal step below.
+  let v3Overridden: readonly OpenPosition[] = positionsRaw;
+  if (deps.v3EnrichmentSource) {
+    const { v3PositionMap, v3CostBasis } =
+      await deps.v3EnrichmentSource.forPositions(positionsRaw, walletAddressById);
+    if (v3PositionMap.size > 0 && v3CostBasis.size > 0) {
+      v3Overridden = applyV3CostBasisOverride(
+        positionsRaw,
+        v3PositionMap,
+        v3CostBasis,
+        (chain, name) => deps.v3EnrichmentSource!.resolveDeploymentIds(chain, name),
+      ).positions;
+    }
+  }
+
   // ── Step 3: lending cost basis override (FIFO/LIFO/WAC) ──
   const opsByWallet = new Map<string, ClassifiedOp[]>();
   for (const w of wallets) opsByWallet.set(w.wallet.id, w.ops);
   const lendingResult = applyLendingCostBasisOverride(
-    positionsRaw,
+    v3Overridden,
     opsByWallet,
     histPrices,
     lotMethodology,
@@ -194,10 +242,6 @@ export async function computePositions(
       histPrices,
     ).positions;
   }
-
-  const walletAddressById = new Map<string, string>(
-    wallets.map((w) => [w.wallet.id, w.wallet.address]),
-  );
 
   // ── Step 4.7: Krystal V3 override (B3) ──
   // AUTHORITATIVE startUsd for covered V3 LP (Krystal Σ DEPOSIT) + sets

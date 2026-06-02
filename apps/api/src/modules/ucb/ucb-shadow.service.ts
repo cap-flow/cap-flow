@@ -22,6 +22,7 @@ import {
   type NonLpOpenerSourceLike,
   type OpPriceSource,
   type UcbComputeWallet,
+  type V3EnrichmentSourceLike,
 } from "./ucb.service.js";
 import type { UcbOpsRepository } from "./ucb-ops.repository.js";
 import type {
@@ -44,6 +45,8 @@ export interface UcbShadowServiceDeps {
   engineVersion: string;
   /** B4: non-LP opener source (Etherscan/Alchemy fetch). Absent → no-op. */
   nonLpOpenerSource?: NonLpOpenerSourceLike;
+  /** B3-full: non-Krystal V3 enrichment source. Absent → no-op. */
+  v3EnrichmentSource?: V3EnrichmentSourceLike;
   lotMethodology?: LotMethodology;
 }
 
@@ -94,6 +97,9 @@ export class UcbShadowService {
         lotMethodology,
         ...(this.deps.nonLpOpenerSource !== undefined && {
           nonLpOpenerSource: this.deps.nonLpOpenerSource,
+        }),
+        ...(this.deps.v3EnrichmentSource !== undefined && {
+          v3EnrichmentSource: this.deps.v3EnrichmentSource,
         }),
         ...(opts.cexCostBasisByHash !== undefined && {
           cexCostBasisByHash: opts.cexCostBasisByHash,

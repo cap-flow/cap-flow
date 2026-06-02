@@ -22,7 +22,11 @@ import { deriveUsdPrices, type V3PoolPrice } from "@cap-flow/ucb/v3_pricing";
 import { isStableSymbol } from "@cap-flow/ucb/protocols";
 
 import { defillamaCoinKey, priceFromMap } from "../classifier/defillama_keys.js";
-import { findV3Deployments, type V3Deployment } from "./v3/deployments.js";
+import {
+  findV3Deployments,
+  resolveV3DeploymentIds,
+  type V3Deployment,
+} from "./v3/deployments.js";
 import { fetchAllV3Positions, makeV3Client } from "./v3/positions.fetch.js";
 import { fetchPoolPriceAtBlock } from "./v3/pool-price.fetch.js";
 
@@ -84,6 +88,11 @@ interface Target {
 
 export class V3EnrichmentSource {
   constructor(private readonly deps: V3EnrichmentDeps) {}
+
+  /** The override's injected deployment resolver (chain, protocol → ids). */
+  resolveDeploymentIds(chainCode: string, protocolName: string): string[] {
+    return resolveV3DeploymentIds(chainCode, protocolName);
+  }
 
   async forPositions(
     positions: readonly V3TargetPosition[],

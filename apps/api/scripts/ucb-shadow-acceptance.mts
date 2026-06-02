@@ -31,6 +31,7 @@ import {
   isAlchemyChainSupported,
 } from "../src/modules/integrations/alchemy-transfers.js";
 import { NonLpOpenerSource } from "../src/modules/ucb/non-lp-opener.source.js";
+import { V3EnrichmentSource } from "../src/modules/ucb/v3-enrichment.source.js";
 import { fetchHistoricalPrices } from "../src/modules/classifier/defillama_prices.js";
 import { OpPricingService } from "../src/modules/ucb/op-pricing.service.js";
 import { OpPricingRepository } from "../src/modules/ucb/op-pricing.repository.js";
@@ -76,6 +77,12 @@ const nonLpOpenerSource = new NonLpOpenerSource({
   fetchHistoricalPrices,
   isAlchemyChainSupported,
 });
+// B3-full: non-Krystal V3 enrichment.
+const v3EnrichmentSource = new V3EnrichmentSource({
+  etherscan: new EtherscanClient(upstreamProxy),
+  alchemyKey: process.env.ALCHEMY_API_KEY,
+  fetchHistoricalPrices,
+});
 
 const shadowService = new UcbShadowService({
   opsRepo: new UcbOpsRepository(dbClient.db),
@@ -84,6 +91,7 @@ const shadowService = new UcbShadowService({
   flags: alwaysOn,
   engineVersion: "acceptance-run",
   nonLpOpenerSource,
+  v3EnrichmentSource,
   // The golden anchors (artur-1/murat-1) were captured with the client's
   // FIFO/LIFO/WAC toggle on LIFO, so the shadow run must compute under LIFO to
   // reproduce them apples-to-apples (task #18). Production per-user methodology

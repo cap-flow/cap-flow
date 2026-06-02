@@ -89,6 +89,7 @@ import {
   isAlchemyChainSupported,
 } from "./modules/integrations/alchemy-transfers.js";
 import { NonLpOpenerSource } from "./modules/ucb/non-lp-opener.source.js";
+import { V3EnrichmentSource } from "./modules/ucb/v3-enrichment.source.js";
 import { fetchHistoricalPrices } from "./modules/classifier/defillama_prices.js";
 
 const REFRESH_EVERY_MS = 60 * 60 * 1000; // 1 hour
@@ -199,6 +200,13 @@ async function main(): Promise<void> {
     fetchHistoricalPrices,
     isAlchemyChainSupported,
   });
+  // B3-full: non-Krystal V3 enrichment (Etherscan events via the proxy + viem
+  // slot0 reads via the direct Alchemy admin endpoint).
+  const ucbV3EnrichmentSource = new V3EnrichmentSource({
+    etherscan: new EtherscanClient(upstreamProxy),
+    alchemyKey: env.ALCHEMY_API_KEY,
+    fetchHistoricalPrices,
+  });
   const ucbShadowService = new UcbShadowService({
     opsRepo: new UcbOpsRepository(dbClient.db),
     shadowRepo: new UcbShadowRepository(dbClient.db),
@@ -206,6 +214,7 @@ async function main(): Promise<void> {
     flags: featureFlagsService,
     engineVersion: UCB_ENGINE_VERSION,
     nonLpOpenerSource: ucbNonLpOpenerSource,
+    v3EnrichmentSource: ucbV3EnrichmentSource,
   });
   // Bind the DeBank client to the adapter's RAW input shape (same JSON, cast at
   // the boundary — mirrors the evmHistoryFetcher cast above).
