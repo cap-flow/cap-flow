@@ -54,6 +54,12 @@ import {
 import { PortfolioRefreshProcessor } from "./modules/queue/portfolio-refresh.processor.js";
 import { OpPricingService } from "./modules/ucb/op-pricing.service.js";
 import { OpPricingRepository } from "./modules/ucb/op-pricing.repository.js";
+import { OpPricingFillService } from "./modules/ucb/op-pricing-fill.service.js";
+import {
+  OP_PRICING_FILL_QUEUE,
+  OpPricingFillQueue,
+  type OpPricingFillJobData,
+} from "./modules/queue/op-pricing-fill.queue.js";
 import { UcbOpsRepository } from "./modules/ucb/ucb-ops.repository.js";
 import { UcbShadowRepository } from "./modules/ucb/ucb-shadow.repository.js";
 import { UcbShadowService } from "./modules/ucb/ucb-shadow.service.js";
@@ -83,6 +89,8 @@ const REFRESH_EVERY_MS = 60 * 60 * 1000; // 1 hour
 const UCB_ENGINE_VERSION = "ucb-server@dev";
 const JITTER_MS = 60 * 60 * 1000;
 const PAYMENT_SCAN_EVERY_MS = 5 * 60 * 1000; // 5 minutes
+/** UCB B1: op-pricing cache-fill sweep cadence (deterministic block prices). */
+const OP_PRICING_FILL_EVERY_MS = 30 * 60 * 1000; // 30 minutes
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -272,6 +280,22 @@ async function main(): Promise<void> {
   );
   const paymentQueue = new PaymentMonitorQueue(bullConn);
 
+  // ─── UCB B1 op-pricing cache-fill (cache-only, no flag, fail-soft) ──
+  // Warms `op_token_prices` with deterministic block-fixed DefiLlama prices for
+  // every active account's ops, so server cost basis stops depending on the
+  // per-sync `movement.usd` (POS-005 / duplicate_op_divergent_pricing). Serves
+  // nothing; safe to run unconditionally.
+  const opPricingFillService = new OpPricingFillService({
+    accounts: accountsRepo,
+    opsRepo: new UcbOpsRepository(dbClient.db),
+    opPricing: new OpPricingService(new OpPricingRepository(dbClient.db)),
+    logger: {
+      info: (msg, meta) => logger.info(meta ?? {}, msg),
+      warn: (msg, meta) => logger.warn(meta ?? {}, msg),
+    },
+  });
+  const opPricingFillQueue = new OpPricingFillQueue(bullConn);
+
   // ─── refresh worker ───────────────────────────────────────────────
   const refreshWorker = new Worker<PortfolioRefreshJobData>(
     PORTFOLIO_REFRESH_QUEUE,
@@ -335,6 +359,29 @@ async function main(): Promise<void> {
     );
   });
 
+  // ─── op-pricing cache-fill worker (UCB B1) ────────────────────────
+  // Worker-scoped abort so a long sweep yields promptly on shutdown (BullMQ has
+  // no per-job AbortSignal; the service honors this mid-sweep + in fillMissing).
+  const opPricingFillAbort = new AbortController();
+  const opPricingFillWorker = new Worker<OpPricingFillJobData>(
+    OP_PRICING_FILL_QUEUE,
+    async (job) => {
+      const result = await opPricingFillService.run(opPricingFillAbort.signal);
+      logger.info(
+        { jobId: job.id, trigger: job.data.trigger, ...result },
+        "[worker] op-pricing cache-fill"
+      );
+      return result;
+    },
+    { connection: bullConn, concurrency: 1 }
+  );
+  opPricingFillWorker.on("failed", (job, err) => {
+    logger.error(
+      { jobId: job?.id, err: err.message },
+      "[worker] op-pricing cache-fill failed"
+    );
+  });
+
   // ─── bootstrap recurring schedules ────────────────────────────────
   const activeAccounts = await accountsRepo.findAllActive();
   for (const acc of activeAccounts) {
@@ -344,8 +391,15 @@ async function main(): Promise<void> {
     });
   }
   await paymentQueue.scheduleRecurring({ everyMs: PAYMENT_SCAN_EVERY_MS });
+  await opPricingFillQueue.scheduleRecurring({
+    everyMs: OP_PRICING_FILL_EVERY_MS,
+  });
   logger.info(
-    { accounts: activeAccounts.length, paymentScanEveryMs: PAYMENT_SCAN_EVERY_MS },
+    {
+      accounts: activeAccounts.length,
+      paymentScanEveryMs: PAYMENT_SCAN_EVERY_MS,
+      opPricingFillEveryMs: OP_PRICING_FILL_EVERY_MS,
+    },
     "[worker] recurring schedules in place"
   );
 
@@ -353,10 +407,13 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, "[worker] shutting down…");
     try {
+      opPricingFillAbort.abort(); // yield an in-flight sweep before closing
       await refreshWorker.close();
       await monitorWorker.close();
+      await opPricingFillWorker.close();
       await refreshQueue.close();
       await paymentQueue.close();
+      await opPricingFillQueue.close();
       await dbClient.close();
       bullConn.disconnect();
       process.exit(0);
