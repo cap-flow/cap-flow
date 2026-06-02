@@ -46,36 +46,10 @@ import {
   priceFromMapNearest,
 } from "../defillama";
 
-export interface NonLpOpener {
-  /** Unix seconds — block time первого receipt IN transfer. */
-  openedAt: number;
-  /** Block number deposit-tx (для Stage 2 on-chain price lookup). */
-  openBlock: number;
-  /** Tx hash открывающей транзакции. */
-  txHash: string;
-  /** Human-units кол-во receipt-токена в первом IN transfer. */
-  receiptAmount: number;
-  /**
-   * Stage 2: OUT-side — токены ПОТРАЧЕННЫЕ при открытии (transfers из той же
-   * opener tx где from==wallet). Пусто если OUT не в opener tx (Safe-internal).
-   */
-  openedInTokens: OpenedInToken[];
-  /**
-   * Stage 2a: startUsd если OUT-side весь в USD-стейблах (Σ × $1). null если
-   * OUT пустой ИЛИ содержит non-stable (нужен Stage 2b historical price).
-   * УЖЕ помножен на `receiptNetFraction` (cost basis ОСТАВШЕЙСЯ доли позиции).
-   */
-  startUsd: number | null;
-  /**
-   * Stage 2d (partial withdrawal): доля receipt-токена, ОСТАВШАЯСЯ в позиции =
-   * `(Σ receipt IN − Σ receipt OUT) / Σ receipt IN`. Пользователь может вывести
-   * ЧАСТЬ активов (`lp_remove`): тогда cost basis ОСТАВШЕЙСЯ позиции = gross
-   * deposit × этой доли. 1 = ничего не выведено; 0 = полный выход. Применяется
-   * к startUsd (stable + volatile). См. POS-007 GMX (3 депозита $7122 − вывод
-   * 1157 GM → правильный cb $5268, а не $7122).
-   */
-  receiptNetFraction?: number;
-}
+// NonLpOpener moved to @cap-flow/ucb/non_lp_opener (B4 slice 1); re-exported so
+// existing import sites keep working. The fetch logic that PRODUCES it stays here.
+import type { NonLpOpener } from "@cap-flow/ucb/non_lp_opener";
+export type { NonLpOpener };
 
 /**
  * Доля receipt-токена, оставшаяся в позиции после возможных частичных выводов.

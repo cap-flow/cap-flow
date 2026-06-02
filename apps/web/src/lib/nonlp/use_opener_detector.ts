@@ -23,6 +23,8 @@ import {
   EtherscanChainNotSupportedError,
   type NonLpOpener,
 } from "./opener_detector";
+// keyOf + nonLpOpenerKey moved to @cap-flow/ucb/non_lp_opener (B4 slice 1).
+import { keyOf, nonLpOpenerKey } from "@cap-flow/ucb/non_lp_opener";
 
 // v2: NonLpOpener расширен openedInTokens + startUsd (Stage 2a).
 // v3: Stage 2b — volatile OUT оценивается через DefiLlama historical. v2
@@ -50,10 +52,6 @@ interface CacheEntry {
   fetchedAt: number;
 }
 
-/** key: `${chain}|${receiptToken.toLowerCase()}|${wallet.toLowerCase()}`. */
-function keyOf(t: { chainCode: string; receiptToken: string; wallet: string }): string {
-  return `${t.chainCode.toLowerCase()}|${t.receiptToken.toLowerCase()}|${t.wallet.toLowerCase()}`;
-}
 
 const moduleCache = new Map<string, CacheEntry>();
 
@@ -94,14 +92,8 @@ export interface NonLpOpenerState {
   error: string | null;
 }
 
-/** Public helper — построить стабильный ключ (для override match'а). */
-export function nonLpOpenerKey(
-  chainCode: string,
-  receiptToken: string,
-  wallet: string,
-): string {
-  return keyOf({ chainCode, receiptToken, wallet });
-}
+/** Public helper — re-export the package's stable key builder. */
+export { nonLpOpenerKey };
 
 const EMPTY: NonLpOpenerState = { data: new Map(), loading: false, error: null };
 

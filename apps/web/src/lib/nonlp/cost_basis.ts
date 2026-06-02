@@ -13,13 +13,10 @@
  * Volatile OUT (ETH/BTC vaults) — Stage 2b через DefiLlama historical.
  */
 
-export interface OpenedInToken {
-  /** Token contract address (lowercase). */
-  address: string;
-  symbol: string;
-  /** Human-units amount (decimal-shifted). */
-  amount: number;
-}
+// OpenedInToken moved to @cap-flow/ucb/non_lp_opener (B4 slice 1); imported for
+// local use here and re-exported so existing import sites keep working.
+import type { OpenedInToken } from "@cap-flow/ucb/non_lp_opener";
+export type { OpenedInToken };
 
 /**
  * Известные USD-стейблы (по symbol, case-insensitive). Для них historical
