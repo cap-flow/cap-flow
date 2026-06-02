@@ -183,6 +183,7 @@ export class NotificationsService {
       activeAccountId: null,
       trackedTickers: [],
       billingMeta: null,
+      lotMethodology: null,
       emailVerifiedAt: null,
       lastLoginAt: null,
       createdAt: new Date(),

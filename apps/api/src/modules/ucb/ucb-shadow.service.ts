@@ -36,6 +36,11 @@ export interface FlagResolver {
   enabled(key: string, ctx: { accountId?: string }): Promise<boolean>;
 }
 
+/** Resolves the lot methodology to compute an account under (owner's saved choice). */
+export interface MethodologyResolver {
+  forAccount(accountId: string): Promise<LotMethodology>;
+}
+
 export interface UcbShadowServiceDeps {
   opsRepo: Pick<UcbOpsRepository, "loadComputeWalletsForAccount">;
   shadowRepo: Pick<UcbShadowRepository, "insertResult">;
@@ -47,6 +52,12 @@ export interface UcbShadowServiceDeps {
   nonLpOpenerSource?: NonLpOpenerSourceLike;
   /** B3-full: non-Krystal V3 enrichment source. Absent → no-op. */
   v3EnrichmentSource?: V3EnrichmentSourceLike;
+  /**
+   * Per-account methodology (the owner's saved FIFO/LIFO/WAC/HIFO). When present
+   * it wins over `lotMethodology` so the server matches each user's UI. Absent →
+   * the fixed `lotMethodology` (or FIFO).
+   */
+  methodologyResolver?: MethodologyResolver;
   lotMethodology?: LotMethodology;
 }
 
@@ -84,7 +95,9 @@ export class UcbShadowService {
     });
     if (!on) return { skipped: true };
 
-    const lotMethodology: LotMethodology = this.deps.lotMethodology ?? "FIFO";
+    const lotMethodology: LotMethodology = this.deps.methodologyResolver
+      ? await this.deps.methodologyResolver.forAccount(accountId)
+      : this.deps.lotMethodology ?? "FIFO";
     try {
       const loaded =
         await this.deps.opsRepo.loadComputeWalletsForAccount(accountId);

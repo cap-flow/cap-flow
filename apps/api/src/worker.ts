@@ -91,6 +91,7 @@ import {
 import { NonLpOpenerSource } from "./modules/ucb/non-lp-opener.source.js";
 import { V3EnrichmentSource } from "./modules/ucb/v3-enrichment.source.js";
 import { fetchHistoricalPrices } from "./modules/classifier/defillama_prices.js";
+import { LotMethodologyRepository } from "./modules/preferences/lot-methodology.repository.js";
 
 const REFRESH_EVERY_MS = 60 * 60 * 1000; // 1 hour
 /** `@cap-flow/ucb` engine version stamp for shadow rows (B5). */
@@ -207,6 +208,16 @@ async function main(): Promise<void> {
     alchemyKey: env.ALCHEMY_API_KEY,
     fetchHistoricalPrices,
   });
+  // Per-account methodology = the account owner's saved FIFO/LIFO/WAC/HIFO choice
+  // (users.lot_methodology, default FIFO) so the shadow compute matches the user's UI.
+  const ucbLotMethodologyRepo = new LotMethodologyRepository(dbClient.db);
+  const ucbMethodologyResolver = {
+    forAccount: async (accountId: string) => {
+      const account = await accountsRepo.findById(accountId);
+      if (!account) return "FIFO" as const;
+      return (await ucbLotMethodologyRepo.get(account.ownerId)) ?? "FIFO";
+    },
+  };
   const ucbShadowService = new UcbShadowService({
     opsRepo: new UcbOpsRepository(dbClient.db),
     shadowRepo: new UcbShadowRepository(dbClient.db),
@@ -215,6 +226,7 @@ async function main(): Promise<void> {
     engineVersion: UCB_ENGINE_VERSION,
     nonLpOpenerSource: ucbNonLpOpenerSource,
     v3EnrichmentSource: ucbV3EnrichmentSource,
+    methodologyResolver: ucbMethodologyResolver,
   });
   // Bind the DeBank client to the adapter's RAW input shape (same JSON, cast at
   // the boundary — mirrors the evmHistoryFetcher cast above).

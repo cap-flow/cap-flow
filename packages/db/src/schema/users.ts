@@ -72,6 +72,12 @@ export const users = pgTable(
       .notNull()
       .default([]),
     billingMeta: jsonb("billing_meta"),
+    /**
+     * UCB lot-consumption methodology (FIFO/LIFO/WAC/HIFO) chosen by the user in
+     * the UI. NULL = use the FIFO default. Persisted server-side so the server
+     * shadow compute follows the user's choice (matches what their UI shows).
+     */
+    lotMethodology: text("lot_methodology"),
 
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

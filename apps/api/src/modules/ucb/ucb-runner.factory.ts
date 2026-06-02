@@ -34,7 +34,11 @@ import { OpPricingService } from "./op-pricing.service.js";
 import { OpPricingRepository } from "./op-pricing.repository.js";
 import { UcbOpsRepository } from "./ucb-ops.repository.js";
 import { UcbShadowRepository } from "./ucb-shadow.repository.js";
-import { UcbShadowService, type FlagResolver } from "./ucb-shadow.service.js";
+import {
+  UcbShadowService,
+  type FlagResolver,
+  type MethodologyResolver,
+} from "./ucb-shadow.service.js";
 import {
   UcbShadowRunner,
   type CexCostBasisSource,
@@ -65,7 +69,10 @@ export interface UcbRunnerStackDeps {
   /** Flag gate. Worker passes the real feature-flags service; debug/test pass always-on. */
   flags: FlagResolver;
   engineVersion: string;
+  /** Fixed methodology (debug/test). Ignored when methodologyResolver is set. */
   lotMethodology?: LotMethodology;
+  /** Per-account methodology (worker): owner's saved choice. Wins over lotMethodology. */
+  methodologyResolver?: MethodologyResolver;
 }
 
 export interface UcbRunnerStack {
@@ -98,6 +105,7 @@ export function buildUcbRunnerStack(deps: UcbRunnerStackDeps): UcbRunnerStack {
     flags,
     engineVersion: deps.engineVersion,
     ...(deps.lotMethodology !== undefined && { lotMethodology: deps.lotMethodology }),
+    ...(deps.methodologyResolver !== undefined && { methodologyResolver: deps.methodologyResolver }),
     nonLpOpenerSource: new NonLpOpenerSource({
       etherscan: new EtherscanClient(upstreamProxy),
       alchemy: new AlchemyTransfersClient(upstreamProxy),

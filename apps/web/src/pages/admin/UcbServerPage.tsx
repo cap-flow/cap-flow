@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useUcbCompute } from "@/features/admin/ucb-server/hooks";
 import type { Methodology, UcbPosition } from "@/features/admin/ucb-server/api";
+import { useAdminPortfolios } from "@/features/admin/portfolios/hooks";
 
 import { PageHeader } from "./_PageHeader";
 
@@ -64,9 +65,15 @@ export function AdminUcbServerPage(): JSX.Element {
   const [account, setAccount] = useState("");
   const [methodology, setMethodology] = useState<Methodology>("FIFO");
   const compute = useUcbCompute();
+  const accounts = useAdminPortfolios();
+
+  // Sort by owner email for a scannable dropdown.
+  const options = (accounts.data ?? [])
+    .slice()
+    .sort((a, b) => (a.ownerEmail ?? "").localeCompare(b.ownerEmail ?? ""));
 
   const run = () => {
-    if (account.trim()) compute.mutate({ account: account.trim(), methodology });
+    if (account) compute.mutate({ account, methodology });
   };
 
   return (
@@ -78,14 +85,22 @@ export function AdminUcbServerPage(): JSX.Element {
 
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
-          <label className="text-xs text-muted-foreground">Account ID или email</label>
-          <input
+          <label className="text-xs text-muted-foreground">Аккаунт</label>
+          <select
             value={account}
             onChange={(e) => setAccount(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && run()}
-            placeholder="bob@example.com  или  d96e847e-…"
-            className="w-80 rounded-md border border-border bg-background px-3 py-1.5 text-sm"
-          />
+            disabled={accounts.isLoading}
+            className="w-96 rounded-md border border-border bg-background px-3 py-1.5 text-sm"
+          >
+            <option value="">
+              {accounts.isLoading ? "Загрузка аккаунтов…" : "— выберите аккаунт —"}
+            </option>
+            {options.map((a) => (
+              <option key={a.accountId} value={a.accountId}>
+                {(a.ownerEmail ?? a.ownerName ?? "—") + " · " + a.accountName + " · " + a.accountId.slice(0, 8)}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-xs text-muted-foreground">Методология</label>
@@ -101,14 +116,14 @@ export function AdminUcbServerPage(): JSX.Element {
             ))}
           </select>
         </div>
-        <Button onClick={run} disabled={compute.isPending || !account.trim()}>
+        <Button onClick={run} disabled={compute.isPending || !account}>
           {compute.isPending ? "Считаю… (live-фетч, до ~1–2 мин)" : "Рассчитать"}
         </Button>
       </div>
 
       <p className="mb-4 text-xs text-muted-foreground">
-        Методология должна совпадать с выбранной у юзера в UI (дефолт FIFO). На лету идут live-фетчи DeBank /
-        Etherscan / Alchemy — это медленно.
+        Методология должна совпадать с выбранной у юзера (дефолт FIFO; после персиста сервер берёт её сам). На
+        лету идут live-фетчи DeBank / Etherscan / Alchemy — это медленно.
       </p>
 
       {compute.isError && (

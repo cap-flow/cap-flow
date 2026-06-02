@@ -108,4 +108,25 @@ describe("UcbShadowService.runForAccount", () => {
     });
     expect(r.error).toBe("compute boom");
   });
+
+  it("methodologyResolver wins over the fixed lotMethodology", async () => {
+    const forAccount = vi.fn(async () => "LIFO" as const);
+    const { deps, insertResult } = makeDeps({
+      lotMethodology: "WAC",
+      methodologyResolver: { forAccount },
+    });
+    await new UcbShadowService(deps).runForAccount("acc-9", { trigger: "refresh" });
+    expect(forAccount).toHaveBeenCalledWith("acc-9");
+    expect(insertResult).toHaveBeenCalledWith(
+      expect.objectContaining({ lotMethodology: "LIFO" }),
+    );
+  });
+
+  it("no resolver → uses the fixed lotMethodology", async () => {
+    const { deps, insertResult } = makeDeps({ lotMethodology: "WAC" });
+    await new UcbShadowService(deps).runForAccount("acc", { trigger: "refresh" });
+    expect(insertResult).toHaveBeenCalledWith(
+      expect.objectContaining({ lotMethodology: "WAC" }),
+    );
+  });
 });

@@ -130,6 +130,7 @@ class FakeRepo implements ITelegramSignupRepository {
       activeAccountId: null,
       trackedTickers: [],
       billingMeta: null,
+      lotMethodology: null,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
