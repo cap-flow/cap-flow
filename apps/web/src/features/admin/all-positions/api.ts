@@ -18,6 +18,8 @@ export const allPositionItemSchema = z.object({
   /** Full OpenPosition object (rendered via the shared getColumnCell). */
   position: z.record(z.unknown()),
   anomalies: z.array(allPositionAnomalySchema),
+  /** 'golden' = эталон (verified), 'wrong' = требует фикс, null = unmarked. */
+  goldenKind: z.enum(["golden", "wrong"]).nullable().default(null),
 });
 export type AllPositionItem = z.infer<typeof allPositionItemSchema>;
 

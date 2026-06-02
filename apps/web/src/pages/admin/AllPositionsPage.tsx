@@ -113,6 +113,7 @@ export function AdminAllPositionsPage(): JSX.Element {
   const [wallet, setWallet] = useState("");
   const [search, setSearch] = useState("");
   const [onlyAnomalies, setOnlyAnomalies] = useState(false);
+  const [goldenFilter, setGoldenFilter] = useState<"all" | "golden" | "wrong">("all");
   // Per-column sort/filter (same mechanism as the user-facing table).
   const [sortCol, setSortCol] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
@@ -151,6 +152,8 @@ export function AdminAllPositionsPage(): JSX.Element {
       const p = it.position as unknown as OpenPosition;
       if (wallet && p.walletId !== wallet) return false;
       if (onlyAnomalies && it.anomalies.length === 0) return false;
+      if (goldenFilter === "golden" && it.goldenKind !== "golden") return false;
+      if (goldenFilter === "wrong" && it.goldenKind !== "wrong") return false;
       if (!s) return true;
       return (
         (it.ownerEmail ?? "").toLowerCase().includes(s) ||
@@ -159,7 +162,7 @@ export function AdminAllPositionsPage(): JSX.Element {
         (p.chain ?? "").toLowerCase().includes(s)
       );
     });
-  }, [items, account, wallet, search, onlyAnomalies]);
+  }, [items, account, wallet, search, onlyAnomalies, goldenFilter]);
 
   const basePositions = useMemo(() => baseItems.map((it) => it.position as unknown as OpenPosition), [baseItems]);
   const posToItem = useMemo(() => {
@@ -180,6 +183,8 @@ export function AdminAllPositionsPage(): JSX.Element {
   );
 
   const anomalyCount = items.filter((it) => it.anomalies.length > 0).length;
+  const goldenCount = items.filter((it) => it.goldenKind === "golden").length;
+  const wrongCount = items.filter((it) => it.goldenKind === "wrong").length;
 
   return (
     <div>
@@ -248,8 +253,18 @@ export function AdminAllPositionsPage(): JSX.Element {
           <input type="checkbox" checked={onlyAnomalies} onChange={(e) => setOnlyAnomalies(e.target.checked)} />
           только с аномалиями
         </label>
+        <select
+          value={goldenFilter}
+          onChange={(e) => setGoldenFilter(e.target.value as "all" | "golden" | "wrong")}
+          className="rounded-md border border-border bg-background px-3 py-1.5 text-sm"
+          title="Фильтр по статусу эталона"
+        >
+          <option value="all">— все типы —</option>
+          <option value="golden">★ эталонные ({goldenCount})</option>
+          <option value="wrong">⚑ требует фикс ({wrongCount})</option>
+        </select>
         <span className="text-muted-foreground">
-          {q.data ? `${q.data.accounts} акк. посчитано · ${view.length}/${items.length} позиций · аномалий: ${anomalyCount}` : ""}
+          {q.data ? `${q.data.accounts} акк. посчитано · ${view.length}/${items.length} позиций · аномалий: ${anomalyCount} · эталонов: ${goldenCount} · фикс: ${wrongCount}` : ""}
         </span>
       </div>
 
@@ -321,16 +336,36 @@ export function AdminAllPositionsPage(): JSX.Element {
             <tbody>
               {view.map((p, i) => {
                 const it = posToItem.get(p);
+                const gk = it?.goldenKind ?? null;
+                // Green tint = эталон (verified); amber tint = требует фикс.
+                const rowTint =
+                  gk === "golden"
+                    ? "bg-success/10 hover:bg-success/20"
+                    : gk === "wrong"
+                      ? "bg-amber-500/10 hover:bg-amber-500/20"
+                      : "hover:bg-muted/30";
                 return (
-                  <tr key={`${it?.accountId ?? ""}|${p.id}|${i}`} className="border-t border-border/60 hover:bg-muted/30">
+                  <tr key={`${it?.accountId ?? ""}|${p.id}|${i}`} className={`border-t border-border/60 ${rowTint}`}>
                     <td className="px-2 py-1.5 text-center">
                       <button
                         type="button"
                         onClick={() => setMarkTarget(p)}
-                        title="Пометить эталонной / неверной"
-                        className="text-muted-foreground hover:text-amber-500"
+                        title={
+                          gk === "golden"
+                            ? "Эталон — нажмите, чтобы изменить"
+                            : gk === "wrong"
+                              ? "Помечена «требует фикс» — нажмите, чтобы изменить"
+                              : "Пометить эталонной / неверной"
+                        }
+                        className={
+                          gk === "golden"
+                            ? "text-success"
+                            : gk === "wrong"
+                              ? "text-amber-500"
+                              : "text-muted-foreground hover:text-amber-500"
+                        }
                       >
-                        ★
+                        {gk === "wrong" ? "⚑" : "★"}
                       </button>
                     </td>
                     <td className="px-2 py-1.5 text-left font-mono text-[11px]">{p.id}</td>

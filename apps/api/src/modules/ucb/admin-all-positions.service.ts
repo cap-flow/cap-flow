@@ -8,6 +8,7 @@
  */
 import { type Database, schema } from "@cap-flow/db";
 import { eq, sql } from "drizzle-orm";
+import { positionKey } from "@cap-flow/ucb/identity";
 
 export interface AllPositionAnomaly {
   checkId: string;
@@ -24,6 +25,8 @@ export interface AllPositionItem {
   /** Full OpenPosition object (the same shape the client renders). */
   position: unknown;
   anomalies: AllPositionAnomaly[];
+  /** 'golden' = marked correct (эталон), 'wrong' = marked needs-fix, null = unmarked. */
+  goldenKind: "golden" | "wrong" | null;
 }
 
 export class AdminAllPositionsService {
@@ -69,6 +72,19 @@ export class AdminAllPositionsService {
       flagsByKey.set(key, arr);
     }
 
+    // Golden overlay: active golden_cases keyed by positionKey → kind.
+    const goldens = await this.db
+      .select({
+        positionKey: schema.goldenCases.positionKey,
+        kind: schema.goldenCases.kind,
+      })
+      .from(schema.goldenCases)
+      .where(eq(schema.goldenCases.status, "active"));
+    const goldenByKey = new Map<string, "golden" | "wrong">();
+    for (const g of goldens) {
+      if (g.positionKey) goldenByKey.set(g.positionKey, g.kind as "golden" | "wrong");
+    }
+
     let latestComputed: string | null = null;
     const items: AllPositionItem[] = [];
     /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -78,6 +94,12 @@ export class AdminAllPositionsService {
       const positions = Array.isArray(acc.positions) ? acc.positions : [];
       for (const p of positions as any[]) {
         const pid = String(p.id ?? "");
+        let gKind: "golden" | "wrong" | null = null;
+        try {
+          gKind = goldenByKey.get(positionKey(p)) ?? null;
+        } catch {
+          gKind = null;
+        }
         items.push({
           accountId: acc.account_id,
           ownerEmail: acc.owner_email,
@@ -86,6 +108,7 @@ export class AdminAllPositionsService {
           computedAt,
           position: p,
           anomalies: flagsByKey.get(`${acc.account_id}|${pid}`) ?? [],
+          goldenKind: gKind,
         });
       }
     }
