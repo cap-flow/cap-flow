@@ -3,12 +3,23 @@ import { describe, expect, it } from "vitest";
 import {
   shouldAdoptServerPositions,
   walletSetsEqual,
+  serverPositionsValid,
   type ServePositionsResponse,
 } from "./serve-decision";
 
 // Client positions carry composite ids `api:<uuid>:<addr>`; realWalletId → uuid.
 const cPos = (uuid: string) => ({ walletId: `api:${uuid}:0xabc` });
-const sPos = (uuid: string) => ({ walletId: uuid });
+
+// A plausible server OpenPosition (core fields the validator + UI require).
+const sPos = (uuid: string) => ({
+  id: `POS-${uuid}`,
+  walletId: uuid,
+  chain: "arb",
+  protocol: { id: "arb_fluid", name: "Fluid" },
+  startUsd: 100,
+  currentUsd: 120,
+  supplyTokens: [],
+});
 
 const resp = (o: Partial<ServePositionsResponse> = {}): ServePositionsResponse => ({
   serve: true,
@@ -16,6 +27,21 @@ const resp = (o: Partial<ServePositionsResponse> = {}): ServePositionsResponse =
   positions: [sPos("w1")],
   lotMethodology: "LIFO",
   ...o,
+});
+
+describe("serverPositionsValid", () => {
+  it("accepts well-formed positions", () => {
+    expect(serverPositionsValid([sPos("w1"), sPos("w2")])).toBe(true);
+  });
+  it("rejects empty array", () => {
+    expect(serverPositionsValid([])).toBe(false);
+  });
+  it("rejects malformed/partial items (missing core fields)", () => {
+    expect(serverPositionsValid([{ walletId: "w1" }])).toBe(false);
+    expect(serverPositionsValid([sPos("w1"), { walletId: "w2" }])).toBe(false);
+    expect(serverPositionsValid([{ ...sPos("w1"), startUsd: "100" }])).toBe(false);
+    expect(serverPositionsValid([{ ...sPos("w1"), protocol: null }])).toBe(false);
+  });
 });
 
 describe("walletSetsEqual", () => {
@@ -44,6 +70,9 @@ describe("shouldAdoptServerPositions", () => {
   });
   it("methodology mismatch → fall back (FIFO shadow vs LIFO user)", () => {
     expect(shouldAdoptServerPositions({ ...base, flagEnabled: true, resp: resp({ lotMethodology: "FIFO" }) })).toBe(false);
+  });
+  it("malformed server positions → fall back (cast guard)", () => {
+    expect(shouldAdoptServerPositions({ ...base, flagEnabled: true, resp: resp({ positions: [{ walletId: "w1" }] }) })).toBe(false);
   });
   it("wallet-set mismatch → fall back", () => {
     expect(

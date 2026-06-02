@@ -27,7 +27,10 @@ export function useServerCanonicalQuery(): {
 
   const query = useQuery({
     queryKey: ["ucb-server-positions", accountId],
-    queryFn: ({ signal }) => ucbApi.getServerPositions(accountId!, signal),
+    queryFn: ({ signal }) => {
+      if (!accountId) throw new Error("ucb positions: no active account");
+      return ucbApi.getServerPositions(accountId, signal);
+    },
     enabled: flagEnabled && !!accountId,
     staleTime: 30_000,
   });

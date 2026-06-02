@@ -558,9 +558,16 @@ export function useComputedPositions(): ComputedPositions {
   ]);
 
   // B6 slice 2: adopt server-canonical positions when the flag is ON and every
-  // guard passes (server fresh+serve, methodology-match, wallet-set match);
-  // otherwise keep the client recompute as the PERMANENT fallback (R16). The
-  // public `positions` shape is unchanged → zero downstream page churn.
+  // guard passes (server fresh+serve, methodology-match, wallet-set match, and a
+  // runtime shape check guarding the cast); otherwise keep the client recompute
+  // as the PERMANENT fallback (R16). The public `positions` shape is unchanged →
+  // zero downstream page churn.
+  // ⚠ FIDELITY: the server pipeline (ucb.service.ts) does NOT yet apply every
+  // override this client chain does — slot0 V3 cost basis, V3 claimed-fees split,
+  // dust/phantom filters and the non-LP opener are B3-full/B4 (deferred). So
+  // adopted positions can lack those fields until those stages land. This is
+  // safe because the FLIP (enabling the flag) is gated on the shadow-diff showing
+  // parity on those fields first (M5) — adoption code does not re-detect it.
   const positions = useMemo<OpenPosition[]>(() => {
     if (
       shouldAdoptServerPositions({

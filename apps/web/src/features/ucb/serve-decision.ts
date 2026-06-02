@@ -35,6 +35,37 @@ function walletIdOf(p: unknown): string | null {
 }
 
 /**
+ * Defensive runtime check that a wire item has the CORE OpenPosition fields
+ * every page reads (the GET response types positions as `unknown[]`). Guards the
+ * `as OpenPosition[]` cast at the adoption site: if the server returns malformed
+ * or partial data, we refuse to adopt and fall back to the client recompute.
+ * NB: per-position-type fields (matchedV3TokenId, v3Details, …) are intentionally
+ * NOT required here — those are validated by the shadow-diff parity gate before
+ * the flip, not at adoption time.
+ */
+function isPlausiblePosition(p: unknown): boolean {
+  if (typeof p !== "object" || p === null) return false;
+  const o = p as Record<string, unknown>;
+  const proto = o["protocol"] as Record<string, unknown> | undefined;
+  return (
+    typeof o["id"] === "string" &&
+    typeof o["walletId"] === "string" &&
+    typeof o["chain"] === "string" &&
+    typeof o["startUsd"] === "number" &&
+    typeof o["currentUsd"] === "number" &&
+    typeof proto === "object" &&
+    proto !== null &&
+    typeof proto["id"] === "string" &&
+    Array.isArray(o["supplyTokens"])
+  );
+}
+
+/** Every served position must look like a real OpenPosition before we trust it. */
+export function serverPositionsValid(positions: readonly unknown[]): boolean {
+  return positions.length > 0 && positions.every(isPlausiblePosition);
+}
+
+/**
  * True when both pipelines reference the SAME set of wallets. Client position
  * walletIds are composite (`api:<uuid>:<addr>`) → reduce via realWalletId; server
  * walletIds are already the raw uuid.
@@ -68,5 +99,7 @@ export function shouldAdoptServerPositions(args: AdoptDecisionArgs): boolean {
   if (!flagEnabled) return false;
   if (!resp || !resp.serve || !resp.positions) return false;
   if (resp.lotMethodology !== clientLotMethodology) return false;
+  // Validate the wire payload before the `as OpenPosition[]` cast at the call site.
+  if (!serverPositionsValid(resp.positions)) return false;
   return walletSetsEqual(clientPositions, resp.positions);
 }
