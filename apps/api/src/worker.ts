@@ -148,6 +148,8 @@ async function main(): Promise<void> {
     // Kill-switch: при включённом флаге воркер не рефрешит не-админов
     // (закрывает серверный путь трат DeBank, мимо upstream-proxy).
     featureFlags: featureFlagsService,
+    // Троттл частоты cron-обновления (knob portfolio.refreshMinIntervalMin).
+    portfolio: portfolioRepo,
     logger,
   });
   const refreshQueue = new PortfolioRefreshQueue(bullConn);

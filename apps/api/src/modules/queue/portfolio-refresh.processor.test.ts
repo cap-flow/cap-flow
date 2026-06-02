@@ -144,6 +144,62 @@ describe("PortfolioRefreshProcessor — inactivity gate", () => {
   });
 });
 
+function makePortfolio(lastCreatedAt: Date | null) {
+  return {
+    latestSnapshot: vi
+      .fn()
+      .mockResolvedValue(lastCreatedAt ? { createdAt: lastCreatedAt } : null),
+  };
+}
+
+describe("PortfolioRefreshProcessor — троттл частоты (refreshMinIntervalMin)", () => {
+  const MIN = 60 * 1000;
+  it("cron + обновляли 10 мин назад при интервале 60 → ПРОПУСК", async () => {
+    const { service, refresh } = makeService();
+    const proc = new PortfolioRefreshProcessor(service, {
+      appSettings: makeSettings(60),
+      accounts: makeAccounts(userOwner(new Date())),
+      portfolio: makePortfolio(new Date(Date.now() - 10 * MIN)),
+    });
+    const res = await proc.process(makeJob("cron"));
+    expect(res).toEqual({ skipped: true, reason: "too_recent" });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("cron + обновляли 70 мин назад при интервале 60 → рефрешим", async () => {
+    const { service, refresh } = makeService();
+    const proc = new PortfolioRefreshProcessor(service, {
+      appSettings: makeSettings(60),
+      accounts: makeAccounts(userOwner(new Date())),
+      portfolio: makePortfolio(new Date(Date.now() - 70 * MIN)),
+    });
+    await proc.process(makeJob("cron"));
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("cron + ни разу не обновляли (нет снапшота) → рефрешим", async () => {
+    const { service, refresh } = makeService();
+    const proc = new PortfolioRefreshProcessor(service, {
+      appSettings: makeSettings(60),
+      accounts: makeAccounts(userOwner(new Date())),
+      portfolio: makePortfolio(null),
+    });
+    await proc.process(makeJob("cron"));
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("manual + обновляли только что → ВСЁ РАВНО рефрешим (троттл только для cron)", async () => {
+    const { service, refresh } = makeService();
+    const proc = new PortfolioRefreshProcessor(service, {
+      appSettings: makeSettings(60),
+      accounts: makeAccounts(userOwner(new Date())),
+      portfolio: makePortfolio(new Date()),
+    });
+    await proc.process(makeJob("user"));
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+});
+
 describe("PortfolioRefreshProcessor — без зависимостей", () => {
   it("legacy-конструктор → гейтов нет, рефрешим", async () => {
     const { service, refresh } = makeService();

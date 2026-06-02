@@ -27,6 +27,11 @@ export interface FlagResolver {
   ): Promise<boolean>;
 }
 
+/** Минимальный доступ к времени последнего снапшота (для троттла частоты). */
+export interface LatestSnapshotReader {
+  latestSnapshot(accountId: string): Promise<{ createdAt: Date } | null>;
+}
+
 export interface PortfolioRefreshProcessorDeps {
   /** Live-настройки (для knob `portfolio.refreshSkipInactiveDays`). */
   readonly appSettings?: AppSettingsService;
@@ -34,6 +39,8 @@ export interface PortfolioRefreshProcessorDeps {
   readonly accounts?: IAccountsRepository;
   /** Резолвер feature-flags (kill-switch внешних API для не-админов). */
   readonly featureFlags?: FlagResolver;
+  /** Доступ к последнему снапшоту (троттл частоты обновления). */
+  readonly portfolio?: LatestSnapshotReader;
   /** Опциональный логгер (skip-события). */
   readonly logger?: { info: (obj: unknown, msg: string) => void };
 }
@@ -55,6 +62,7 @@ export class PortfolioRefreshProcessor {
   private readonly appSettings: AppSettingsService | undefined;
   private readonly accounts: IAccountsRepository | undefined;
   private readonly featureFlags: FlagResolver | undefined;
+  private readonly portfolio: LatestSnapshotReader | undefined;
   private readonly logger: PortfolioRefreshProcessorDeps["logger"] | undefined;
 
   constructor(
@@ -64,6 +72,7 @@ export class PortfolioRefreshProcessor {
     this.appSettings = deps.appSettings;
     this.accounts = deps.accounts;
     this.featureFlags = deps.featureFlags;
+    this.portfolio = deps.portfolio;
     this.logger = deps.logger;
   }
 
@@ -97,6 +106,15 @@ export class PortfolioRefreshProcessor {
         );
         return { skipped: true, reason: "owner_inactive" };
       }
+
+      // 3. Троттл частоты: обновляли недавно (< N мин) → пропуск.
+      if (await this.refreshedTooRecently(data.accountId)) {
+        this.logger?.info(
+          { accountId: data.accountId },
+          "[worker] refresh skipped — too recent (min interval)",
+        );
+        return { skipped: true, reason: "too_recent" };
+      }
     }
 
     return this.service.refreshAccount({
@@ -121,6 +139,35 @@ export class PortfolioRefreshProcessor {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * true, если аккаунт обновляли менее `portfolio.refreshMinIntervalMin` минут
+   * назад — троттлим частоту серверного cron. Дефолт 60 (раз в час). BullMQ всё
+   * равно тикает ~ежечасно; этот гейт пропускает «лишние» тики, оставляя
+   * фактический интервал ≥ N мин. Консервативно: нет зависимостей / нет
+   * прошлого снапшота / ошибка / N≤0 → НЕ пропускаем (рефрешим).
+   */
+  private async refreshedTooRecently(accountId: string): Promise<boolean> {
+    if (!this.appSettings || !this.portfolio) return false;
+    let minMin: number;
+    try {
+      minMin = this.appSettings.getSnapshotSync<number>(
+        "portfolio.refreshMinIntervalMin",
+      );
+    } catch {
+      return false;
+    }
+    if (!Number.isFinite(minMin) || minMin <= 0) return false;
+    let last: { createdAt: Date } | null;
+    try {
+      last = await this.portfolio.latestSnapshot(accountId);
+    } catch {
+      return false;
+    }
+    if (!last) return false; // ни разу не обновляли → рефрешим
+    const ageMs = Date.now() - last.createdAt.getTime();
+    return ageMs < minMin * 60_000;
   }
 
   /**
