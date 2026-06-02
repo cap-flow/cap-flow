@@ -18,6 +18,11 @@
 
 import { apiFetch } from "../api/client";
 
+// AlchemyTransfer shape moved to @cap-flow/ucb (B4 slice 2b) so the pure
+// resolver + the fetch share one type; re-exported for existing import sites.
+import type { AlchemyTransfer } from "@cap-flow/ucb/non_lp_opener_resolve";
+export type { AlchemyTransfer };
+
 /** chainCode → Alchemy subdomain (как в upstream-proxy ALCHEMY_CHAINS). */
 const CHAIN_TO_SUBDOMAIN: Record<string, string> = {
   eth: "eth-mainnet",
@@ -28,18 +33,6 @@ const CHAIN_TO_SUBDOMAIN: Record<string, string> = {
   bsc: "bnb-mainnet",
   avax: "avax-mainnet",
 };
-
-export interface AlchemyTransfer {
-  blockNumber: number;
-  hash: string;
-  from: string; // lowercase
-  to: string; // lowercase
-  contractAddress: string; // lowercase
-  /** Human-units amount (rawContract.value decoded). 0 если нет. */
-  amount: number;
-  /** Token symbol (asset field). */
-  symbol: string;
-}
 
 async function alchemyRpc(
   chainCode: string,
