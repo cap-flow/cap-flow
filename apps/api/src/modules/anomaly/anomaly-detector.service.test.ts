@@ -78,6 +78,33 @@ describe("AnomalyDetectorService.scanAccount", () => {
     expect(upsertMany).not.toHaveBeenCalled();
   });
 
+  it("scanAll sweeps active accounts, fail-soft, aggregates by severity", async () => {
+    let n = 0;
+    const { deps } = makeDeps({
+      accounts: { findAllActive: async () => [{ id: "a1" }, { id: "a2" }, { id: "a3" }] },
+      // a2 has no shadow (skipped); a3 throws (failed); a1 trips a drift error.
+      shadowRepo: {
+        findLatestForAccount: async (id) => {
+          n++;
+          if (id === "a2") return null;
+          if (id === "a3") throw new Error("boom");
+          return { positions: [canonicalPos] };
+        },
+      },
+    });
+    const r = await new AnomalyDetectorService(deps).scanAll();
+    expect(r.accounts).toBe(3);
+    expect(r.scanned).toBe(1);
+    expect(r.skipped).toBe(1);
+    expect(r.failed).toBe(1);
+    expect(r.bySeverity.error).toBeGreaterThanOrEqual(1);
+  });
+
+  it("scanAll without the accounts dep throws", async () => {
+    const { deps } = makeDeps();
+    await expect(new AnomalyDetectorService(deps).scanAll()).rejects.toThrow(/accounts dep/);
+  });
+
   it("canonical matches golden within tolerance → no drift finding", async () => {
     const { deps, upsertMany } = makeDeps({
       shadowRepo: {

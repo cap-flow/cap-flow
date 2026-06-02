@@ -38,6 +38,11 @@ export interface RawGoldenCase {
   tolerancePct: string;
 }
 
+/** Active accounts to sweep (structural: AccountsRepository.findAllActive). */
+export interface AccountLister {
+  findAllActive(): Promise<readonly { id: string }[]>;
+}
+
 export interface AnomalyDetectorDeps {
   shadowRepo: ShadowResultSource;
   goldenRepo: GoldenCaseSource;
@@ -45,6 +50,18 @@ export interface AnomalyDetectorDeps {
   /** Wallet ids of an account (to scope golden_cases). */
   walletIdsForAccount(accountId: string): Promise<string[]>;
   detectorVersion: string;
+  /** Required for scanAll (the recurring sweep); optional for single-account scans. */
+  accounts?: AccountLister;
+}
+
+export interface SweepResult {
+  accounts: number;
+  scanned: number;
+  skipped: number;
+  failed: number;
+  findings: number;
+  resolved: number;
+  bySeverity: Record<string, number>;
 }
 
 export interface ScanResult {
@@ -123,5 +140,42 @@ export class AnomalyDetectorService {
       resolved,
       bySeverity,
     };
+  }
+
+  /**
+   * Sweep every active account (recurring detector job). Sequential, fail-soft
+   * per account so one bad account never aborts the sweep; honors an AbortSignal.
+   */
+  async scanAll(signal?: AbortSignal): Promise<SweepResult> {
+    if (!this.deps.accounts) throw new Error("scanAll requires the accounts dep");
+    const accounts = await this.deps.accounts.findAllActive();
+    const agg: SweepResult = {
+      accounts: accounts.length,
+      scanned: 0,
+      skipped: 0,
+      failed: 0,
+      findings: 0,
+      resolved: 0,
+      bySeverity: {},
+    };
+    for (const acc of accounts) {
+      if (signal?.aborted) break;
+      try {
+        const r = await this.scanAccount(acc.id);
+        if (r.skipped) {
+          agg.skipped++;
+          continue;
+        }
+        agg.scanned++;
+        agg.findings += r.findings ?? 0;
+        agg.resolved += r.resolved ?? 0;
+        for (const [sev, n] of Object.entries(r.bySeverity ?? {})) {
+          agg.bySeverity[sev] = (agg.bySeverity[sev] ?? 0) + n;
+        }
+      } catch {
+        agg.failed++;
+      }
+    }
+    return agg;
   }
 }

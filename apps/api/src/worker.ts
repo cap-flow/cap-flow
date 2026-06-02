@@ -92,6 +92,14 @@ import { NonLpOpenerSource } from "./modules/ucb/non-lp-opener.source.js";
 import { V3EnrichmentSource } from "./modules/ucb/v3-enrichment.source.js";
 import { fetchHistoricalPrices } from "./modules/classifier/defillama_prices.js";
 import { LotMethodologyRepository } from "./modules/preferences/lot-methodology.repository.js";
+import { AnomalyDetectorService } from "./modules/anomaly/anomaly-detector.service.js";
+import { AnomalyFlagsRepository } from "./modules/anomaly/anomaly-flags.repository.js";
+import { GoldenRepository } from "./modules/golden/golden.repository.js";
+import {
+  AnomalyDetectQueue,
+  ANOMALY_DETECT_QUEUE,
+  type AnomalyDetectJobData,
+} from "./modules/queue/anomaly-detect.queue.js";
 
 const REFRESH_EVERY_MS = 60 * 60 * 1000; // 1 hour
 /** `@cap-flow/ucb` engine version stamp for shadow rows (B5). */
@@ -100,6 +108,8 @@ const JITTER_MS = 60 * 60 * 1000;
 const PAYMENT_SCAN_EVERY_MS = 5 * 60 * 1000; // 5 minutes
 /** UCB B1: op-pricing cache-fill sweep cadence (deterministic block prices). */
 const OP_PRICING_FILL_EVERY_MS = 30 * 60 * 1000; // 30 minutes
+/** Epic C: anomaly detector sweep cadence (canonical vs golden + invariants). */
+const ANOMALY_DETECT_EVERY_MS = 60 * 60 * 1000; // 1 hour
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -336,6 +346,21 @@ async function main(): Promise<void> {
   });
   const opPricingFillQueue = new OpPricingFillQueue(bullConn);
 
+  // ─── Epic C anomaly detector sweep (canonical vs golden + invariants) ──
+  // Reads already-persisted ucb_shadow_results + golden_cases (no external API),
+  // writes anomaly_flags (upsert + auto-resolve). One global job, fail-soft per
+  // account. golden_case_drift turns the curated anchors into a regression gate.
+  const anomalyDetectorService = new AnomalyDetectorService({
+    shadowRepo: new UcbShadowRepository(dbClient.db),
+    goldenRepo: new GoldenRepository(dbClient.db),
+    flagsRepo: new AnomalyFlagsRepository(dbClient.db),
+    walletIdsForAccount: async (accountId) =>
+      (await walletsRepo.listByAccount(accountId)).map((w) => w.id),
+    detectorVersion: "detector@dev",
+    accounts: accountsRepo,
+  });
+  const anomalyDetectQueue = new AnomalyDetectQueue(bullConn);
+
   // ─── refresh worker ───────────────────────────────────────────────
   const refreshWorker = new Worker<PortfolioRefreshJobData>(
     PORTFOLIO_REFRESH_QUEUE,
@@ -422,6 +447,23 @@ async function main(): Promise<void> {
     );
   });
 
+  const anomalyDetectAbort = new AbortController();
+  const anomalyDetectWorker = new Worker<AnomalyDetectJobData>(
+    ANOMALY_DETECT_QUEUE,
+    async (job) => {
+      const result = await anomalyDetectorService.scanAll(anomalyDetectAbort.signal);
+      logger.info(
+        { jobId: job.id, trigger: job.data.trigger, ...result },
+        "[worker] anomaly detector sweep"
+      );
+      return result;
+    },
+    { connection: bullConn, concurrency: 1 }
+  );
+  anomalyDetectWorker.on("failed", (job, err) => {
+    logger.error({ jobId: job?.id, err: err.message }, "[worker] anomaly detector sweep failed");
+  });
+
   // ─── bootstrap recurring schedules ────────────────────────────────
   const activeAccounts = await accountsRepo.findAllActive();
   for (const acc of activeAccounts) {
@@ -434,11 +476,13 @@ async function main(): Promise<void> {
   await opPricingFillQueue.scheduleRecurring({
     everyMs: OP_PRICING_FILL_EVERY_MS,
   });
+  await anomalyDetectQueue.scheduleRecurring({ everyMs: ANOMALY_DETECT_EVERY_MS });
   logger.info(
     {
       accounts: activeAccounts.length,
       paymentScanEveryMs: PAYMENT_SCAN_EVERY_MS,
       opPricingFillEveryMs: OP_PRICING_FILL_EVERY_MS,
+      anomalyDetectEveryMs: ANOMALY_DETECT_EVERY_MS,
     },
     "[worker] recurring schedules in place"
   );
@@ -448,12 +492,15 @@ async function main(): Promise<void> {
     logger.info({ signal }, "[worker] shutting down…");
     try {
       opPricingFillAbort.abort(); // yield an in-flight sweep before closing
+      anomalyDetectAbort.abort();
       await refreshWorker.close();
       await monitorWorker.close();
       await opPricingFillWorker.close();
+      await anomalyDetectWorker.close();
       await refreshQueue.close();
       await paymentQueue.close();
       await opPricingFillQueue.close();
+      await anomalyDetectQueue.close();
       await dbClient.close();
       bullConn.disconnect();
       process.exit(0);
