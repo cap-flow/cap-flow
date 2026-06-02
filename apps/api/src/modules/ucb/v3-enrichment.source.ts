@@ -29,6 +29,8 @@ import {
 } from "./v3/deployments.js";
 import { fetchAllV3Positions, makeV3Client } from "./v3/positions.fetch.js";
 import { fetchPoolPriceAtBlock } from "./v3/pool-price.fetch.js";
+import { fetchV3EventsViem } from "./v3/events.fetch.js";
+import { EtherscanChainNotSupportedError } from "../integrations/etherscan.js";
 
 /** Position shape needed to pick V3 deployments (OpenPosition-compatible). */
 export interface V3TargetPosition {
@@ -68,6 +70,12 @@ export interface V3EnrichmentDeps {
     blockNumber: bigint,
     chainCode: string,
   ) => Promise<V3PoolPrice | null>;
+  /** Alchemy viem getLogs fallback (Etherscan-unsupported chains). */
+  fetchEventsViem?: (
+    client: PublicClient,
+    npm: string,
+    tokenId: bigint,
+  ) => Promise<{ increases: V3LiquidityEvent[]; decreases: V3LiquidityEvent[] }>;
 }
 
 export interface V3EnrichmentResult {
@@ -144,27 +152,7 @@ export class V3EnrichmentSource {
     }
     if (posByToken.size === 0) return { v3PositionMap, v3CostBasis: new Map() };
 
-    // 3. Events per NFT (Etherscan; throttled for the shared free-tier key).
-    const eventsByToken = new Map<
-      string,
-      { increases: V3LiquidityEvent[]; decreases: V3LiquidityEvent[] }
-    >();
-    for (const [tokenIdStr, { pos, dep }] of posByToken) {
-      if (signal?.aborted) break;
-      try {
-        const ev = await this.deps.etherscan.fetchV3LiquidityEvents(
-          pos.chain,
-          dep.npm,
-          pos.tokenId,
-          signal,
-        );
-        eventsByToken.set(tokenIdStr, ev);
-      } catch {
-        /* fail-soft per NFT — leave it without cost basis */
-      }
-    }
-
-    // 4a. Pool slot0 prices per unique (chain, pool, block). One viem client per chain.
+    // One viem client per chain (reused for events fallback + slot0 reads).
     const clientByChain = new Map<string, PublicClient>();
     const depByChain = new Map<string, V3Deployment>();
     for (const { pos, dep } of posByToken.values()) {
@@ -179,7 +167,40 @@ export class V3EnrichmentSource {
       clientByChain.set(chain, c);
       return c;
     };
+    const fetchEventsViem = this.deps.fetchEventsViem ?? fetchV3EventsViem;
 
+    // 3. Events per NFT — Etherscan primary; Alchemy viem getLogs fallback when
+    // Etherscan free tier doesn't support the chain (e.g. Optimism Velodrome).
+    const eventsByToken = new Map<
+      string,
+      { increases: V3LiquidityEvent[]; decreases: V3LiquidityEvent[] }
+    >();
+    for (const [tokenIdStr, { pos, dep }] of posByToken) {
+      if (signal?.aborted) break;
+      try {
+        const ev = await this.deps.etherscan.fetchV3LiquidityEvents(
+          pos.chain,
+          dep.npm,
+          pos.tokenId,
+          signal,
+        );
+        eventsByToken.set(tokenIdStr, ev);
+      } catch (e) {
+        if (e instanceof EtherscanChainNotSupportedError) {
+          const client = clientFor(pos.chain);
+          if (client) {
+            try {
+              eventsByToken.set(tokenIdStr, await fetchEventsViem(client, dep.npm, pos.tokenId));
+            } catch {
+              /* fail-soft per NFT */
+            }
+          }
+        }
+        /* else fail-soft per NFT — leave it without cost basis */
+      }
+    }
+
+    // 4a. Pool slot0 prices per unique (chain, pool, block).
     const poolPriceByKey = new Map<string, V3PoolPrice | null>();
     for (const [tokenIdStr, ev] of eventsByToken) {
       const entry = posByToken.get(tokenIdStr);
