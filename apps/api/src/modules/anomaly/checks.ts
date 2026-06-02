@@ -38,6 +38,14 @@ export interface AnomalyFinding {
   readonly expectedValue: number | null;
   /** Structured context (raw inputs, human-readable reason). */
   readonly detail: Record<string, unknown>;
+  // ── Subject (position-level post-port checks; absent for account-level). ──
+  readonly positionId?: string;
+  readonly walletId?: string;
+  readonly chain?: string;
+  readonly protocolId?: string;
+  readonly marketKey?: string | null;
+  /** Set by golden_case_drift → links the flag to its golden_cases row. */
+  readonly goldenCaseId?: string;
 }
 
 /**
