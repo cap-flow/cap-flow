@@ -20,11 +20,29 @@ export const ucbPositionSchema = z.object({
 });
 export type UcbPosition = z.infer<typeof ucbPositionSchema>;
 
+export const ucbGoldenOverlaySchema = z.object({
+  label: z.string(),
+  expectedStartUsd: z.number(),
+  drift: z.boolean(),
+});
+
+export const ucbFindingSchema = z.object({
+  checkId: z.string(),
+  severity: z.string(),
+  positionId: z.string().nullable(),
+  observedValue: z.number().nullable(),
+  expectedValue: z.number().nullable(),
+  reason: z.string(),
+});
+export type UcbFinding = z.infer<typeof ucbFindingSchema>;
+
 export const ucbAccountResultSchema = z.object({
   accountId: z.string(),
   label: z.string(),
   positionCount: z.number(),
   positions: z.array(ucbPositionSchema),
+  golden: z.record(ucbGoldenOverlaySchema).optional(),
+  findings: z.array(ucbFindingSchema).optional(),
   error: z.string().optional(),
 });
 export type UcbAccountResult = z.infer<typeof ucbAccountResultSchema>;

@@ -14,13 +14,28 @@ function usd(n: number | null | undefined): string {
   return `$${(Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function PositionsTable({ positions }: { positions: UcbPosition[] }): JSX.Element {
+type GoldenMap = Record<string, { label: string; expectedStartUsd: number; drift: boolean }>;
+
+function GoldenCell({ g }: { g: { label: string; expectedStartUsd: number; drift: boolean } | undefined }): JSX.Element {
+  if (!g) return <span className="text-muted-foreground">—</span>;
+  return g.drift ? (
+    <span className="rounded bg-destructive/15 px-1.5 py-0.5 text-xs text-destructive" title={g.label}>
+      ⚠ дрейф (эталон {usd(g.expectedStartUsd)})
+    </span>
+  ) : (
+    <span className="rounded bg-success/15 px-1.5 py-0.5 text-xs text-success" title={g.label}>
+      ✓ {usd(g.expectedStartUsd)}
+    </span>
+  );
+}
+
+function PositionsTable({ positions, golden }: { positions: UcbPosition[]; golden?: GoldenMap }): JSX.Element {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full text-sm">
         <thead className="bg-muted/50 text-left text-xs uppercase text-muted-foreground">
           <tr>
-            {["#", "Протокол", "Сеть", "Активы", "NFT", "startUsd", "Сейчас", "PnL", "PnL %", "Fees", ""].map(
+            {["#", "Протокол", "Сеть", "Активы", "NFT", "startUsd", "Сейчас", "PnL", "PnL %", "Fees", "Эталон", ""].map(
               (h) => (
                 <th key={h} className="px-3 py-2 font-medium">
                   {h}
@@ -47,6 +62,9 @@ function PositionsTable({ positions }: { positions: UcbPosition[] }): JSX.Elemen
                 </td>
                 <td className="px-3 py-2">{p.netPnlPct == null ? "—" : `${p.netPnlPct.toFixed(1)}%`}</td>
                 <td className="px-3 py-2">{usd(p.feesUsd)}</td>
+                <td className="px-3 py-2">
+                  <GoldenCell g={p.id ? golden?.[p.id] : undefined} />
+                </td>
                 <td className="px-3 py-2">
                   {p.coverageIncomplete ? (
                     <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-600">⚠ неполно</span>
@@ -138,23 +156,53 @@ export function AdminUcbServerPage(): JSX.Element {
         </p>
       )}
 
-      {compute.data?.accounts.map((acc) => (
-        <div key={acc.accountId} className="mb-6">
-          <div className="mb-2 flex items-center gap-2 text-sm">
-            <span className="font-medium">{acc.label}</span>
-            <span className="text-muted-foreground">· {acc.positionCount} позиций · {compute.data!.methodology}</span>
+      {compute.data?.accounts.map((acc) => {
+        const goldenCount = acc.golden ? Object.keys(acc.golden).length : 0;
+        const driftCount = acc.golden ? Object.values(acc.golden).filter((g) => g.drift).length : 0;
+        const errors = (acc.findings ?? []).filter((f) => f.severity === "error");
+        return (
+          <div key={acc.accountId} className="mb-8">
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
+              <span className="font-medium">{acc.label}</span>
+              <span className="text-muted-foreground">· {acc.positionCount} позиций · {compute.data!.methodology}</span>
+              {goldenCount > 0 && (
+                <span className={`rounded px-1.5 py-0.5 text-xs ${driftCount > 0 ? "bg-destructive/15 text-destructive" : "bg-success/15 text-success"}`}>
+                  эталонов: {goldenCount}{driftCount > 0 ? ` · дрейф: ${driftCount}` : " · все сходятся ✓"}
+                </span>
+              )}
+            </div>
+            {acc.error ? (
+              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                Ошибка расчёта: {acc.error}
+              </p>
+            ) : acc.positions.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Позиций нет (нет EVM-кошельков / live-данных?).</p>
+            ) : (
+              <>
+                <PositionsTable positions={acc.positions} {...(acc.golden && { golden: acc.golden })} />
+                {(acc.findings ?? []).length > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-1 text-xs font-medium text-muted-foreground">
+                      Детектор аномалий: {acc.findings!.length} находок{errors.length > 0 ? ` (${errors.length} error)` : ""}
+                    </div>
+                    <div className="space-y-1">
+                      {acc.findings!.map((f, i) => (
+                        <div key={i} className="flex items-start gap-2 text-xs">
+                          <span className={`rounded px-1.5 py-0.5 ${f.severity === "error" ? "bg-destructive/15 text-destructive" : f.severity === "warn" ? "bg-amber-500/15 text-amber-600" : "bg-muted text-muted-foreground"}`}>
+                            {f.severity}
+                          </span>
+                          <span className="font-mono">{f.checkId}</span>
+                          <span className="text-muted-foreground">{f.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
-          {acc.error ? (
-            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              Ошибка расчёта: {acc.error}
-            </p>
-          ) : acc.positions.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Позиций нет (нет EVM-кошельков / live-данных?).</p>
-          ) : (
-            <PositionsTable positions={acc.positions} />
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

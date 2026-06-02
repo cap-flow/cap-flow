@@ -19,6 +19,46 @@ import type { AccountsRepository } from "../accounts/accounts.repository.js";
 import type { AuthRepository } from "../auth/auth.repository.js";
 
 import { buildUcbRunnerStackFromDb, type UcbStackEnv } from "./ucb-runner.factory.js";
+import { GoldenRepository } from "../golden/golden.repository.js";
+import {
+  matchCanonical,
+  runPostPortChecks,
+  type CanonicalPosition,
+  type GoldenCaseView,
+} from "../anomaly/post_port_checks.js";
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function toCanonical(raw: unknown[]): CanonicalPosition[] {
+  return raw.map((r: any) => ({
+    id: String(r.id ?? ""),
+    walletId: String(r.walletId ?? ""),
+    chain: String(r.chain ?? ""),
+    protocol: { id: String(r.protocol?.id ?? r.protocol?.name ?? "") },
+    lpTokenId: r.lpTokenId ?? null,
+    matchedV3TokenId: r.matchedV3TokenId ?? null,
+    openHash: r.openHash ?? null,
+    startUsd: Number(r.startUsd ?? 0),
+    currentUsd: Number(r.currentUsd ?? 0),
+    netPnlUsd: Number(r.netPnlUsd ?? 0),
+    coverageIncomplete: Boolean(r.coverageIncomplete),
+  }));
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+function toGoldenView(rows: {
+  id: string; walletId: string; chain: string; protocolId: string;
+  marketKey: string | null; openHash: string | null; label: string;
+  kind: string; status: string; expectedStartUsd: string | null;
+  toleranceAbsUsd: string; tolerancePct: string;
+}[]): GoldenCaseView[] {
+  return rows.map((g) => ({
+    id: g.id, walletId: g.walletId, chain: g.chain, protocolId: g.protocolId,
+    marketKey: g.marketKey, openHash: g.openHash, label: g.label, kind: g.kind,
+    status: g.status,
+    expectedStartUsd: g.expectedStartUsd == null ? null : Number(g.expectedStartUsd),
+    toleranceAbsUsd: Number(g.toleranceAbsUsd), tolerancePct: Number(g.tolerancePct),
+  }));
+}
 
 const computeBody = z.object({
   account: z.string().min(1).max(200), // accountId (uuid) OR owner email
@@ -66,12 +106,15 @@ export async function ucbAdminRoutes(
       engineVersion: "admin-compute",
       lotMethodology: methodology as LotMethodology,
     });
+    const goldenRepo = new GoldenRepository(opts.db);
 
     const results: Array<{
       accountId: string;
       label: string;
       positionCount: number;
       positions: unknown[];
+      golden?: Record<string, { label: string; expectedStartUsd: number; drift: boolean }>;
+      findings?: unknown[];
       error?: string;
     }> = [];
 
@@ -90,7 +133,39 @@ export async function ucbAdminRoutes(
         }
         const latest = await stack.shadowRepo.findLatestForAccount(t.id);
         const positions = (latest?.positions as unknown[]) ?? [];
-        results.push({ accountId: t.id, label: t.label, positionCount: positions.length, positions });
+
+        // Golden overlay + detector findings (display only — not persisted here).
+        const goldenRows: Parameters<typeof toGoldenView>[0] = [];
+        for (const w of wallets) {
+          goldenRows.push(...(await goldenRepo.listGolden({ walletId: w.wallet.id })));
+        }
+        const canonical = toCanonical(positions);
+        const goldenView = toGoldenView(goldenRows);
+        const findings = runPostPortChecks(canonical, goldenView);
+        const driftIds = new Set(
+          findings.filter((f) => f.checkId === "golden_case_drift").map((f) => f.positionId),
+        );
+        const golden: Record<string, { label: string; expectedStartUsd: number; drift: boolean }> = {};
+        for (const g of goldenView) {
+          if (g.kind !== "golden" || g.status !== "active" || g.expectedStartUsd == null) continue;
+          const p = matchCanonical(g, canonical);
+          if (p) golden[p.id] = { label: g.label, expectedStartUsd: g.expectedStartUsd, drift: driftIds.has(p.id) };
+        }
+        results.push({
+          accountId: t.id,
+          label: t.label,
+          positionCount: positions.length,
+          positions,
+          golden,
+          findings: findings.map((f) => ({
+            checkId: f.checkId,
+            severity: f.severity,
+            positionId: f.positionId ?? null,
+            observedValue: f.observedValue,
+            expectedValue: f.expectedValue,
+            reason: (f.detail as { reason?: string }).reason ?? "",
+          })),
+        });
       } catch (e) {
         results.push({
           accountId: t.id,
