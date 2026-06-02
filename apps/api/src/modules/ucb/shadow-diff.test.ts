@@ -16,6 +16,9 @@ function pos(p: {
   tokenId?: string | null;
   supplySymbol?: string;
   startUsd: number;
+  netStartUsd?: number;
+  coverageIncomplete?: boolean;
+  openedAt?: number | null;
 }) {
   return {
     chain: p.chain,
@@ -24,6 +27,9 @@ function pos(p: {
     matchedV3TokenId: p.tokenId ?? null,
     openHash: null,
     startUsd: p.startUsd,
+    ...(p.netStartUsd !== undefined && { netStartUsd: p.netStartUsd }),
+    ...(p.coverageIncomplete !== undefined && { coverageIncomplete: p.coverageIncomplete }),
+    ...(p.openedAt !== undefined && { openedAt: p.openedAt }),
     supplyTokens: p.supplySymbol ? [{ symbol: p.supplySymbol }] : [],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
@@ -102,7 +108,65 @@ describe("diffShadowPositions (B5 shadow-diff)", () => {
       clientOnlyCount: 0,
       serverOnlyCount: 0,
       matchedCount: 0,
+      materialDivergenceCount: 0,
     });
     expect(d.deltas).toEqual([]);
+  });
+});
+
+describe("diffShadowPositions — M5 structural parity (beyond startUsd)", () => {
+  const fluid = (o: { startUsd: number; netStartUsd?: number; coverageIncomplete?: boolean; openedAt?: number | null }) =>
+    pos({ chain: "arb", protocolId: "arb_fluid", lpTokenId: "0xf", supplySymbol: "ETH", ...o });
+
+  it("same startUsd but different netStartUsd → divergent (M5)", () => {
+    const d = diffShadowPositions(
+      [fluid({ startUsd: 1000, netStartUsd: 800 })],
+      [fluid({ startUsd: 1000, netStartUsd: 600 })],
+    );
+    expect(d.divergentCount).toBe(1);
+    expect(d.deltas[0]!.reasons).toContain("netStartUsd");
+    expect(d.deltas[0]!.deltaNetStartUsd).toBeCloseTo(200, 6);
+  });
+
+  it("same startUsd but coverageIncomplete differs → divergent (M5)", () => {
+    const d = diffShadowPositions(
+      [fluid({ startUsd: 1000, coverageIncomplete: false })],
+      [fluid({ startUsd: 1000, coverageIncomplete: true })],
+    );
+    expect(d.divergentCount).toBe(1);
+    expect(d.deltas[0]!.coverageMismatch).toBe(true);
+    expect(d.deltas[0]!.reasons).toContain("coverageIncomplete");
+  });
+
+  it("openedAt gap (client has it, server null) → divergent (catches B4 opener gap)", () => {
+    const d = diffShadowPositions(
+      [fluid({ startUsd: 1000, openedAt: 1700000000 })],
+      [fluid({ startUsd: 1000, openedAt: null })],
+    );
+    expect(d.divergentCount).toBe(1);
+    expect(d.deltas[0]!.openedAtMismatch).toBe(true);
+    expect(d.deltas[0]!.reasons).toContain("openedAt");
+  });
+
+  it("identical material fields → not divergent, reasons empty", () => {
+    const d = diffShadowPositions(
+      [fluid({ startUsd: 1000, netStartUsd: 800, coverageIncomplete: false, openedAt: 1700000000 })],
+      [fluid({ startUsd: 1000.4, netStartUsd: 800.3, coverageIncomplete: false, openedAt: 1700000000 })],
+    );
+    expect(d.divergentCount).toBe(0);
+    expect(d.deltas[0]!.reasons).toEqual([]);
+  });
+
+  it("materialDivergenceCount counts presence mismatches (V3 enrichment gap)", () => {
+    // Client has the V3 position WITH tokenId; server computed it WITHOUT (B3
+    // deferred) → different key → client_only + server_only. divergentCount is 0
+    // but the flip gate (materialDivergenceCount) is 2.
+    const client = [pos({ chain: "arb", protocolId: "arb_uni3", lpTokenId: "0xu", tokenId: "tok1", startUsd: 500 })];
+    const server = [pos({ chain: "arb", protocolId: "arb_uni3", lpTokenId: "0xu", tokenId: null, startUsd: 500 })];
+    const d = diffShadowPositions(client, server);
+    expect(d.divergentCount).toBe(0);
+    expect(d.clientOnlyCount).toBe(1);
+    expect(d.serverOnlyCount).toBe(1);
+    expect(d.materialDivergenceCount).toBe(2);
   });
 });

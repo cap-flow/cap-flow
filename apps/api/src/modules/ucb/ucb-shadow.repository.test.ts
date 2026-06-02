@@ -39,6 +39,7 @@ describe("toInsertValues", () => {
       matchedCount: 2,
       clientOnlyCount: 0,
       serverOnlyCount: 0,
+      materialDivergenceCount: 0,
       thresholdUsd: 1,
       deltas: [],
     };

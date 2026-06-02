@@ -24,7 +24,22 @@ export interface ShadowPositionDelta {
   serverStartUsd: number | null;
   /** client − server; null unless present on both sides. */
   deltaStartUsd: number | null;
-  /** `both` AND |delta| > threshold. */
+  /** Net cost basis (collateral − debt); null unless both sides carry it. */
+  clientNetStartUsd: number | null;
+  serverNetStartUsd: number | null;
+  deltaNetStartUsd: number | null;
+  /**
+   * M5 structural parity — matching startUsd alone is insufficient (the server
+   * could reach the same number via a different coverage split, or lack a
+   * client-only override). These flag when a material non-numeric field differs
+   * WITHIN a matched pair. (matchedV3TokenId is part of the match key, so a V3
+   * enrichment gap surfaces as presence client_only/server_only, not here.)
+   */
+  coverageMismatch: boolean;
+  openedAtMismatch: boolean;
+  /** The fields that diverged (e.g. ["startUsd","coverageIncomplete"]). */
+  reasons: string[];
+  /** `both` AND any material field (numeric over threshold OR structural) differs. */
   divergent: boolean;
 }
 
@@ -33,10 +48,21 @@ export interface ShadowDiffSummary {
   matchedCount: number;
   clientOnlyCount: number;
   serverOnlyCount: number;
+  /**
+   * The flip gate: 0 ⇔ true parity. Aggregates matched-pair divergences AND
+   * presence mismatches (a position on one side only is a real divergence — e.g.
+   * a server missing V3 enrichment shows as client_only/server_only). The flip
+   * criterion is `materialDivergenceCount === 0` across the golden anchors, not
+   * just `divergentCount === 0`.
+   */
+  materialDivergenceCount: number;
   thresholdUsd: number;
   /** Sorted by |delta| desc (presence-only entries last), then key asc. */
   deltas: ShadowPositionDelta[];
 }
+
+const numOrNull = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) ? v : null;
 
 function keyOf(p: OpenPosition): string {
   return [
@@ -76,7 +102,20 @@ export function diffShadowPositions(
     if (cp && sp) {
       matchedCount++;
       const deltaStartUsd = cp.startUsd - sp.startUsd;
-      const divergent = Math.abs(deltaStartUsd) > threshold;
+      const cNet = numOrNull(cp.netStartUsd);
+      const sNet = numOrNull(sp.netStartUsd);
+      const deltaNetStartUsd = cNet != null && sNet != null ? cNet - sNet : null;
+      const coverageMismatch =
+        (cp.coverageIncomplete ?? false) !== (sp.coverageIncomplete ?? false);
+      const openedAtMismatch = (cp.openedAt ?? null) !== (sp.openedAt ?? null);
+
+      const reasons: string[] = [];
+      if (Math.abs(deltaStartUsd) > threshold) reasons.push("startUsd");
+      if (deltaNetStartUsd != null && Math.abs(deltaNetStartUsd) > threshold)
+        reasons.push("netStartUsd");
+      if (coverageMismatch) reasons.push("coverageIncomplete");
+      if (openedAtMismatch) reasons.push("openedAt");
+      const divergent = reasons.length > 0;
       if (divergent) divergentCount++;
       deltas.push({
         key,
@@ -84,6 +123,12 @@ export function diffShadowPositions(
         clientStartUsd: cp.startUsd,
         serverStartUsd: sp.startUsd,
         deltaStartUsd,
+        clientNetStartUsd: cNet,
+        serverNetStartUsd: sNet,
+        deltaNetStartUsd,
+        coverageMismatch,
+        openedAtMismatch,
+        reasons,
         divergent,
       });
     } else if (cp) {
@@ -94,6 +139,12 @@ export function diffShadowPositions(
         clientStartUsd: cp.startUsd,
         serverStartUsd: null,
         deltaStartUsd: null,
+        clientNetStartUsd: numOrNull(cp.netStartUsd),
+        serverNetStartUsd: null,
+        deltaNetStartUsd: null,
+        coverageMismatch: false,
+        openedAtMismatch: false,
+        reasons: ["presence:client_only"],
         divergent: false,
       });
     } else if (sp) {
@@ -104,6 +155,12 @@ export function diffShadowPositions(
         clientStartUsd: null,
         serverStartUsd: sp.startUsd,
         deltaStartUsd: null,
+        clientNetStartUsd: null,
+        serverNetStartUsd: numOrNull(sp.netStartUsd),
+        deltaNetStartUsd: null,
+        coverageMismatch: false,
+        openedAtMismatch: false,
+        reasons: ["presence:server_only"],
         divergent: false,
       });
     }
@@ -122,6 +179,7 @@ export function diffShadowPositions(
     matchedCount,
     clientOnlyCount,
     serverOnlyCount,
+    materialDivergenceCount: divergentCount + clientOnlyCount + serverOnlyCount,
     thresholdUsd: threshold,
     deltas,
   };
