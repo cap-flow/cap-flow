@@ -7,29 +7,22 @@ export const allPositionAnomalySchema = z.object({
   severity: z.string(),
   reason: z.string(),
 });
+export type AllPositionAnomaly = z.infer<typeof allPositionAnomalySchema>;
 
-export const allPositionRowSchema = z.object({
+export const allPositionItemSchema = z.object({
   accountId: z.string(),
   ownerEmail: z.string().nullable(),
   accountName: z.string().nullable(),
-  computedAt: z.string(),
   methodology: z.string(),
-  positionId: z.string(),
-  chain: z.string(),
-  protocolId: z.string(),
-  symbol: z.string(),
-  matchedV3TokenId: z.string().nullable(),
-  startUsd: z.number(),
-  currentUsd: z.number(),
-  netPnlUsd: z.number(),
-  feesUsd: z.number().nullable(),
-  coverageIncomplete: z.boolean(),
+  computedAt: z.string(),
+  /** Full OpenPosition object (rendered via the shared getColumnCell). */
+  position: z.record(z.unknown()),
   anomalies: z.array(allPositionAnomalySchema),
 });
-export type AllPositionRow = z.infer<typeof allPositionRowSchema>;
+export type AllPositionItem = z.infer<typeof allPositionItemSchema>;
 
 const responseSchema = z.object({
-  positions: z.array(allPositionRowSchema),
+  items: z.array(allPositionItemSchema),
   accounts: z.number(),
   computedAt: z.string().nullable(),
 });
