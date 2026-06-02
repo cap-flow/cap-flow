@@ -3,6 +3,12 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 
 export type AccountRow = typeof schema.accounts.$inferSelect;
 
+export interface OwnerInfo {
+  readonly ownerId: string;
+  readonly role: string;
+  readonly lastLoginAt: Date | null;
+}
+
 export interface CreateAccountInput {
   readonly ownerId: string;
   readonly name: string;
@@ -22,6 +28,7 @@ export interface IAccountsRepository {
   countActiveByOwner(ownerId: string): Promise<number>;
   findPrimaryByOwner(ownerId: string): Promise<AccountRow | null>;
   getOwnerLastLoginAt(accountId: string): Promise<Date | null | undefined>;
+  getOwnerInfo(accountId: string): Promise<OwnerInfo | null>;
   create(input: CreateAccountInput): Promise<AccountRow>;
   update(id: string, patch: UpdateAccountInput): Promise<AccountRow | null>;
   archive(id: string, when: Date): Promise<AccountRow | null>;
@@ -106,6 +113,27 @@ export class AccountsRepository implements IAccountsRepository {
       .limit(1);
     if (rows.length === 0) return undefined;
     return rows[0]!.lastLoginAt;
+  }
+
+  /**
+   * Владелец аккаунта: id + роль + last-login. Для серверного cron-гейтинга
+   * (kill-switch внешних API для не-админов + пропуск неактивных). `null`,
+   * если аккаунт не найден.
+   */
+  async getOwnerInfo(accountId: string): Promise<OwnerInfo | null> {
+    const rows = await this.db
+      .select({
+        ownerId: schema.users.id,
+        role: schema.users.role,
+        lastLoginAt: schema.users.lastLoginAt,
+      })
+      .from(schema.accounts)
+      .innerJoin(schema.users, eq(schema.accounts.ownerId, schema.users.id))
+      .where(eq(schema.accounts.id, accountId))
+      .limit(1);
+    const r = rows[0];
+    if (!r) return null;
+    return { ownerId: r.ownerId, role: r.role, lastLoginAt: r.lastLoginAt };
   }
 
   async create(input: CreateAccountInput): Promise<AccountRow> {

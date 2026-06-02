@@ -145,6 +145,9 @@ async function main(): Promise<void> {
   const processor = new PortfolioRefreshProcessor(refreshService, {
     appSettings: appSettingsService,
     accounts: accountsRepo,
+    // Kill-switch: при включённом флаге воркер не рефрешит не-админов
+    // (закрывает серверный путь трат DeBank, мимо upstream-proxy).
+    featureFlags: featureFlagsService,
     logger,
   });
   const refreshQueue = new PortfolioRefreshQueue(bullConn);
