@@ -37,71 +37,11 @@ import {
   v3RawAmountsAt,
 } from "./math";
 
-export interface V3Position {
-  /** id деплоя (uniswap-v3-arb / pancake-v3-bsc / ...). */
-  deploymentId: string;
-  /** Лейбл протокола (для UI). */
-  protocolLabel: string;
-  /** Чейн-код (eth/arb/op/...). */
-  chain: string;
-  /** NFT tokenId. */
-  tokenId: bigint;
-  /** Адрес пула. */
-  poolAddress: Address;
-  token0: { address: Address; symbol: string; decimals: number };
-  token1: { address: Address; symbol: string; decimals: number };
-  /** Fee tier пула (3000 = 0.3%). */
-  feeTier: number;
-  tickLower: number;
-  tickUpper: number;
-  /** Цена нижней границы (token1 за token0). */
-  priceLower: number;
-  /** Цена верхней границы. */
-  priceUpper: number;
-  /** Текущая цена пула. */
-  currentPrice: number;
-  /** Текущий tick пула. */
-  currentTick: number;
-  /** Liquidity NFT'а (raw uint128). */
-  liquidity: bigint;
-  /** В диапазоне ли currentTick. */
-  inRange: boolean;
-  /** Текущие amounts в human-единицах (после ребалансировки до currentPrice). */
-  amount0Current: number;
-  amount1Current: number;
-  /** Amounts при выходе вниз (price = Pa): всё в token0. */
-  amount0AtPa: number;
-  amount1AtPa: number;
-  /** Amounts при выходе вверх (price = Pb): всё в token1. */
-  amount0AtPb: number;
-  amount1AtPb: number;
-  /**
-   * On-chain pending fees snapshot из NPM `positions(tokenId)`.
-   *
-   * `tokensOwed0/1` — последний snapshot. Обновляется ТОЛЬКО при
-   * `decreaseLiquidity()` или `collect()` юзером. Между ними не растёт
-   * (накопление через `feeGrowthInside` дельту, но `tokensOwed` остаётся).
-   *
-   * `pendingFee0/1` — на текущем code path EQUAL tokensOwed (snapshot).
-   *
-   * Для **real-time** pending fees система использует **Krystal Cloud**
-   * (PR-K3, default global ON) — server-side вычисляет accrual через
-   * Uniswap §6.3 fee growth math. См. `lib/krystal/override.ts`.
-   *
-   * Pre-PR-K3 у нас был свой PR-1b feeGrowth multicall (`fee_growth.ts`,
-   * 316 LOC), убран в PR-CLEANUP (refactor/v3-remove-feegrowth-multicall):
-   *   - duplicate Krystal'у работа
-   *   - +1 multicall round-trip per page load (Alchemy credits)
-   *   - сложный uint256 unchecked math с регрессиями (см. PR #30 fix)
-   *
-   * Если Krystal API недоступен / credits исчерпаны → fallback на
-   * `pendingFee = tokensOwed` (post-claim accurate, между claims устаревает).
-   */
-  tokensOwed0: number;
-  tokensOwed1: number;
-  pendingFee0: number;
-  pendingFee1: number;
-}
+// V3Position shape moved to @cap-flow/ucb/v3_types (B3-full layer 1) so the pure
+// override + the client/server fetch share one type; re-exported for import sites.
+// (viem `Address` === `0x${string}` === the package's HexAddress.)
+export type { V3Position } from "@cap-flow/ucb/v3_types";
+import type { V3Position } from "@cap-flow/ucb/v3_types";
 
 function makeClient(dep: V3Deployment, apiKey: string): PublicClient {
   return createPublicClient({

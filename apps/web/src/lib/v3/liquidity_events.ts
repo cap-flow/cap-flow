@@ -320,42 +320,7 @@ export function isTrustworthyCostBasis(
   return r.hasHistPrices === true;
 }
 
-export interface V3CostBasisResult {
-  /** tokenId NFT (для match'а с V3Position). */
-  tokenId: bigint;
-  /** Σ amount0 из всех IncreaseLiquidity events (human-readable). */
-  totalDeposited0: number;
-  /** Σ amount1. */
-  totalDeposited1: number;
-  /** Σ amount0 из DecreaseLiquidity (что вышло). */
-  totalWithdrawn0: number;
-  totalWithdrawn1: number;
-  /** Σ deposit USD на момент каждого event'а (через historical prices). */
-  totalDepositUsd: number;
-  /** Σ withdraw USD по hist prices. */
-  totalWithdrawUsd: number;
-  /** Net cost basis = deposit - withdraw (с учётом WAC). */
-  netCostBasisUsd: number;
-  /** Кол-во events для debug. */
-  eventCount: { increase: number; decrease: number };
-  /** Использованы ли historical prices (false = DeBank current spot fallback). */
-  hasHistPrices: boolean;
-  /** Tx hash earliest IncreaseLiquidity = mint tx. Используется для match'а
-   *  с OpenPosition.openHash в v3_cost_basis_override.ts (per-NFT precision). */
-  mintTxHash?: string;
-  /** Block timestamp earliest IncreaseLiquidity = mint time. Используется для
-   *  fill'а OpenPosition.openedAt у orphan NFT'ов (где mint не в registry). */
-  mintBlockTime?: number;
-  /**
-   * PR-2 (2026-05-25): per-tx DecreaseLiquidity амounts. Используется в
-   * `computeClaimedFeesUsd` / `buildClaimedFeesHistory` чтобы отделить
-   * principal portion (= DecreaseLiquidity.amount0/1) от collect fees,
-   * когда `multicall(decreaseLiquidity, collect)` mis-classify'ятся как
-   * claim_rewards с inflated amount (lex POS-007: $701 principal listed
-   * as fee, real fee ~\$15).
-   *
-   * Key: txHash (lowercased). Value: per-token raw amounts (decimals
-   * applied при consumption).
-   */
-  withdrawalsByTxHash?: Map<string, { amount0: number; amount1: number }>;
-}
+// V3CostBasisResult shape moved to @cap-flow/ucb/v3_types (B3-full layer 1) so the
+// pure override + the client/server fetch share one type; re-exported here.
+export type { V3CostBasisResult } from "@cap-flow/ucb/v3_types";
+import type { V3CostBasisResult } from "@cap-flow/ucb/v3_types";

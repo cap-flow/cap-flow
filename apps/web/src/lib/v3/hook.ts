@@ -29,30 +29,13 @@ function isGaugeBasedDeployment(dep: V3Deployment): boolean {
   return /velodrome|aerodrome/i.test(dep.id) || /velodrome|aerodrome/i.test(dep.label);
 }
 
-/** На пару (walletId, chain, deploymentId, sorted-symbols) — массив позиций. */
-export type V3PositionMap = Map<string, V3Position[]>;
-
-/**
- * WETH↔ETH канонизация для ключа. DeBank live-позиции часто отдают
- * underlying как нативный `ETH`, а on-chain token0.symbol = `WETH`
- * (напр. Velodrome WETH/WBTC → live "ETH+WBTC"). Без канона ключи не
- * совпадают и override не паркует cost basis. То же делает `normalize`
- * в v3_cost_basis_override.ts для price-lookup.
- */
-function canonSymbol(s: string): string {
-  return s.toUpperCase() === "WETH" ? "ETH" : s.toUpperCase();
-}
-
-/** Канонический ключ для матча V3-позиций с UI-строкой OpenPosition. */
-export function v3PositionKey(args: {
-  walletId: string;
-  chain: string;
-  deploymentId: string;
-  symbols: string[];
-}): string {
-  const sorted = args.symbols.map(canonSymbol).sort();
-  return `${args.walletId}|${args.chain}|${args.deploymentId}|${sorted.join("|")}`;
-}
+// V3PositionMap + v3PositionKey (and the WETH↔ETH canon) moved to
+// @cap-flow/ucb/v3_types (B3-full layer 1) so the pure override + the fetch share
+// one key builder; re-exported for existing import sites.
+import { v3PositionKey } from "@cap-flow/ucb/v3_types";
+export { v3PositionKey };
+export type { V3PositionMap } from "@cap-flow/ucb/v3_types";
+import type { V3PositionMap } from "@cap-flow/ucb/v3_types";
 
 interface State {
   data: V3PositionMap;
