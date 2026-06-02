@@ -17,6 +17,7 @@ import { AdminQueuePage } from "./pages/admin/QueuePage";
 import { AdminHealthPage } from "./pages/admin/HealthPage";
 import { AdminTechAuditPage } from "./pages/admin/TechAuditPage";
 import { AdminUcbServerPage } from "./pages/admin/UcbServerPage";
+import { AdminAnomaliesPage } from "./pages/admin/AnomaliesPage";
 import { AdminUsersPage } from "./pages/admin/UsersPage";
 import { AdminUserDetailPage } from "./pages/admin/UserDetailPage";
 import { AdminTelegramChatPage } from "./pages/admin/TelegramChatPage";
@@ -69,6 +70,7 @@ function AdminRoutes() {
           <Route path="audit" element={<AdminAuditPage />} />
           <Route path="tech-audit" element={<AdminTechAuditPage />} />
           <Route path="ucb-server" element={<AdminUcbServerPage />} />
+          <Route path="anomalies" element={<AdminAnomaliesPage />} />
           <Route path="queue" element={<AdminQueuePage />} />
           <Route path="health" element={<AdminHealthPage />} />
           <Route path="api-usage" element={<AdminApiUsagePage />} />
