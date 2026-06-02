@@ -50,6 +50,8 @@ import {
 } from "@/lib/nonlp/use_opener_detector";
 import { applyNonLpOpenerOverride } from "@/lib/nonlp/apply_opener_override";
 import { useLotMethodology } from "@/lib/lot_methodology";
+import { useServerCanonicalQuery } from "@/features/ucb/hooks";
+import { shouldAdoptServerPositions } from "@/features/ucb/serve-decision";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
 import { defillamaCoinKey, fetchHistoricalPrices } from "@/lib/defillama";
 import {
@@ -378,7 +380,10 @@ export function useComputedPositions(): ComputedPositions {
   }, [positionsRaw, loadedList]);
   const nonLpOpener = useNonLpOpenerDetector(nonLpOpenerTargets, true);
 
-  const positions = useMemo(() => {
+  // B6 slice 2: server-canonical positions (per-user flag, default OFF).
+  const serverCanonical = useServerCanonicalQuery();
+
+  const clientPositions = useMemo(() => {
     let working: OpenPosition[] = positionsRaw.slice();
     if (v3CostBasisHook.data.size > 0 && v3.data.size > 0) {
       const v3Result = applyV3CostBasisOverride(
@@ -550,6 +555,30 @@ export function useComputedPositions(): ComputedPositions {
     krystalClosedHook.closedKeys,
     nonLpOpener.data,
     loadedList,
+  ]);
+
+  // B6 slice 2: adopt server-canonical positions when the flag is ON and every
+  // guard passes (server fresh+serve, methodology-match, wallet-set match);
+  // otherwise keep the client recompute as the PERMANENT fallback (R16). The
+  // public `positions` shape is unchanged → zero downstream page churn.
+  const positions = useMemo<OpenPosition[]>(() => {
+    if (
+      shouldAdoptServerPositions({
+        flagEnabled: serverCanonical.flagEnabled,
+        resp: serverCanonical.data ?? null,
+        clientLotMethodology: lotMethodology,
+        clientPositions,
+      }) &&
+      serverCanonical.data?.positions
+    ) {
+      return serverCanonical.data.positions as OpenPosition[];
+    }
+    return clientPositions;
+  }, [
+    serverCanonical.flagEnabled,
+    serverCanonical.data,
+    lotMethodology,
+    clientPositions,
   ]);
 
   // ── A3.2 dev-only golden capture ──────────────────────────────────────
