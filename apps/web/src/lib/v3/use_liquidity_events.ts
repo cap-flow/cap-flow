@@ -39,6 +39,7 @@ import {
   type V3LiquidityEvent,
 } from "./liquidity_events";
 import { fetchPoolMintPrice, type FetchPoolMintPriceArgs } from "./historical_pool_price";
+import { computeV3CostBasis } from "@cap-flow/ucb/v3_cost_basis_compute";
 import {
   estimateBlockAtTimestamp,
   getCurrentBlockNumber,
@@ -662,126 +663,41 @@ export function useV3LiquidityEvents(
         const dec0 = target.position.token0.decimals;
         const dec1 = target.position.token1.decimals;
 
-        let totalDeposited0 = 0;
-        let totalDeposited1 = 0;
-        let totalWithdrawn0 = 0;
-        let totalWithdrawn1 = 0;
-        let totalDepositUsd = 0;
-        let totalWithdrawUsd = 0;
-        let hasHistPrices = false;
-        // PR-2: per-tx withdrawal amounts for collect-vs-decrease split.
-        const withdrawalsByTxHash = new Map<string, { amount0: number; amount1: number }>();
-
-        function pricesForEvent(e: V3LiquidityEvent): { p0: number; p1: number } | null {
+        const pricesForEvent = (
+          e: V3LiquidityEvent,
+        ): { p0: number; p1: number } | null => {
           const k = `${target.position.chain}|${target.position.poolAddress.toLowerCase()}|${e.txHash.toLowerCase()}`;
           // pp может быть undefined (Velodrome slot0 не прочитан) — deriveUsdPrices
           // тогда уходит в DefiLlama-фоллбэк по blockTime.
           return deriveUsdPrices(target, poolPriceCache.get(k), e);
-        }
-
-        for (const e of acc.increases) {
-          const a0 = Number(e.amount0Raw) / 10 ** dec0;
-          const a1 = Number(e.amount1Raw) / 10 ** dec1;
-          totalDeposited0 += a0;
-          totalDeposited1 += a1;
-          const px = pricesForEvent(e);
-          if (px) {
-            hasHistPrices = true;
-            totalDepositUsd += a0 * px.p0 + a1 * px.p1;
-          }
-          auditEvents.push({
-            tokenId: target.tokenId.toString(),
-            type: "increase",
-            txHash: e.txHash,
-            blockNumber: e.blockNumber.toString(),
-            blockTime: e.blockTime ?? null,
-            token0: {
-              symbol: target.position.token0.symbol,
-              amount: a0,
-              usdPrice: px?.p0 ?? null,
-            },
-            token1: {
-              symbol: target.position.token1.symbol,
-              amount: a1,
-              usdPrice: px?.p1 ?? null,
-            },
-            eventUsd: px ? a0 * px.p0 + a1 * px.p1 : null,
-          });
-        }
-        for (const e of acc.decreases) {
-          const a0 = Number(e.amount0Raw) / 10 ** dec0;
-          const a1 = Number(e.amount1Raw) / 10 ** dec1;
-          totalWithdrawn0 += a0;
-          totalWithdrawn1 += a1;
-          // PR-2: per-tx aggregation (несколько decrease events в одном
-          // multicall tx складываем). Lowercase txHash для consistent match
-          // против op.hash (DeBank часто mixed-case).
-          const key = e.txHash.toLowerCase();
-          const prev = withdrawalsByTxHash.get(key);
-          if (prev) {
-            withdrawalsByTxHash.set(key, {
-              amount0: prev.amount0 + a0,
-              amount1: prev.amount1 + a1,
-            });
-          } else {
-            withdrawalsByTxHash.set(key, { amount0: a0, amount1: a1 });
-          }
-          const px = pricesForEvent(e);
-          if (px) {
-            totalWithdrawUsd += a0 * px.p0 + a1 * px.p1;
-          }
-          auditEvents.push({
-            tokenId: target.tokenId.toString(),
-            type: "decrease",
-            txHash: e.txHash,
-            blockNumber: e.blockNumber.toString(),
-            blockTime: e.blockTime ?? null,
-            token0: {
-              symbol: target.position.token0.symbol,
-              amount: a0,
-              usdPrice: px?.p0 ?? null,
-            },
-            token1: {
-              symbol: target.position.token1.symbol,
-              amount: a1,
-              usdPrice: px?.p1 ?? null,
-            },
-            eventUsd: px ? a0 * px.p0 + a1 * px.p1 : null,
-          });
-        }
-
-        // Net cost basis: для V3 LP важен оригинальный capital invested
-        // минус то что юзер уже вывел (партиальные closes). Если withdraw'ов
-        // нет, netCostBasis == totalDepositUsd.
-        const netCostBasisUsd = Math.max(
-          0,
-          totalDepositUsd - totalWithdrawUsd,
-        );
-
-        // Earliest IncreaseLiquidity = mint tx (для match'а с OpenPosition.openHash).
-        const sortedInc = [...acc.increases].sort((a, b) =>
-          Number(a.blockNumber - b.blockNumber),
-        );
-        const mintTxHash = sortedInc[0]?.txHash;
-        const mintBlockTime = sortedInc[0]?.blockTime;
-        const item: V3CostBasisResult = {
-          tokenId: target.tokenId,
-          totalDeposited0,
-          totalDeposited1,
-          totalWithdrawn0,
-          totalWithdrawn1,
-          totalDepositUsd,
-          totalWithdrawUsd,
-          netCostBasisUsd,
-          eventCount: {
-            increase: acc.increases.length,
-            decrease: acc.decreases.length,
-          },
-          hasHistPrices,
-          ...(mintTxHash && { mintTxHash }),
-          ...(mintBlockTime !== undefined && { mintBlockTime }),
-          ...(withdrawalsByTxHash.size > 0 && { withdrawalsByTxHash }),
         };
+
+        // Per-event audit (debug — window.__v3PerEventAudit). The cost-basis
+        // totals come from the shared pure `computeV3CostBasis` below.
+        for (const e of [...acc.increases, ...acc.decreases]) {
+          const a0 = Number(e.amount0Raw) / 10 ** dec0;
+          const a1 = Number(e.amount1Raw) / 10 ** dec1;
+          const px = pricesForEvent(e);
+          auditEvents.push({
+            tokenId: target.tokenId.toString(),
+            type: e.type,
+            txHash: e.txHash,
+            blockNumber: e.blockNumber.toString(),
+            blockTime: e.blockTime ?? null,
+            token0: { symbol: target.position.token0.symbol, amount: a0, usdPrice: px?.p0 ?? null },
+            token1: { symbol: target.position.token1.symbol, amount: a1, usdPrice: px?.p1 ?? null },
+            eventUsd: px ? a0 * px.p0 + a1 * px.p1 : null,
+          });
+        }
+
+        // B3-full L2a: cost basis via the shared pure aggregation (single source
+        // with the server). Σ(increase USD) − Σ(decrease USD), clamped ≥ 0.
+        const item = computeV3CostBasis(
+          target.position,
+          acc.increases,
+          acc.decreases,
+          pricesForEvent,
+        );
         const cacheKey = `${target.position.chain}|${target.tokenId.toString()}`;
         // НЕ кэшируем "empty" результаты (0 increase events) — это значит
         // что мы не смогли получить данные с цепочки (Alchemy free tier

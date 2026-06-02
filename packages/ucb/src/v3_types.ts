@@ -91,6 +91,26 @@ export interface V3CostBasisResult {
   withdrawalsByTxHash?: Map<string, { amount0: number; amount1: number }>;
 }
 
+/** One IncreaseLiquidity / DecreaseLiquidity event (raw amounts, decimals applied by the consumer). */
+export interface V3LiquidityEvent {
+  /** "increase" = mint OR additional liquidity; "decrease" = partial/full burn. */
+  type: "increase" | "decrease";
+  /** NFT tokenId. */
+  tokenId: bigint;
+  /** Block number. */
+  blockNumber: bigint;
+  /** Block timestamp (unix sec) — filled by a separate fetch when needed. */
+  blockTime?: number;
+  /** Tx hash. */
+  txHash: string;
+  /** Liquidity delta (raw uint128). */
+  liquidity: bigint;
+  /** Raw amount0 (uint256, token0 decimals). */
+  amount0Raw: bigint;
+  /** Raw amount1. */
+  amount1Raw: bigint;
+}
+
 export type V3PositionMap = Map<string, V3Position[]>;
 
 /**
