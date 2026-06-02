@@ -178,7 +178,12 @@ export function buildUcbRunnerStack(deps: UcbRunnerStackDeps): UcbRunnerStack {
 export function buildUcbRunnerStackFromDb(
   db: Database,
   env: UcbStackEnv,
-  opts: { flags: FlagResolver; engineVersion: string; lotMethodology?: LotMethodology },
+  opts: {
+    flags: FlagResolver;
+    engineVersion: string;
+    lotMethodology?: LotMethodology;
+    methodologyResolver?: MethodologyResolver;
+  },
 ): UcbRunnerStack {
   return buildUcbRunnerStack({
     db,
@@ -190,5 +195,6 @@ export function buildUcbRunnerStackFromDb(
     flags: opts.flags,
     engineVersion: opts.engineVersion,
     ...(opts.lotMethodology !== undefined && { lotMethodology: opts.lotMethodology }),
+    ...(opts.methodologyResolver !== undefined && { methodologyResolver: opts.methodologyResolver }),
   });
 }

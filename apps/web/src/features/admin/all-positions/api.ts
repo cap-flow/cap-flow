@@ -27,6 +27,15 @@ const responseSchema = z.object({
   computedAt: z.string().nullable(),
 });
 
+const computeAllSchema = z.object({
+  total: z.number(),
+  computed: z.number(),
+  failed: z.number(),
+  skipped: z.number(),
+});
+export type ComputeAllResult = z.infer<typeof computeAllSchema>;
+
 export const adminAllPositionsApi = {
   list: () => api.get("/v1/admin/ucb/all-positions", responseSchema),
+  computeAll: () => api.post("/v1/admin/ucb/compute-all", {}, computeAllSchema),
 };

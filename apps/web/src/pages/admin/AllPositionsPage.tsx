@@ -13,8 +13,10 @@ import {
   type SortDir,
 } from "@/lib/portfolio/column_sort_filter";
 import { totalAssetsOf, type OpenPosition } from "@cap-flow/ucb/open_positions";
+import { positionKey } from "@cap-flow/ucb/identity";
+import { MarkGoldenDialog } from "@/components/admin/MarkGoldenDialog";
 import { useAdminPortfolios } from "@/features/admin/portfolios/hooks";
-import { useAllPositions } from "@/features/admin/all-positions/hooks";
+import { useAllPositions, useComputeAll } from "@/features/admin/all-positions/hooks";
 import type { AllPositionItem } from "@/features/admin/all-positions/api";
 
 import { PageHeader } from "./_PageHeader";
@@ -79,6 +81,7 @@ function AnomalyBadge({ item }: { item: AllPositionItem }): JSX.Element {
 export function AdminAllPositionsPage(): JSX.Element {
   const q = useAllPositions();
   const accountsList = useAdminPortfolios();
+  const computeAll = useComputeAll();
   const { locale } = useI18n();
 
   const [account, setAccount] = useState("");
@@ -90,6 +93,7 @@ export function AdminAllPositionsPage(): JSX.Element {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [valueFilters, setValueFilters] = useState<Record<string, string[]>>({});
   const [rangeFilters, setRangeFilters] = useState<Record<string, RangeFilter>>({});
+  const [markTarget, setMarkTarget] = useState<OpenPosition | null>(null);
 
   const items = q.data?.items ?? [];
 
@@ -157,9 +161,19 @@ export function AdminAllPositionsPage(): JSX.Element {
         title="Все позиции"
         description="Единый реестр открытых позиций со всех аккаунтов (серверный канонический расчёт), в том же виде и с теми же фильтрами, что и пользовательский список. Обновляется по мере пересчёта воркером."
         actions={
-          <Button variant="outline" size="sm" onClick={() => q.refetch()}>
-            Обновить
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => computeAll.mutate()}
+              disabled={computeAll.isPending}
+              title="Посчитать серверные позиции для всех аккаунтов (медленно — live-фетчи)"
+            >
+              {computeAll.isPending ? "Считаю всех…" : "Рассчитать всех"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => q.refetch()}>
+              Обновить
+            </Button>
+          </div>
         }
       />
 
@@ -201,6 +215,13 @@ export function AdminAllPositionsPage(): JSX.Element {
         </span>
       </div>
 
+      {computeAll.data && (
+        <p className="mb-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
+          Рассчитано: {computeAll.data.computed} из {computeAll.data.total} аккаунтов
+          {computeAll.data.skipped ? ` · пропущено ${computeAll.data.skipped}` : ""}
+          {computeAll.data.failed ? ` · ошибок ${computeAll.data.failed}` : ""}.
+        </p>
+      )}
       {q.error && (
         <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {(q.error as Error).message}
@@ -218,6 +239,7 @@ export function AdminAllPositionsPage(): JSX.Element {
           <table className="text-xs">
             <thead className="border-y border-border bg-secondary/40 uppercase tracking-wider text-muted-foreground">
               <tr>
+                <th className="px-2 py-1.5 text-center">★</th>
                 <th className="px-2 py-1.5 text-left">ID</th>
                 <th className="px-2 py-1.5 text-left">Владелец</th>
                 {COLUMNS.map((c) => (
@@ -262,7 +284,19 @@ export function AdminAllPositionsPage(): JSX.Element {
                 const it = posToItem.get(p);
                 return (
                   <tr key={`${it?.accountId ?? ""}|${p.id}|${i}`} className="border-t border-border/60 hover:bg-muted/30">
-                    <td className="px-2 py-1.5 text-left font-mono text-[11px]">{p.id}</td>
+                    <td className="px-2 py-1.5 text-center">
+                      <button
+                        type="button"
+                        onClick={() => setMarkTarget(p)}
+                        title="Пометить эталонной / неверной"
+                        className="text-muted-foreground hover:text-amber-500"
+                      >
+                        ★
+                      </button>
+                    </td>
+                    <td className="px-2 py-1.5 text-left font-mono text-[11px]" title={positionKey(p)}>
+                      {p.id}
+                    </td>
                     <td className="px-2 py-1.5 text-left whitespace-nowrap">{it?.ownerEmail ?? it?.accountName ?? it?.accountId.slice(0, 8)}</td>
                     {COLUMNS.map((c) => (
                       <Cell key={c.id} p={p} id={c.id} ctx={cellCtx} />
@@ -275,6 +309,13 @@ export function AdminAllPositionsPage(): JSX.Element {
           </table>
         </div>
       )}
+
+      <MarkGoldenDialog
+        open={markTarget != null}
+        onClose={() => setMarkTarget(null)}
+        position={markTarget}
+        walletOps={[]}
+      />
     </div>
   );
 }

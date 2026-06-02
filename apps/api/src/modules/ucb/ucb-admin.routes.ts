@@ -21,6 +21,7 @@ import type { AuthRepository } from "../auth/auth.repository.js";
 import { buildUcbRunnerStackFromDb, type UcbStackEnv } from "./ucb-runner.factory.js";
 import { GoldenRepository } from "../golden/golden.repository.js";
 import { AdminAllPositionsService } from "./admin-all-positions.service.js";
+import { LotMethodologyRepository } from "../preferences/lot-methodology.repository.js";
 import {
   matchCanonical,
   runPostPortChecks,
@@ -86,6 +87,44 @@ export async function ucbAdminRoutes(
 
   // Global registry: every account's latest canonical positions + open anomalies.
   route.get("/all-positions", async () => allPositions.list());
+
+  // Compute the canonical positions for ALL active accounts (populate the
+  // registry locally before the prod flag flip). Each account computes under its
+  // owner's saved methodology. Slow (live fetch per account) — admin-only, manual.
+  route.post("/compute-all", async () => {
+    const methRepo = new LotMethodologyRepository(opts.db);
+    const methodologyResolver = {
+      forAccount: async (accountId: string) => {
+        const a = await opts.accountsRepo.findById(accountId);
+        if (!a) return "FIFO" as const;
+        return (await methRepo.get(a.ownerId)) ?? "FIFO";
+      },
+    };
+    const stack = buildUcbRunnerStackFromDb(opts.db, opts.env, {
+      flags: alwaysOn,
+      engineVersion: "admin-compute-all",
+      methodologyResolver,
+    });
+    const accounts = await opts.accountsRepo.findAllActive();
+    let computed = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const a of accounts) {
+      try {
+        const wallets = await stack.opsRepo.loadComputeWalletsForAccount(a.id);
+        const ops = wallets.flatMap((w) => w.ops);
+        const { missing } = await stack.opPricingService.priceMapForOps(ops);
+        if (missing.length > 0) await stack.opPricingService.fillMissing(missing);
+        const run = await stack.runner.run(a.id, "manual");
+        if (run.error) failed++;
+        else if (run.skipped) skipped++;
+        else computed++;
+      } catch {
+        failed++;
+      }
+    }
+    return { total: accounts.length, computed, failed, skipped };
+  });
 
   route.post("/compute", { schema: { body: computeBody } }, async (req) => {
     const { account, methodology } = req.body;
