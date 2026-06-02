@@ -715,6 +715,8 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       await api.register(ucbRoutes, {
         accounts: accountsService,
         shadowRepo: new UcbShadowRepository(app.db),
+        featureFlags: featureFlagsService,
+        portfolioRepo,
         prefix: "/accounts",
       });
       await api.register(annotationsRoutes, {
