@@ -186,7 +186,7 @@ interface Ctx {
    * Передай `{ full: true }`, чтобы переподтянуть всё с нуля.
    */
   load: (wallet: SavedWallet, options?: { full?: boolean }) => Promise<Loaded | null>;
-  loadAll: (options?: { full?: boolean }) => Promise<void>;
+  loadAll: (options?: { full?: boolean; manual?: boolean }) => Promise<void>;
   cancel: () => void;
   clearError: () => void;
   forget: (walletId: string) => void;
@@ -238,6 +238,7 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
     historyMaxPagesFirstLoad: HISTORY_MAX_PAGES_FIRST_LOAD_DEFAULT,
     historyMaxPagesIncremental: HISTORY_MAX_PAGES_INCREMENTAL_DEFAULT,
     autoRefreshMinIntervalMs: AUTO_REFRESH_MIN_INTERVAL_MS_DEFAULT,
+    manualRefreshMinIntervalMs: AUTO_REFRESH_MIN_INTERVAL_MS_DEFAULT,
   });
   // Подтягиваем admin-настройки (frontend-кнобы) и держим их в ref, чтобы
   // стабильный `load` и авто-рефреш читали свежие значения без пересоздания.
@@ -246,6 +247,7 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
     historyMaxPagesFirstLoad: appConfig.historyMaxPagesFirstLoad,
     historyMaxPagesIncremental: appConfig.historyMaxPagesIncremental,
     autoRefreshMinIntervalMs: appConfig.autoRefreshMinIntervalMs,
+    manualRefreshMinIntervalMs: appConfig.manualRefreshMinIntervalMs,
   };
 
   const keyFor = useCallback(
@@ -1096,7 +1098,39 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
   );
 
   const loadAll = useCallback(
-    async (options?: { full?: boolean }) => {
+    async (options?: { full?: boolean; manual?: boolean }) => {
+      // Троттл ручного обновления: кнопка «Обновить» не чаще раза в
+      // `manualRefreshMinIntervalMs` (knob, дефолт 1ч). Защита от спама
+      // кнопкой → лишних трат DeBank. Хранится в localStorage (per-user,
+      // переживает reload). 0 = без ограничения. Авто-рефреш и mount-эффекты
+      // (`manual` не передан) НЕ троттлятся этим. Жёсткий backstop — server
+      // rate-limit.
+      if (options?.manual) {
+        const minMs = appConfigRef.current.manualRefreshMinIntervalMs;
+        const uid = user?.id ?? "anon";
+        const lsKey = `capflow.manualRefreshAt.${uid}`;
+        if (minMs > 0 && typeof localStorage !== "undefined") {
+          let last = 0;
+          try {
+            last = Number(localStorage.getItem(lsKey) ?? "0") || 0;
+          } catch {
+            last = 0;
+          }
+          const elapsed = Date.now() - last;
+          if (last > 0 && elapsed < minMs) {
+            const leftMin = Math.ceil((minMs - elapsed) / 60000);
+            setError(
+              `Данные обновлялись недавно. Кнопка «Обновить» доступна не чаще раза в ${Math.round(minMs / 60000)} мин — следующее обновление через ~${leftMin} мин.`,
+            );
+            return;
+          }
+          try {
+            localStorage.setItem(lsKey, String(Date.now()));
+          } catch {
+            /* quota — ignore */
+          }
+        }
+      }
       // PR-K4: «Обновить» инвалидирует ВСЕ external-source кеши, не только
       // DeBank wallet snapshots. Krystal V3 positions cache (24h TTL) — иначе
       // юзер ткнул refresh, ожидает свежее, но Krystal данные остаются stale
@@ -1113,7 +1147,7 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
         await load(w, options);
       }
     },
-    [wallets.list, keyFor, load],
+    [wallets.list, keyFor, load, user?.id],
   );
 
   const cancel = useCallback(() => {

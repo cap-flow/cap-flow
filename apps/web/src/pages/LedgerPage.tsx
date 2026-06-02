@@ -157,7 +157,7 @@ export function LedgerPage(): JSX.Element {
           {Object.keys(loadedById).length > 0 && (
             <Button
               variant="outline"
-              onClick={() => loadAll()}
+              onClick={() => loadAll({ manual: true })}
               disabled={Boolean(busyId)}
             >
               <RotateCw />

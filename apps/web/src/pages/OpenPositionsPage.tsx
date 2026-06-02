@@ -799,7 +799,7 @@ function OpenPositionsPageInner(): JSX.Element {
             <Button
               size="sm"
               disabled={Boolean(busyId)}
-              onClick={() => void loadAll()}
+              onClick={() => void loadAll({ manual: true })}
             >
               <RefreshCw className={cn("h-3.5 w-3.5", busyId && "animate-spin")} />
               Обновить
