@@ -53,6 +53,14 @@ export const CLIENT_FEATURE_FLAGS: readonly ClientFeatureFlag[] = [
     category: "experimental",
   },
   {
+    key: "chain_classifier.enabled",
+    label: "Chain classifier (server) — реклассификация операций",
+    description:
+      "СЕРВЕРНЫЙ флаг (читает refresh-worker через `ChainClassifierService.analyzeAccount`, НЕ клиент). Когда ON для аккаунта — worker при refresh заново тянет историю из DeBank, классифицирует свежим кодом (P0/P1/P2) и перезаписывает `op_type` в `chain_operations` (idempotent upsert). Так материализуется unknown→0. ⚠ Включать через СЕРВЕРНУЮ секцию ниже (scope global), а НЕ client-localStorage. Требует запущенный worker (`npm run dev:worker`). Тяжёлая операция — каждый refresh тянет полную историю из DeBank (жжёт кредиты). Полностью инертен пока OFF. Default OFF.",
+    defaultValue: false,
+    category: "experimental",
+  },
+  {
     key: "capflow.feature.lendingAudit",
     label: "Lending on-chain audit (auto-fix)",
     description:
