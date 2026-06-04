@@ -16,6 +16,9 @@ const TOKENS: Record<string, DeBankToken> = {
   "arb:dai": tok("arb:dai", "DAI", 1),
   "arb:weth": tok("arb:weth", "WETH", 3000),
   "arb:eth": tok("arb:eth", "ETH", 3000),
+  "arb:wbtc": tok("arb:wbtc", "WBTC", 120590),
+  // Uniswap V3 position NFT receipt (protocol token) on Arbitrum.
+  "arb:uni-v3-pos": tok("arb:uni-v3-pos", "UNI-V3-POS"),
   "arb:aArbUSDC": tok("arb:aArbUSDC", "aArbUSDC", 1),
   "arb:aArbWETH": tok("arb:aArbWETH", "aArbWETH", 3000),
   // Real bob@example.com case — aArbARB receipt for Aave ARB supply on
@@ -642,5 +645,115 @@ describe("classifyDex — Velodrome/Aerodrome gauge unstake", () => {
       tx: { name: "mint" },
     });
     expect(classifyHistory([op], ctx())[0]!.type).toBe("lp_add");
+  });
+});
+
+/* ----------- Smart-account / delegation wrappers (P0, mmaksimuk) ----------- */
+// Реальные `unknown` строки из chain_operations: DeBank не отдаёт project_id
+// для smart-account/EIP-7710 врапперов (redeemDelegations/execute), а
+// классификатор раньше смотрел на внешний fnName и сдавался. Классифицируем по
+// МАТЕРИАЛЬНОМУ движению (sub-$1 gas/approval dust игнорируется).
+describe("classifyHistory — delegation/execute wrappers (no project_id)", () => {
+  // UNI-V3-POS NFT приходит в кошелёк + уходит underlying → lp_add. Внешний
+  // fnName=execute не мешает (ветка не гейтит по fnName).
+  it("execute wrapper: send 2 underlying, receive UNI-V3-POS → lp_add", () => {
+    const it = item({
+      sends: [
+        { token: "arb:weth", amount: 0.2 },
+        { token: "arb:usdc", amount: 600 },
+      ],
+      receives: [{ token: "arb:uni-v3-pos", amount: 1 }],
+      tx: { name: "execute" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("lp_add");
+  });
+
+  // redeemDelegations fee-collect: dust ARB ($0.03) send + 2 материальных IN
+  // (stable + volatile) → claim_rewards (V3 fee collect через smart-account).
+  // Раньше dust-send ломал receives-only ветку → unknown.
+  it("redeemDelegations fee-collect c dust-send → claim_rewards", () => {
+    const it = item({
+      sends: [{ token: "arb:arb", amount: 0.25 }], // ≈ $0.03 dust
+      receives: [
+        { token: "arb:usdc", amount: 500 },
+        { token: "arb:weth", amount: 0.1 },
+      ],
+      tx: { name: "redeemDelegations" },
+    });
+    const r = classifyHistory([it], ctx())[0]!;
+    expect(r.type).toBe("claim_rewards");
+    expect(r.notes ?? []).toContain("delegation-collect");
+  });
+
+  // redeemDelegations Aave supply: dust WBTC + материальный ETH уходят, приходит
+  // aArbWETH receipt → lend_supply. Раньше ветка знала только UNI-V*-POS.
+  it("redeemDelegations Aave supply: receive aArbWETH receipt → lend_supply", () => {
+    const it = item({
+      sends: [
+        { token: "arb:wbtc", amount: 0.0000002 }, // dust
+        { token: "arb:eth", amount: 0.385 }, // ≈ $1155 material
+      ],
+      receives: [{ token: "arb:aArbWETH", amount: 0.39 }],
+      tx: { name: "redeemDelegations" },
+    });
+    const r = classifyHistory([it], ctx())[0]!;
+    expect(r.type).toBe("lend_supply");
+    expect(r.notes ?? []).toContain("delegation-supply");
+  });
+
+  // Регрессия: debt-receipt (variableDebt) НЕ должен попасть в lend_supply.
+  it("variableDebt receipt не классифицируется как lend_supply", () => {
+    const it = item({
+      sends: [{ token: "arb:eth", amount: 0.385 }],
+      receives: [{ token: "arb:vDebtArbUSDC", amount: 1000 }],
+      tx: { name: "redeemDelegations" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).not.toBe("lend_supply");
+  });
+
+  // variableDebt c 2 sends (dust + material) доходит до ветки 11b — гард
+  // `!/^variabledebt/` исключает borrow-receipt из lend_supply (минуя section 9).
+  it("variableDebt + 2 sends (минует swap) → НЕ lend_supply", () => {
+    const it = item({
+      sends: [
+        { token: "arb:arb", amount: 0.25 }, // dust
+        { token: "arb:eth", amount: 0.385 }, // material
+      ],
+      receives: [{ token: "arb:vDebtArbUSDC", amount: 1000 }],
+      tx: { name: "redeemDelegations" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).not.toBe("lend_supply");
+  });
+
+  // ── Section-9 ordering gap (найдено workflow-верификацией): одноногая
+  //    wrapper-операция (1 send + 1 deposit-receipt) раньше короткозамыкалась
+  //    в `swap`. Deposit-receipt (LP-NFT / aToken) — не выход свопа.
+  it("одноногий execute mint (1 send + UNI-V3-POS) → lp_add, не swap", () => {
+    const it = item({
+      sends: [{ token: "arb:usdc", amount: 600 }],
+      receives: [{ token: "arb:uni-v3-pos", amount: 1 }],
+      tx: { name: "execute" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("lp_add");
+  });
+
+  it("одноногий redeemDelegations supply (1 USDC + aArbUSDC) → lend_supply, не swap", () => {
+    const it = item({
+      sends: [{ token: "arb:usdc", amount: 1000 }],
+      receives: [{ token: "arb:aArbUSDC", amount: 1000 }],
+      tx: { name: "redeemDelegations" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("lend_supply");
+  });
+
+  // Регрессия гарда: РЕАЛЬНЫЙ 1-1 своп в LST (stETH — protocol-token, но
+  // свопаемый) НЕ должен быть задет deposit-receipt-исключением.
+  it("реальный своп WETH→stETH (LST, не deposit-receipt) остаётся swap", () => {
+    const it = item({
+      chain: "eth",
+      sends: [{ token: "arb:weth", amount: 1 }],
+      receives: [{ token: "eth:steth", amount: 0.99 }],
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("swap");
   });
 });

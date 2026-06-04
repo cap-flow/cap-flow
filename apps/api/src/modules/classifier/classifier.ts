@@ -14,6 +14,7 @@
 import { classifyJunk } from "./junk_filter.js";
 import {
   classifyProtocol,
+  isLendingReceipt,
   isProtocolToken,
   isStableSymbol,
 } from "./protocols.js";
@@ -228,72 +229,111 @@ function doClassify(
   }
 
   // 9. Plain swap without recognized project (aggregators / direct routers).
+  // EXCEPTION: a protocol DEPOSIT RECEIPT (LP position NFT / lending aToken) is
+  // never the OUTPUT of a swap — receiving one means a deposit/supply. Don't let
+  // a single-leg smart-account wrapper deposit short-circuit to `swap`; let it
+  // fall through to the receipt branch (section 11). LST/vault tokens
+  // (stETH/yv*/moo) are intentionally NOT excluded — those ARE swappable.
+  const recvIsDepositReceipt =
+    receives.length === 1 &&
+    (() => {
+      const s = receives[0]!.symbol;
+      const isLpNft =
+        s === "UNI-V3-POS" ||
+        s === "UNI-V4-POS" ||
+        /^UNI-V\d-/i.test(s) ||
+        /-V3-POS$/i.test(s);
+      const isLendReceipt =
+        isLendingReceipt(s) && !/^variabledebt|^stabledebt/i.test(s);
+      return isLpNft || isLendReceipt;
+    })();
   if (
     sends.length === 1 &&
     receives.length === 1 &&
-    sends[0]!.tokenId !== receives[0]!.tokenId
+    sends[0]!.tokenId !== receives[0]!.tokenId &&
+    !recvIsDepositReceipt
   ) {
     return base(it, seq, "swap", protocol, movement, status);
   }
 
-  // 10. Simple in/out transfers.
+  // 10. Smart-account / EIP-7702 / delegation / router wrappers
+  // (redeemDelegations, execute, multicall) carry no project_id and an opaque
+  // outer fnName; sub-$1 gas/approval dust can ride alongside the real action.
+  // Classify by MATERIAL (≥$1) movement so dust doesn't mask a fee-collect or
+  // supply. Зеркалит web-classifier (apps/web/src/lib/portfolio/classifier.ts).
+  const DUST_USD = 1;
+  const matSends = sends.filter((s) => (s.usd ?? 0) >= DUST_USD);
+  const matReceives = receives.filter((r) => (r.usd ?? 0) >= DUST_USD);
+  const fnName = (it.tx?.name ?? "").toLowerCase();
+  const isDelegationFn =
+    fnName === "redeemdelegations" || fnName.includes("delegation");
+
+  // 10.1 Plain transfer_out (only sends, nothing received).
   if (sends.length && !receives.length) {
     return base(it, seq, "transfer_out", protocol, movement, status);
   }
-  if (receives.length && !sends.length) {
-    // 10.5 Delegation-collect: V3 fee collect через smart-account.
-    // Зеркалит web-classifier — для same-wallet ops Uniswap V3 collect
-    // через redeemDelegations имеет 2+ IN movements (stable + volatile)
-    // и без OUT. Без правила попадает в transfer_in и пропускается
-    // в Fee lifetime для V3 LP позиций (bob POS-009 18.03.2026).
-    const fnName = (it.tx?.name ?? "").toLowerCase();
-    const isDelegationFn = fnName === "redeemdelegations" || fnName.includes("delegation");
-    if (isDelegationFn && receives.length >= 2) {
-      const hasVolatile = receives.some((r) => !r.isStable && !r.isProtocolToken);
-      const hasStable = receives.some((r) => r.isStable);
-      if (hasVolatile && hasStable) {
-        const inferredProtocol = {
-          id: `${it.chain}_uniswap3`,
-          name: "Uniswap V3",
-          category: "dex" as const,
-        };
-        return base(
-          it,
-          seq,
-          "claim_rewards",
-          inferredProtocol,
-          movement,
-          status,
-          ["delegation-collect"],
-        );
-      }
+
+  // 10.2 Delegation fee-collect: V3 fee collect через smart-account. 2+
+  // МАТЕРИАЛЬНЫХ IN (stable + volatile), без материального OUT (dust gas-refund
+  // терпим). Без правила → transfer_in/unknown и пропуск в Fee lifetime для
+  // V3 LP позиций (bob POS-009 18.03.2026; mmaksimuk redeemDelegations ×3).
+  if (isDelegationFn && matSends.length === 0 && matReceives.length >= 2) {
+    const hasVolatile = matReceives.some(
+      (r) => !r.isStable && !r.isProtocolToken
+    );
+    const hasStable = matReceives.some((r) => r.isStable);
+    if (hasVolatile && hasStable) {
+      const inferredProtocol = {
+        id: `${it.chain}_uniswap3`,
+        name: "Uniswap V3",
+        category: "dex" as const,
+      };
+      return base(it, seq, "claim_rewards", inferredProtocol, movement, status, [
+        "delegation-collect",
+      ]);
     }
-    return base(it, seq, "transfer_in", protocol, movement, status);
   }
 
-  // 11. Smart-account / EIP-7702 / MetaMask Delegation mint без project_id.
-  // Зеркалит web-classifier (apps/web/src/lib/portfolio/classifier.ts).
-  // Когда юзер mint'ит Uniswap V3 NFT через delegation-wrapper, DeBank
-  // не отдаёт project_id → правила выше падают. Но IN protocol-token
-  // UNI-V3-POS + OUT underlying — явный сигнал lp_add.
-  const lpReceipt = receives.find(
-    (r) =>
-      r.isProtocolToken &&
-      (r.symbol === "UNI-V3-POS" ||
-        r.symbol === "UNI-V4-POS" ||
-        /^UNI-V\d-/i.test(r.symbol) ||
-        /-V3-POS$/i.test(r.symbol))
-  );
-  if (lpReceipt && sends.length > 0) {
-    const isV4 = lpReceipt.symbol.toLowerCase().includes("v4");
-    const inferredProtocol = {
-      id: `${it.chain}_${isV4 ? "uniswap4" : "uniswap3"}`,
-      name: isV4 ? "Uniswap V4" : "Uniswap V3",
-      category: "dex" as const,
-    };
-    return base(it, seq, "lp_add", inferredProtocol, movement, status, [
-      "delegation-mint",
-    ]);
+  // 11. Protocol-token receipt без project_id. Wrappers strip project_id;
+  // полученный receipt-токен сам идентифицирует протокол и действие
+  // (IN receipt + OUT underlying).
+  const protoReceipt = receives.find((r) => r.isProtocolToken);
+  if (protoReceipt && sends.length > 0) {
+    const sym = protoReceipt.symbol;
+    // 11a. Uniswap V3/V4 position NFT → lp_add (delegation-mint).
+    if (
+      sym === "UNI-V3-POS" ||
+      sym === "UNI-V4-POS" ||
+      /^UNI-V\d-/i.test(sym) ||
+      /-V3-POS$/i.test(sym)
+    ) {
+      const isV4 = sym.toLowerCase().includes("v4");
+      const inferredProtocol = {
+        id: `${it.chain}_${isV4 ? "uniswap4" : "uniswap3"}`,
+        name: isV4 ? "Uniswap V4" : "Uniswap V3",
+        category: "dex" as const,
+      };
+      return base(it, seq, "lp_add", inferredProtocol, movement, status, [
+        "delegation-mint",
+      ]);
+    }
+    // 11b. Aave-style lending receipt (aToken) → lend_supply. Debt receipts
+    // (variableDebt/stableDebt) исключаем — это borrow, не supply.
+    if (isLendingReceipt(sym) && !/^variabledebt|^stabledebt/i.test(sym)) {
+      const inferredProtocol = {
+        id: `${it.chain}_aave3`,
+        name: "Aave V3",
+        category: "lending" as const,
+      };
+      return base(it, seq, "lend_supply", inferredProtocol, movement, status, [
+        "delegation-supply",
+      ]);
+    }
+  }
+
+  // 12. Plain transfer_in (only receives, nothing identified above).
+  if (receives.length && !sends.length) {
+    return base(it, seq, "transfer_in", protocol, movement, status);
   }
 
   return base(it, seq, "unknown", protocol, movement, status);
