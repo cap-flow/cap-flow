@@ -111,6 +111,18 @@ admin-only кнопка «Переклассифицировать» в тулб
 variant=outline + window.confirm (тяжёлая операция, жжёт DeBank-кредиты), вызывает `loadAll({full:true})`.
 Серверного нового эндпоинта НЕ нужно (sync уже user-scoped). Проверка результата: DB-запрос
 `COUNT(*) WHERE op_type='unknown' AND jsonb_array_length(raw->'movement')>0` должен стать 0.
+
+**Bulk + выборочный ре-синк (admin «Все позиции»)**: серверная классификация ИДЁТ И НА СЕРВЕРЕ —
+`PortfolioRefreshService.refreshAccount` → `ChainClassifierService.analyzeAccount` (full `getHistory` из DeBank)
+→ серверный `classifyHistory` (те же P0/P1/P2-фиксы) → `chainOpsRepo.upsertBatch` (перезатир op_type). Через
+очередь `PortfolioRefreshQueue.enqueueManual(accountId, actorUserId, "admin")`. Эндпоинты УЖЕ существовали:
+`POST /admin/portfolios/refresh-all` (все аккаунты) и `POST /admin/portfolios/:id/refresh` (один), behind
+`requireAdmin`; клиент-api `adminPortfoliosApi.refreshAll/refreshOne` + хуки `useAdminPortfoliosRefreshAll/
+useAdminPortfolioRefreshOne` тоже были. Добавлена ТОЛЬКО кнопка «Переклассифицировать выбранного/всех» в
+тулбаре `AllPositionsPage` — читает фильтр `account` (выбран → refreshOne, «все аккаунты» → refreshAll),
+confirm + alert о постановке в очередь. ⚠ analyzeAccount за feature-flag (`FLAG_KEY`) — ре-синк сработает
+только для flag-enabled аккаунтов. Два пути сосуществуют: per-user client-кнопка на OpenPositions (быстрый,
+для impersonated), bulk/selected server-кнопка на AllPositions (без impersonation, async-очередь).
 → unknown: 6 типизируются, 9 типизируются+backfill, 54 → noise. **unknown→0.**
 
 ## Self-extending feedback loop

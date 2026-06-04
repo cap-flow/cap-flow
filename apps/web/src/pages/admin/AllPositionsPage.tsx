@@ -15,7 +15,11 @@ import {
 import { totalAssetsOf, type OpenPosition } from "@cap-flow/ucb/open_positions";
 import { positionKey } from "@cap-flow/ucb/identity";
 import { MarkGoldenDialog } from "@/components/admin/MarkGoldenDialog";
-import { useAdminPortfolios } from "@/features/admin/portfolios/hooks";
+import {
+  useAdminPortfolios,
+  useAdminPortfoliosRefreshAll,
+  useAdminPortfolioRefreshOne,
+} from "@/features/admin/portfolios/hooks";
 import { useAllPositions, useComputeAll } from "@/features/admin/all-positions/hooks";
 import type { AllPositionItem, ComputeMethodology } from "@/features/admin/all-positions/api";
 
@@ -107,6 +111,11 @@ export function AdminAllPositionsPage(): JSX.Element {
   const q = useAllPositions();
   const accountsList = useAdminPortfolios();
   const computeAll = useComputeAll();
+  // Admin force re-classify (server-side full re-fetch + classify + upsert op_type).
+  // Reuses the existing admin-portfolios refresh endpoints; reclassification is a
+  // side-effect of refreshAccount (analyzeAccount → upsertBatch chain_operations).
+  const refreshAll = useAdminPortfoliosRefreshAll();
+  const refreshOne = useAdminPortfolioRefreshOne();
   const { locale } = useI18n();
 
   const [account, setAccount] = useState("");
@@ -215,6 +224,50 @@ export function AdminAllPositionsPage(): JSX.Element {
             </Button>
             <Button variant="outline" size="sm" onClick={() => q.refetch()}>
               Обновить
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={refreshAll.isPending || refreshOne.isPending}
+              title="Admin: полная переклассификация — сервер заново тянет историю из DeBank, классифицирует свежим кодом (P0/P1/P2) и перезаписывает op_type в chain_operations. Выбран аккаунт в фильтре ниже — только он; «все аккаунты» — все. Тяжёлая операция (жжёт DeBank-кредиты), идёт async в очереди."
+              onClick={() => {
+                const selected = account
+                  ? accountOptions.find((a) => a.accountId === account)
+                  : null;
+                const scope = selected
+                  ? `аккаунта «${selected.ownerEmail ?? selected.ownerName ?? selected.accountName}»`
+                  : "ВСЕХ аккаунтов";
+                if (
+                  !window.confirm(
+                    `Переклассифицировать ${scope}?\n\n` +
+                      "Сервер заново вытянет историю из DeBank, классифицирует свежим " +
+                      "кодом и перепишет op_type в БД (применит P0/P1/P2 → unknown=0).\n\n" +
+                      "Тяжёлая операция — жжёт DeBank-кредиты, идёт асинхронно в очереди.",
+                  )
+                )
+                  return;
+                if (account) {
+                  refreshOne.mutate(account, {
+                    onSuccess: () =>
+                      window.alert(
+                        "Поставлено в очередь. Переклассификация идёт в фоне (15–60 сек на аккаунт).",
+                      ),
+                  });
+                } else {
+                  refreshAll.mutate(undefined, {
+                    onSuccess: (r) =>
+                      window.alert(
+                        `Поставлено в очередь: ${r.enqueued} аккаунт(ов). Идёт в фоне.`,
+                      ),
+                  });
+                }
+              }}
+            >
+              {refreshAll.isPending || refreshOne.isPending
+                ? "Ставлю в очередь…"
+                : account
+                  ? "Переклассифицировать выбранного"
+                  : "Переклассифицировать всех"}
             </Button>
           </div>
         }
