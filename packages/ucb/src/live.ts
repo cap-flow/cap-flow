@@ -75,6 +75,13 @@ export interface LiveProtocolPosition {
    * только по этому конкретному маркету.
    */
   lpTokenId?: string;
+  /**
+   * ERC721 tokenId позиции, если источник его явно отдаёт (DeBank V3:
+   * `detail.description` = "#1219136"). КРИТИЧНО для V3: в одном пуле может
+   * быть несколько NFT одной пары — `lpTokenId` (= pool address) их НЕ
+   * различает, а `nftId` различает детерминированно (без amount-proximity).
+   */
+  nftId?: string;
 }
 
 export interface LiveSnapshot {

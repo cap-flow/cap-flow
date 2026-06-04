@@ -372,17 +372,67 @@ export function applyV3CostBasisOverride(
     // фактически назначенные tokenId и исключаем их во всех фазах.
     const assignedTokenIds = new Set<string>();
 
+    // PHASE 0: детерминированный match по NFT-id из источника (DeBank
+    // `description` = "#1219136"). В одном пуле несколько NFT одной пары
+    // различаются ТОЛЬКО по tokenId — lpTokenId=pool общий, а amount-proximity
+    // (PHASE 1.5) нестабилен между fetch'ами (Alice PAXG #1159873/#1219136:
+    // дубликат + пропажа позиции). Если позиция знает свой nftId и среди
+    // on-chain NFT есть такой tokenId — пиннингуем напрямую (+ Phase-J on-chain
+    // amounts из правильной NFT). Самый надёжный ключ, без эвристик.
+    const phase0Done = new Set<number>();
+    for (let i = 0; i < items.length; i++) {
+      const x = items[i]!;
+      const nftId = x.p.nftId;
+      if (!nftId || assignedTokenIds.has(nftId)) continue;
+      const nft = nfts.find((n) => n.tokenId.toString() === nftId);
+      if (!nft) continue;
+      const cb = v3CostBasis.get(nftId);
+      assignedTokenIds.add(nftId);
+      phase0Done.add(i);
+      const oldStartUsd = x.p.startUsd;
+      let next: OpenPosition = { ...x.p, matchedV3TokenId: nftId };
+      if (cb && cb.netCostBasisUsd > 0) {
+        const newStartUsd = cb.netCostBasisUsd;
+        const withinTol =
+          oldStartUsd > 0 &&
+          Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < DISTANCE_TOLERANCE;
+        if (!withinTol) {
+          next.startUsd = newStartUsd;
+          next.netStartUsd = overriddenNetStartUsd(x.p, newStartUsd);
+          if (oldStartUsd > 0) {
+            next.supplyTokens = x.p.supplyTokens.map((t) => ({
+              ...t,
+              startUsd: (t.startUsd / oldStartUsd) * newStartUsd,
+            }));
+          }
+          overriddenCount++;
+        }
+        next = backfillOrphanMeta(next, cb, nft);
+      }
+      // Phase-J on-chain amounts из ИМЕННО этой NFT (фикс DeBank amount-swap).
+      next = overrideCurrentFromOnChain(next, nft, currentPrices, cb);
+      next.netPnlUsd = next.currentUsd - next.startUsd;
+      next.netPnlPct = next.startUsd > 0 ? (next.netPnlUsd / next.startUsd) * 100 : 0;
+      result[x.idx] = next;
+      warnings.push(
+        `[V3 override nft-id] ${x.p.id} (NFT #${nftId}) deterministic via source description`,
+      );
+    }
+    // PHASE 1+ обрабатывают только не-PHASE-0 позиции.
+    const pending =
+      phase0Done.size > 0 ? items.filter((_, i) => !phase0Done.has(i)) : items;
+
     // PHASE 1: per-NFT precision via openHash → mintTxHash match. Skip ambiguous
     // openHash (DeBank sometimes returns the same mint tx for two NFTs) → Phase 1.5.
     const openHashCount = new Map<string, number>();
-    for (const x of items) {
+    for (const x of pending) {
       const oh = (x.p.openHash ?? "").toLowerCase();
       if (!oh) continue;
       openHashCount.set(oh, (openHashCount.get(oh) ?? 0) + 1);
     }
     const itemsWithoutMatch: typeof items = [];
     const matchedTotalAuth: number[] = [];
-    for (const x of items) {
+    for (const x of pending) {
       const oh = (x.p.openHash ?? "").toLowerCase();
       const isAmbiguous = oh && (openHashCount.get(oh) ?? 0) > 1;
       const cb = oh && !isAmbiguous ? byMintHash.get(oh) : undefined;

@@ -460,6 +460,13 @@ export interface OpenPosition {
    */
   instanceId?: string;
   /**
+   * ERC721 tokenId позиции, как его отдал источник (DeBank V3 `description`).
+   * Надёжный детерминированный ключ для матчинга нескольких NFT одной пары в
+   * одном пуле (в отличие от amount-proximity). Прокидывается из
+   * `LiveProtocolPosition.nftId`; используется PHASE 0 в `applyV3CostBasisOverride`.
+   */
+  nftId?: string;
+  /**
    * NFT tokenId ИМЕННО этой OpenPosition, заматченной в
    * `applyV3CostBasisOverride` через openHash или amount-proximity.
    * Если задан — UI показывает `#{matchedV3TokenId}` в столбце TokenId
@@ -3154,6 +3161,7 @@ function buildOne(
     openHash: coverageIncomplete ? null : (opened?.hash ?? null),
     ageDays: coverageIncomplete ? null : ageDays,
     instanceId: stableInstanceId,
+    ...(lp.nftId ? { nftId: lp.nftId } : {}),
     supplyTokens,
     debtTokens: lp.borrow.map((b) => ({
       symbol: b.symbol,

@@ -281,6 +281,12 @@ function deBankItemToPosition(
     ? rawLpId.replace(/^[a-z]{2,6}:/i, "").replace(/:[a-z][a-z0-9_-]+$/i, "")
     : undefined;
 
+  // nftId — ERC721 tokenId позиции из DeBank `description` ("#1219136").
+  // Для V3 это единственный надёжный различитель нескольких NFT одной пары в
+  // одном пуле (lpTokenId=pool address у них общий). Парсим строго "#<digits>".
+  const descMatch = /^#(\d+)$/.exec((item.detail.description ?? "").trim());
+  const nftId = descMatch ? descMatch[1] : undefined;
+
   // Recompute USD from token lines when DeBank returned 0 (stable fallback $1).
   const supplyUsdSum = supply.reduce((s, t) => s + (t.usd || 0), 0);
   const borrowUsdSum = borrow.reduce((s, t) => s + (t.usd || 0), 0);
@@ -310,6 +316,7 @@ function deBankItemToPosition(
     borrow,
     rewards,
     ...(lpTokenId && { lpTokenId }),
+    ...(nftId && { nftId }),
   };
 }
 
