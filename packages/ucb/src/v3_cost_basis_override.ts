@@ -55,6 +55,21 @@ function normalizeSymbol(s: string): string {
 }
 
 /**
+ * When this override replaces a position's `startUsd`, `netStartUsd` must move
+ * with it: `netStartUsd = startUsd − borrowProceeds`. We preserve the borrow
+ * delta captured in the base position, so a leveraged V3-like position keeps its
+ * net offset while a plain LP (no borrow → base net == base start) lands on
+ * `netStartUsd === newStartUsd`. Without this the field stays stuck at the
+ * pre-override placeholder (= currentUsd for gauge-staked CL that had no traced
+ * ops), skewing every net-based APR/ROI (mmaksimuk POS-027 Velodrome gauge).
+ * Mirrors the Krystal override, which already updates netStartUsd.
+ */
+function overriddenNetStartUsd(base: OpenPosition, newStartUsd: number): number {
+  const borrowDelta = base.startUsd > 0 ? base.startUsd - base.netStartUsd : 0;
+  return Math.max(0, newStartUsd - borrowDelta);
+}
+
+/**
  * Orphan-NFT recovery: for any OpenPosition the V3 cost-basis fetch resolved (via
  * on-chain logs) with cb.mintBlockTime + tokenId, clear coverageIncomplete and
  * backfill openedAt/openHash/ageDays/openedInTokens. Used in both override branches.
@@ -382,6 +397,7 @@ export function applyV3CostBasisOverride(
         }
         let next: OpenPosition = { ...x.p };
         next.startUsd = newStartUsd;
+        next.netStartUsd = overriddenNetStartUsd(x.p, newStartUsd);
         next.matchedV3TokenId = cb.tokenId.toString();
         if (oldStartUsd > 0) {
           next.supplyTokens = x.p.supplyTokens.map((t) => ({
@@ -481,6 +497,7 @@ export function applyV3CostBasisOverride(
         }
         let next: OpenPosition = { ...item.p };
         next.startUsd = newStartUsd;
+        next.netStartUsd = overriddenNetStartUsd(item.p, newStartUsd);
         next.matchedV3TokenId = nft.tokenId.toString();
         if (oldStartUsd > 0) {
           next.supplyTokens = item.p.supplyTokens.map((t) => ({
@@ -564,6 +581,7 @@ export function applyV3CostBasisOverride(
       }
       const next: OpenPosition = { ...x.p };
       next.startUsd = newStartUsd;
+      next.netStartUsd = overriddenNetStartUsd(x.p, newStartUsd);
       if (oldStartUsd > 0) {
         next.supplyTokens = x.p.supplyTokens.map((t) => ({
           ...t,

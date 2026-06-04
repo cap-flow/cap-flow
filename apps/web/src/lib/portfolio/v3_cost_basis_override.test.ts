@@ -273,6 +273,65 @@ describe("applyV3CostBasisOverride — orphan openedAt backfill (Fix #1)", () =>
     expect(p.matchedV3TokenId).toBe("1159873");
   });
 
+  it("override raises startUsd → netStartUsd tracks it (POS-027 Velodrome gauge, zero debt)", () => {
+    // mmaksimuk POS-027: gauge-staked Velodrome WETH/WBTC (OP). The base build
+    // had no traceable ops → placeholder startUsd = netStartUsd = currentUsd
+    // (~$102.87). The Etherscan/slot0 cost basis is $235.97. After the override
+    // raises startUsd, netStartUsd (zero debt) MUST track it — otherwise the
+    // position's net-based APR/ROI is computed off the stale placeholder base.
+    const pos = orphanPos({
+      id: "POS-027",
+      startUsd: 102.87, // placeholder == currentUsd (no ops traced)
+      currentUsd: 102.87,
+      symbols: ["WETH", "WBTC"],
+      amounts: [0.0557, 0.0001],
+    });
+    // orphanPos sets netStartUsd = startUsd and currentDebtUsd = 0 (no borrow).
+    expect(pos.netStartUsd).toBeCloseTo(102.87, 2);
+    expect(pos.currentDebtUsd).toBe(0);
+
+    const v3PositionMap: V3PositionMap = new Map([
+      [
+        v3PositionKey({
+          walletId: WALLET_ID,
+          chain: CHAIN,
+          deploymentId: DEPLOY_ID,
+          symbols: ["WETH", "WBTC"],
+        }),
+        [nft({ tokenId: 3427934n, amounts: [0.0557, 0.0001], symbols: ["WETH", "WBTC"] })],
+      ],
+    ]);
+    const v3CostBasis = new Map<string, V3CostBasisResult>([
+      [
+        "3427934",
+        cbFor({
+          tokenId: 3427934n,
+          netCostBasisUsd: 235.97, // on-chain slot0 cost basis (≫ placeholder)
+          mintBlockTime: 1754929207, // 2025-08-11
+          mintTxHash: "0x0ae402fb",
+          totalDeposited0: 0.026907,
+          totalDeposited1: 0.001,
+        }),
+      ],
+    ]);
+
+    const { positions, overriddenCount } = applyV3CostBasisOverride(
+      [pos],
+      v3PositionMap,
+      v3CostBasis,
+    );
+
+    expect(overriddenCount).toBe(1);
+    const p = positions[0]!;
+    expect(p.startUsd).toBeCloseTo(235.97, 2);
+    // Regression guard: pre-fix netStartUsd stayed at the placeholder ($102.87).
+    // With zero debt netStartUsd must equal the overridden startUsd.
+    expect(
+      p.netStartUsd,
+      "netStartUsd must track overridden startUsd when there is no debt",
+    ).toBeCloseTo(235.97, 2);
+  });
+
   it("non-orphan position: backfill UPDATES openedAt из cb (VolnyySanya POS-002 fix)", () => {
     const pos: OpenPosition = {
       ...orphanPos({

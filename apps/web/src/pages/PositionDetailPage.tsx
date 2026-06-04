@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useLoadedWallets } from "@/components/data/LoadedWalletsProvider";
+import { leverageDisplay } from "@/lib/portfolio/display_pnl";
 import type { AcquiredVia, Lot } from "@/lib/portfolio/lots";
 import type { OpenPosition } from "@/lib/portfolio/open_positions";
 import { useComputedPositions } from "@/lib/portfolio/use_computed_positions";
@@ -257,14 +258,9 @@ export function PositionDetailPage(): JSX.Element {
     position.startUsd > 0 ? (unrealizedUsd / position.startUsd) * 100 : null;
   const netUnrealizedUsd =
     position.netStartUsd > 0 ? position.currentUsd - position.netStartUsd : null;
-  const hasLeverage =
-    position.netStartUsd > 0 &&
-    position.startUsd > 0 &&
-    position.netStartUsd / position.startUsd < 0.95;
-  const leverage =
-    hasLeverage && position.netStartUsd > 0
-      ? position.startUsd / position.netStartUsd
-      : null;
+  // Leverage/net from LIVE protocol debt (currentDebtUsd), not historical
+  // borrow-op attribution — reliable, no false leverage on debt-free positions.
+  const lev = leverageDisplay(position.currentUsd, position.currentDebtUsd);
 
   return (
     <div className="space-y-6 p-6">
@@ -314,8 +310,8 @@ export function PositionDetailPage(): JSX.Element {
           label="Cost basis"
           value={formatUsd(position.startUsd)}
           subtitle={
-            hasLeverage && leverage
-              ? `Net: ${formatUsd(position.netStartUsd)} · ${leverage.toFixed(1)}× leverage`
+            lev
+              ? `Net: ${formatUsd(lev.netUsd)}${lev.leverage != null ? ` · ${lev.leverage.toFixed(1)}× leverage` : ""}`
               : undefined
           }
           tooltip="Σ supplyTokens.startUsd — суммарная cost basis открытия позиции (gross collateral cost)"

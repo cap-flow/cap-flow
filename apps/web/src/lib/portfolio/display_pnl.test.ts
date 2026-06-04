@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { MIN_START_USD_FOR_PCT, safePnlPct } from "./display_pnl";
+import { MIN_START_USD_FOR_PCT, leverageDisplay, safePnlPct } from "./display_pnl";
 
 describe("safePnlPct", () => {
   it("computes a normal percentage", () => {
@@ -32,5 +32,43 @@ describe("safePnlPct", () => {
     expect(safePnlPct(100, Number.NaN)).toBeNull();
     expect(safePnlPct(Number.POSITIVE_INFINITY, 100)).toBeNull();
     expect(safePnlPct(100, Number.POSITIVE_INFINITY)).toBeNull();
+  });
+});
+
+describe("leverageDisplay — from live protocol debt (Option B)", () => {
+  it("no debt → null (plain LP / staking: NO leverage badge)", () => {
+    // mmaksimuk Velodrome WETH/WBTC: currentUsd ~$103, debt $0. The old
+    // netStartUsd-based path falsely showed 2.3× here; live-debt path shows none.
+    expect(leverageDisplay(102.87, 0)).toBeNull();
+  });
+
+  it("real debt → net exposure + leverage (Extra Finance OP: $183.45 / debt $82.64)", () => {
+    const r = leverageDisplay(183.45, 82.64);
+    expect(r).not.toBeNull();
+    expect(r!.netUsd).toBeCloseTo(100.81, 2);
+    expect(r!.leverage).toBeCloseTo(1.82, 2);
+  });
+
+  it("dust debt below max($1, 1%·currentUsd) → null (noise, no badge)", () => {
+    expect(leverageDisplay(5000, 4)).toBeNull(); // 4 < max(1, 50)
+    expect(leverageDisplay(50, 0.5)).toBeNull(); // 0.5 < max(1, 0.5)=1
+  });
+
+  it("debt just above the threshold → shown", () => {
+    const r = leverageDisplay(1000, 11); // 11 > max(1, 10)
+    expect(r).not.toBeNull();
+    expect(r!.netUsd).toBeCloseTo(989, 2);
+  });
+
+  it("underwater (debt ≥ current) → net clamped to 0, leverage null (no ×, but flagged)", () => {
+    const r = leverageDisplay(100, 100);
+    expect(r).not.toBeNull();
+    expect(r!.netUsd).toBe(0);
+    expect(r!.leverage).toBeNull();
+  });
+
+  it("returns null for non-finite inputs", () => {
+    expect(leverageDisplay(Number.NaN, 50)).toBeNull();
+    expect(leverageDisplay(100, Number.POSITIVE_INFINITY)).toBeNull();
   });
 });
