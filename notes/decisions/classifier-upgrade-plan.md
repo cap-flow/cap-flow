@@ -100,6 +100,17 @@
 
 **ИТОГ unknown→0**: P0 (6 wrapper) + P1 (9 collect) + P2 (54 noise) = все 69 unknown типизированы. Финальный
 `unknown` достижим только для value-bearing непустого movement (CI-bar). ⚠ Все 69 строк в БД ждут ре-синка.
+
+**Материализация (admin-кнопка «Переклассифицировать»)**: обычный refresh инкрементальный — `LoadedWalletsProvider.load()`
+ставит `stopWhen` по `knownHashes`/`serverLatestOpTime` и не доходит до старых строк. `load(wallet,{full:true})`
+(и `loadAll({full:true})`) ОБНУЛЯЕТ cached/knownHashes/serverLatestOpTime → полная подкачка истории из DeBank →
+переклассификация новым кодом → POST `/chain-ops/:walletId/sync` (`onConflictDoUpdate` → `EXCLUDED.op_type`,
+идемпотентный upsert-перезатир, без дублей/удалений). Capability уже была в контексте; добавлена ТОЛЬКО
+admin-only кнопка «Переклассифицировать» в тулбаре OpenPositionsPage рядом с «Обновить» (gate
+`isAdmin || isImpersonating` — как golden, т.к. 69 строк на кошельках юзеров, правятся через impersonation),
+variant=outline + window.confirm (тяжёлая операция, жжёт DeBank-кредиты), вызывает `loadAll({full:true})`.
+Серверного нового эндпоинта НЕ нужно (sync уже user-scoped). Проверка результата: DB-запрос
+`COUNT(*) WHERE op_type='unknown' AND jsonb_array_length(raw->'movement')>0` должен стать 0.
 → unknown: 6 типизируются, 9 типизируются+backfill, 54 → noise. **unknown→0.**
 
 ## Self-extending feedback loop

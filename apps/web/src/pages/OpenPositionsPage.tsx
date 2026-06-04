@@ -41,6 +41,7 @@ import { useCexWithdrawalCostBasis } from "@/features/cex/hooks";
 import type { CexCostBasisMatch } from "@/lib/portfolio/position_coverage";
 import {
   MIN_START_USD_FOR_PCT,
+  leverageDisplay,
   safePnlPct,
 } from "@/lib/portfolio/display_pnl";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
@@ -170,6 +171,10 @@ function OpenPositionsPageInner(): JSX.Element {
   // The server (`requireAdminOrImpersonator`) verifies the impersonator is
   // actually an admin, so showing the button on any impersonation is safe.
   const canMarkGolden = isAdmin || isImpersonating;
+  // Admin-only «полная переклассификация» (force full re-fetch + re-sync). Тот же
+  // гейт, что и golden: админ ИЛИ админ-импersonator (69 unknown-строк живут на
+  // кошельках пользователей, которые админ правит через impersonation).
+  const canForceReclassify = isAdmin || isImpersonating;
   const [goldenPos, setGoldenPos] = useState<OpenPosition | null>(null);
   // Fetch existing golden/wrong marks to highlight rows. Keyed by
   // `${realWalletUuid}|${positionId}` (frontend walletId is composite).
@@ -824,6 +829,31 @@ function OpenPositionsPageInner(): JSX.Element {
               <Archive className="h-3.5 w-3.5" />
               Архив
             </a>
+            {canForceReclassify && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={Boolean(busyId)}
+                title="Admin: полная переклассификация всех кошельков — заново тянет ВСЮ историю из DeBank и переписывает op_type в БД по свежим правилам классификатора. Тяжёлая операция (жжёт API-кредиты)."
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Полная переклассификация всех кошельков?\n\n" +
+                        "Заново вытянет ВСЮ историю из DeBank и перепишет op_type в БД " +
+                        "(применит свежие правила классификатора к старым операциям).\n\n" +
+                        "Тяжёлая операция — сожжёт API-кредиты. Продолжить?",
+                    )
+                  ) {
+                    void loadAll({ full: true });
+                  }
+                }}
+              >
+                <RefreshCw
+                  className={cn("h-3.5 w-3.5", busyId && "animate-spin")}
+                />
+                Переклассифицировать
+              </Button>
+            )}
             <Button
               size="sm"
               disabled={Boolean(busyId)}
@@ -1751,17 +1781,11 @@ function PositionRow({
       );
     },
     startUsd: () => {
-      // UCB D7: показываем net startUsd для leveraged lending позиций.
-      // Расхождение > 1% означает значимый borrow leg — выделяем "net"
-      // отдельной строкой ниже gross, чтобы user видел реальные затраты.
-      const hasMeaningfulBorrow =
-        p.startUsd > 0 &&
-        p.netStartUsd >= 0 &&
-        p.startUsd - p.netStartUsd > Math.max(1, p.startUsd * 0.01);
-      const leverage =
-        hasMeaningfulBorrow && p.netStartUsd > 0
-          ? p.startUsd / p.netStartUsd
-          : null;
+      // Leverage/net indicator from the position's LIVE protocol debt
+      // (currentDebtUsd), not historical borrow-op attribution: the lending
+      // protocol ties the debt to this position's collateral, so there is no
+      // fund-flow guessing and no false leverage on debt-free positions (B).
+      const lev = leverageDisplay(p.currentUsd, p.currentDebtUsd);
       return (
         <td key="startUsd" className={cn(cellPad, "text-center tabular-nums")}>
           <div className="flex flex-col items-center gap-0.5">
@@ -1781,15 +1805,15 @@ function PositionRow({
                 </button>
               )}
             </span>
-            {hasMeaningfulBorrow && (
+            {lev && (
               <span
                 className="text-[10px] text-muted-foreground"
-                title={`Net = collateral cost − borrow proceeds. Leverage ≈ ${leverage?.toFixed(2)}×.`}
+                title={`Net = текущая стоимость − долг протокола (${formatUsd(p.currentDebtUsd, locale)})${lev.leverage != null ? `. Leverage ≈ ${lev.leverage.toFixed(2)}×` : ""}.`}
               >
-                net {formatUsd(p.netStartUsd, locale)}
-                {leverage != null && (
+                net {formatUsd(lev.netUsd, locale)}
+                {lev.leverage != null && (
                   <span className="ml-1 text-brand-cyan">
-                    · {leverage.toFixed(2)}×
+                    · {lev.leverage.toFixed(2)}×
                   </span>
                 )}
               </span>
