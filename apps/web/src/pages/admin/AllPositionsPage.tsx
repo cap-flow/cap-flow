@@ -130,6 +130,9 @@ export function AdminAllPositionsPage(): JSX.Element {
   const [rangeFilters, setRangeFilters] = useState<Record<string, RangeFilter>>({});
   const [markTarget, setMarkTarget] = useState<OpenPosition | null>(null);
   const [computeMethodology, setComputeMethodology] = useState<ComputeMethodology>("auto");
+  // Reclassify multi-select: which accounts to force-reclassify (checkbox panel).
+  const [reclassOpen, setReclassOpen] = useState(false);
+  const [reclassSel, setReclassSel] = useState<Set<string>>(new Set());
 
   const items = q.data?.items ?? [];
 
@@ -195,6 +198,35 @@ export function AdminAllPositionsPage(): JSX.Element {
   const goldenCount = items.filter((it) => it.goldenKind === "golden").length;
   const wrongCount = items.filter((it) => it.goldenKind === "wrong").length;
 
+  // Force re-classify the checked accounts (server-side full re-fetch + classify
+  // + upsert op_type). All checked → single refresh-all; subset → per-account
+  // refreshOne. Heavy (DeBank credits), runs async in the queue.
+  const reclassifyBusy = refreshAll.isPending || refreshOne.isPending;
+  const runReclassify = () => {
+    const ids = [...reclassSel];
+    if (ids.length === 0) return;
+    const isAll = accountOptions.length > 0 && ids.length === accountOptions.length;
+    if (
+      !window.confirm(
+        `Переклассифицировать ${isAll ? "ВСЕ" : ids.length} аккаунт(ов)?\n\n` +
+          "Сервер заново вытянет историю из DeBank, классифицирует свежим кодом " +
+          "(P0/P1/P2) и перепишет op_type в БД.\n\n" +
+          "Тяжёлая операция — жжёт DeBank-кредиты, идёт асинхронно в очереди.",
+      )
+    )
+      return;
+    setReclassOpen(false);
+    if (isAll) {
+      refreshAll.mutate(undefined, {
+        onSuccess: (r) =>
+          window.alert(`Поставлено в очередь: ${r.enqueued} аккаунт(ов). Идёт в фоне.`),
+      });
+    } else {
+      for (const id of ids) refreshOne.mutate(id);
+      window.alert(`Поставлено в очередь: ${ids.length} аккаунт(ов). Идёт в фоне.`);
+    }
+  };
+
   return (
     <div>
       <PageHeader
@@ -225,50 +257,85 @@ export function AdminAllPositionsPage(): JSX.Element {
             <Button variant="outline" size="sm" onClick={() => q.refetch()}>
               Обновить
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={refreshAll.isPending || refreshOne.isPending}
-              title="Admin: полная переклассификация — сервер заново тянет историю из DeBank, классифицирует свежим кодом (P0/P1/P2) и перезаписывает op_type в chain_operations. Выбран аккаунт в фильтре ниже — только он; «все аккаунты» — все. Тяжёлая операция (жжёт DeBank-кредиты), идёт async в очереди."
-              onClick={() => {
-                const selected = account
-                  ? accountOptions.find((a) => a.accountId === account)
-                  : null;
-                const scope = selected
-                  ? `аккаунта «${selected.ownerEmail ?? selected.ownerName ?? selected.accountName}»`
-                  : "ВСЕХ аккаунтов";
-                if (
-                  !window.confirm(
-                    `Переклассифицировать ${scope}?\n\n` +
-                      "Сервер заново вытянет историю из DeBank, классифицирует свежим " +
-                      "кодом и перепишет op_type в БД (применит P0/P1/P2 → unknown=0).\n\n" +
-                      "Тяжёлая операция — жжёт DeBank-кредиты, идёт асинхронно в очереди.",
-                  )
-                )
-                  return;
-                if (account) {
-                  refreshOne.mutate(account, {
-                    onSuccess: () =>
-                      window.alert(
-                        "Поставлено в очередь. Переклассификация идёт в фоне (15–60 сек на аккаунт).",
-                      ),
-                  });
-                } else {
-                  refreshAll.mutate(undefined, {
-                    onSuccess: (r) =>
-                      window.alert(
-                        `Поставлено в очередь: ${r.enqueued} аккаунт(ов). Идёт в фоне.`,
-                      ),
-                  });
-                }
-              }}
-            >
-              {refreshAll.isPending || refreshOne.isPending
-                ? "Ставлю в очередь…"
-                : account
-                  ? "Переклассифицировать выбранного"
-                  : "Переклассифицировать всех"}
-            </Button>
+            <div className="relative">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={reclassifyBusy}
+                title="Admin: полная переклассификация выбранных аккаунтов — сервер заново тянет историю из DeBank, классифицирует свежим кодом (P0/P1/P2) и перезаписывает op_type. Тяжёлая операция (жжёт DeBank-кредиты), async в очереди."
+                onClick={() => setReclassOpen((o) => !o)}
+              >
+                {reclassifyBusy ? "Ставлю в очередь…" : "Переклассифицировать ▾"}
+              </Button>
+              {reclassOpen && (
+                <div className="absolute right-0 z-50 mt-1 w-80 rounded-md border border-border bg-background p-2 shadow-lg">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="text-xs font-semibold text-foreground">
+                      Выбрано: {reclassSel.size} / {accountOptions.length}
+                    </span>
+                    <div className="flex gap-2 text-[11px] text-brand-cyan">
+                      <button
+                        type="button"
+                        className="hover:underline"
+                        onClick={() =>
+                          setReclassSel(new Set(accountOptions.map((a) => a.accountId)))
+                        }
+                      >
+                        выбрать все
+                      </button>
+                      <button
+                        type="button"
+                        className="hover:underline"
+                        onClick={() => setReclassSel(new Set())}
+                      >
+                        сброс
+                      </button>
+                    </div>
+                  </div>
+                  <div className="max-h-64 overflow-auto rounded border border-border/60">
+                    {accountOptions.map((a) => (
+                      <label
+                        key={a.accountId}
+                        className="flex cursor-pointer items-center gap-2 px-2 py-1 text-xs hover:bg-accent"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={reclassSel.has(a.accountId)}
+                          onChange={(e) =>
+                            setReclassSel((prev) => {
+                              const n = new Set(prev);
+                              if (e.target.checked) n.add(a.accountId);
+                              else n.delete(a.accountId);
+                              return n;
+                            })
+                          }
+                        />
+                        <span className="truncate">
+                          {(a.ownerEmail ?? a.ownerName ?? "—") + " · " + a.accountName}
+                        </span>
+                      </label>
+                    ))}
+                    {accountOptions.length === 0 && (
+                      <div className="px-2 py-2 text-xs text-muted-foreground">
+                        нет аккаунтов
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-2 flex justify-end gap-2">
+                    <Button variant="ghost" size="sm" onClick={() => setReclassOpen(false)}>
+                      Отмена
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={reclassSel.size === 0 || reclassifyBusy}
+                      onClick={runReclassify}
+                    >
+                      Запустить ({reclassSel.size})
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         }
       />
