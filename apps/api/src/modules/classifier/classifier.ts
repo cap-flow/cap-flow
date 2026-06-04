@@ -67,6 +67,16 @@ export function classifyHistory(
   return classified;
 }
 
+// P2: fnName'ы allowance-ops, которые DeBank иногда отдаёт БЕЗ cate_id='approve'
+// и token_approve (→ падали в unknown). При пустом movement классифицируем по
+// fnName в `approve`. Всё прочее value-less с пустым movement → `noise`.
+const APPROVE_FNS = new Set([
+  "approve",
+  "approveforall",
+  "setapprovalforall",
+  "increaseallowance",
+]);
+
 function classifyOne(
   it: DeBankHistoryItem,
   seq: number,
@@ -336,6 +346,20 @@ function doClassify(
     return base(it, seq, "transfer_in", protocol, movement, status);
   }
 
+  // 13. P2 empty-movement value-less fallback (non-dex / null / other / perp
+  // projects: spam/zero-value transfer, points, referral, multicall, EIP-7702,
+  // approveForAll on non-dex). No token moved → route out of `unknown`:
+  // approve-family fnNames → `approve`, everything else → `noise`. classifyJunk
+  // still tags junk:empty_movement so isJunkOp keeps these inert. The final
+  // `unknown` below is now reachable ONLY for VALUE-BEARING unmatched ops.
+  if (sends.length === 0 && receives.length === 0) {
+    const fnName = (it.tx?.name ?? "").toLowerCase();
+    if (APPROVE_FNS.has(fnName)) {
+      return base(it, seq, "approve", protocol, movement, status);
+    }
+    return base(it, seq, "noise", protocol, movement, status);
+  }
+
   return base(it, seq, "unknown", protocol, movement, status);
 }
 
@@ -501,6 +525,12 @@ function classifyDex(
         "needs_backfill",
       ]);
     }
+    // P2: value-less empty-movement op on a DEX project (approve/setApprovalForAll
+    // on Aerodrome/Uniswap V4, или прочий state-only вызов). Route out of `unknown`.
+    if (APPROVE_FNS.has(fnName)) {
+      return base(it, seq, "approve", protocol, movement, status);
+    }
+    return base(it, seq, "noise", protocol, movement, status);
   }
   return base(it, seq, "unknown", protocol, movement, status);
 }

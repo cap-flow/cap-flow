@@ -81,7 +81,25 @@
   ⚠ 9 строк остаются unknown до ре-синка кошелька. ⚠ Re-audit при будущем backfill movement: realized_pnl.ts
   handleReward/computeRewardIncomeByFamily НЕ зовут isJunkOp — безопасны только из-за пустого movement сейчас.
 - ~~**P1** (9): UniV3 `collect`~~ — см. выше.
-- **P2** (54): hard-allowlist value-less селекторов (points/approve/referral) → `noise`/`approve`, убрать из unknown-очереди.
+- **P2 ✅ DONE (2026-06-04, understand-workflow wf_9c86160b + owner-decision)**: 54 value-less unknown'а
+  выведены из unknown через НОВЫЙ терминальный `op_type='noise'` (owner выбрал «честный» вариант vs reuse-типов
+  vs не-трогать). On-chain декод подтвердил: ВСЕ 54 value-safe (net-zero на EOA, уже несут junk:empty_movement).
+  Маппинг: approve-семья (approve/approveForAll/setApprovalForAll/increaseAllowance) → `approve`; всё прочее
+  value-less (points bulkAddFxtlPoints×21, spam/zero-value transfer×25, Gearbox multicall×2 [value в credit-account,
+  не EOA], setTraderReferralCodeByUser, EIP-7702 пустой-fnName) → `noise`. Механизм: ОБОБЩЁННЫЙ empty-movement
+  fallback ПЕРЕД финальным unknown в ОБОИХ tail'ах (doClassify:13 + classifyDex, после P1-collect-ветки):
+  `sends==0 && receives==0` → APPROVE_FNS?approve:noise. Финальный `unknown` теперь достижим ТОЛЬКО для
+  value-bearing (непустой movement) — это и есть value-bar. `noise` сохраняет junk:empty_movement → isJunkOp=true
+  → инертно (нет exhaustive-switch/assertNever; op_type=text без CHECK-констрейнта → миграция не нужна).
+  Изменения: OpType union +noise в ucb/src/types.ts + apps/api types.ts (3-я копия = web re-export, ucb rebuilt);
+  OP_TYPE_LABEL +noise (PortfolioView.tsx, exhaustive Record). Тесты +13 (api), +10 (web classifier.p2noise.test.ts),
+  обновлены 3 unknown→noise ассерта. Регрессия: api 1083/1083, web 747/747, tsc 0 ошибок обоих.
+  ⚠ Deviation от owner-формулировки: referral отнёс к `noise` (не approve) — это не allowance, честнее. ⚠ 54 строки
+  остаются unknown в БД до ре-синка кошельков.
+- ~~**P2** (54): hard-allowlist value-less селекторов~~ — см. выше.
+
+**ИТОГ unknown→0**: P0 (6 wrapper) + P1 (9 collect) + P2 (54 noise) = все 69 unknown типизированы. Финальный
+`unknown` достижим только для value-bearing непустого movement (CI-bar). ⚠ Все 69 строк в БД ждут ре-синка.
 → unknown: 6 типизируются, 9 типизируются+backfill, 54 → noise. **unknown→0.**
 
 ## Self-extending feedback loop

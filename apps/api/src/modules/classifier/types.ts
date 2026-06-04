@@ -28,6 +28,7 @@ export type OpType =
   | "approve"
   | "failed"
   | "gas_topup"
+  | "noise" // value-less state-only вызов (points/referral/spam/zero-value transfer/EIP-7702) — $0, инертно
   | "unknown";
 
 export type ProtocolCategory =

@@ -554,9 +554,11 @@ describe("classifyHistory — fallbacks (no project)", () => {
     expect(classifyHistory([it], ctx())[0]!.type).toBe("transfer_in");
   });
 
-  it("no sends, no receives, no project → unknown", () => {
+  // P2: пустой movement без распознанного fnName → noise (value-less), не unknown.
+  // Финальный unknown теперь достижим ТОЛЬКО для value-bearing (непустой movement).
+  it("no sends, no receives, no project → noise", () => {
     const it = item({});
-    expect(classifyHistory([it], ctx())[0]!.type).toBe("unknown");
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("noise");
   });
 });
 
@@ -826,13 +828,109 @@ describe("classifyHistory — UniV3 collect empty movement (P1)", () => {
     expect(r.protocol?.id).toBe("op_velodrome3");
   });
 
-  // Негатив: dex-op без collect/NPM и без движения остаётся unknown (guard не широк).
-  it("dex op без collect/NPM и пустой movement → остаётся unknown", () => {
+  // P2: dex-op без collect/NPM и без движения теперь → noise (value-less), не unknown.
+  it("dex op без collect/NPM и пустой movement → noise (P2)", () => {
     const it = item({
       chain: "arb",
       projectId: "arb_uniswap3",
       tx: { name: "someOtherFn", to_addr: "0xdeadbeef00000000000000000000000000000000" },
     });
-    expect(classifyHistory([it], ctx())[0]!.type).toBe("unknown");
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("noise");
+  });
+});
+
+/* -------- P2: empty-movement value-less ops → approve / noise (unknown=0) --- */
+// 54 value-less unknown'ов: approve-семья → approve; всё прочее (points/referral/
+// spam/zero-value transfer/multicall/EIP-7702) → noise. Все сохраняют
+// junk:empty_movement → isJunkOp=true → инертны для cost basis. Финальный unknown
+// теперь достижим ТОЛЬКО для value-bearing (непустой movement). Покрывает оба
+// tail'а: classifyDex (dex-протоколы) и doClassify (null/other/perp).
+describe("classifyHistory — P2 empty-movement noise/approve fallback", () => {
+  it("approve (dex-проект, нет cate_id) → approve [classifyDex tail]", () => {
+    const it = item({
+      chain: "base",
+      projectId: "base_aerodrome", // dex
+      tx: { name: "approve" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("approve");
+  });
+
+  it("setApprovalForAll (Uniswap V4 dex) → approve", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_uniswap4",
+      tx: { name: "setApprovalForAll" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("approve");
+  });
+
+  it("approveForAll (LFJ → other, doClassify tail) → approve", () => {
+    const it = item({
+      chain: "avax",
+      projectId: "avax_lfj",
+      tx: { name: "approveForAll" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("approve");
+  });
+
+  it("bulkAddFxtlPoints (Frax points) → noise", () => {
+    const it = item({ chain: "frax", projectId: "frax", tx: { name: "bulkAddFxtlPoints" } });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("noise");
+  });
+
+  it("setTraderReferralCodeByUser (referral) → noise", () => {
+    const it = item({ chain: "base", projectId: "base_avantis", tx: { name: "setTraderReferralCodeByUser" } });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("noise");
+  });
+
+  it("multicall (Gearbox, value в credit-account) → noise [EOA инертно]", () => {
+    const it = item({ chain: "eth", projectId: "gearbox", tx: { name: "multicall" } });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("noise");
+  });
+
+  it("spam/zero-value transfer (нет проекта) → noise", () => {
+    const it = item({ chain: "eth", tx: { name: "transfer" } });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("noise");
+  });
+
+  it("пустой fnName (EIP-7702 self-delegation) → noise", () => {
+    const it = item({ chain: "arb", tx: { name: "" } });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("noise");
+  });
+
+  // Инертность: noise сохраняет junk:empty_movement → isJunkOp скипает в движках.
+  it("noise сохраняет junk:empty_movement (inert)", () => {
+    const it = item({ chain: "eth", tx: { name: "transfer" } });
+    const r = classifyHistory([it], ctx())[0]!;
+    expect(r.type).toBe("noise");
+    expect(r.notes ?? []).toContain("junk:empty_movement");
+  });
+
+  // Регрессия P1: collect+NPM (dex, пустой movement) остаётся claim_rewards, НЕ noise.
+  it("P1 регрессия: collect+NPM → claim_rewards, не noise", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_uniswap3",
+      tx: { name: "collect", to_addr: "0xc36442b4a4522e871399cd717abdd847ab11fe88" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("claim_rewards");
+  });
+
+  // Value-bearing op (непустой movement) без матча остаётся unknown (value-bar).
+  it("value-bearing unmatched (непустой movement) остаётся unknown", () => {
+    // 3 receives без stable+volatile pair, dex-проект, fnName неизвестен:
+    // не swap (3 receives), не collect, есть movement → unknown сохраняется.
+    const it = item({
+      chain: "arb",
+      projectId: "arb_uniswap3",
+      receives: [
+        { token: "arb:weth", amount: 1 },
+        { token: "arb:wbtc", amount: 1 },
+        { token: "arb:eth", amount: 1 },
+      ],
+      tx: { name: "weirdFn" },
+    });
+    const r = classifyHistory([it], ctx())[0]!;
+    expect(r.type).not.toBe("noise");
   });
 });

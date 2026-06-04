@@ -48,6 +48,7 @@ const OP_TYPE_LABEL: Record<OpType, { en: string; ru: string }> = {
   approve:        { en: "Approve",            ru: "Approve" },
   failed:         { en: "Failed",             ru: "Неудачные" },
   gas_topup:      { en: "Gas top-up",         ru: "Пополнение газа" },
+  noise:          { en: "Noise",              ru: "Шум" },
   unknown:        { en: "Other",              ru: "Прочее" },
 };
 

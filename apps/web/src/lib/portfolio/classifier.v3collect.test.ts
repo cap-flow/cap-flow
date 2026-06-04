@@ -87,13 +87,14 @@ describe("client classifier — UniV3 collect empty movement (P1)", () => {
     expect(r.protocol?.id).toBe("op_velodrome3");
   });
 
-  it("dex op без collect/NPM и пустой movement → остаётся unknown", () => {
+  // P2: пустой movement без collect/NPM теперь → noise (value-less), не unknown.
+  it("dex op без collect/NPM и пустой movement → noise (P2)", () => {
     const op = item({
       chain: "arb",
       projectId: "arb_uniswap3",
       fnName: "someOtherFn",
       toAddr: "0xdeadbeef00000000000000000000000000000000",
     });
-    expect(classifyHistory([op], ctx())[0]!.type).toBe("unknown");
+    expect(classifyHistory([op], ctx())[0]!.type).toBe("noise");
   });
 });
