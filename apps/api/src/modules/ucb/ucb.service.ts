@@ -27,6 +27,7 @@
  * `capflow.feature.ucbServerShadow` flag, refresh-worker wiring).
  */
 import { runUcbPipelineForWallet } from "@cap-flow/ucb/ucb_pipeline";
+import { linkAsyncDeposits } from "@cap-flow/ucb/async_deposit_linker";
 import {
   buildOpenPositions,
   type OpenPosition,
@@ -148,11 +149,26 @@ export async function computePositions(
     deps.costBasisOverrideByHash ?? new Map<string, number>();
   const lotMethodology: LotMethodology = deps.lotMethodology ?? "FIFO";
 
+  // ── Step 0: link async-deposit pairs (GMX V2 GLV/GM, Adrena, GMSOL, Flash) ──
+  // GMX-style deposits execute in TWO txs: Tx A (user sends USDC/ETH) + Tx B
+  // (keeper mints the GM/GLV receipt). The client runs this in
+  // LoadedWalletsProvider; the server port previously skipped it, so the receipt
+  // lot got DeBank's receipt-spot m.usd instead of the USDC actually paid. When
+  // the receipt is then moved cross-protocol (GLV → Morpho collateral), the
+  // cost basis came out wrong (artur Morpho $15,535 vs paid $21,586). The linker
+  // writes `linkedCostBasisUsd` (= Σ Tx A outgoing) onto Tx B; the shared engine
+  // already reads it (position_lot_cost_basis / cross_protocol). Per-wallet, like
+  // the client. Pure + immutable (returns new ops arrays).
+  const linkedWallets = wallets.map((w) => ({
+    ...w,
+    ops: linkAsyncDeposits(w.ops),
+  }));
+
   // ── Step 1: per-wallet UCB pipeline → lot tracker (= newTrackers) ──
   const lotsByWallet = new Map<string, LotTracker>();
   const walletNameById = new Map<string, string>();
-  for (const w of wallets) walletNameById.set(w.wallet.id, w.wallet.name);
-  for (const w of wallets) {
+  for (const w of linkedWallets) walletNameById.set(w.wallet.id, w.wallet.name);
+  for (const w of linkedWallets) {
     const result = runUcbPipelineForWallet({
       walletId: w.wallet.id,
       ops: w.ops,
@@ -167,7 +183,7 @@ export async function computePositions(
   }
 
   // ── Step 1b: histPrices from the B1 op-token-price cache ──
-  const allOps: ClassifiedOp[] = wallets.flatMap((w) => w.ops);
+  const allOps: ClassifiedOp[] = linkedWallets.flatMap((w) => w.ops);
   const { histPrices } = await deps.opPricingService.priceMapForOps(allOps);
 
   // ── Step 2: buildOpenPositions ──
@@ -175,7 +191,7 @@ export async function computePositions(
   // (empty until B3); the main histPrices feeds the lending override below —
   // exactly as the client wires it (use_computed_positions.ts).
   const positionsRaw = buildOpenPositions(
-    wallets.map((w) => ({
+    linkedWallets.map((w) => ({
       wallet: w.wallet,
       ops: w.ops,
       ...(w.live !== undefined && { live: w.live }),
@@ -221,7 +237,7 @@ export async function computePositions(
 
   // ── Step 3: lending cost basis override (FIFO/LIFO/WAC) ──
   const opsByWallet = new Map<string, ClassifiedOp[]>();
-  for (const w of wallets) opsByWallet.set(w.wallet.id, w.ops);
+  for (const w of linkedWallets) opsByWallet.set(w.wallet.id, w.ops);
   const lendingResult = applyLendingCostBasisOverride(
     v3Overridden,
     opsByWallet,
