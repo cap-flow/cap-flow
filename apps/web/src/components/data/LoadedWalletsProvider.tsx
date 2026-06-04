@@ -58,6 +58,7 @@ import type {
 } from "@/lib/portfolio/types";
 import { useIntegrations } from "@/lib/integrations";
 import { useAppConfig } from "@/features/app-config/hooks";
+import { setApiConcurrencyLimit } from "@/lib/api/client";
 import { useWallets, type SavedWallet, type WalletChain } from "@/lib/wallets";
 import { useAuth } from "@/features/auth/AuthProvider";
 import { chainOpsApi, type ChainOpInput } from "@/features/chain-ops/api";
@@ -249,6 +250,10 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
     autoRefreshMinIntervalMs: appConfig.autoRefreshMinIntervalMs,
     manualRefreshMinIntervalMs: appConfig.manualRefreshMinIntervalMs,
   };
+  // Глобальный лимит одновременных запросов к внешним API (см. api/client).
+  useEffect(() => {
+    setApiConcurrencyLimit(appConfig.maxConcurrentApiRequests);
+  }, [appConfig.maxConcurrentApiRequests]);
 
   const keyFor = useCallback(
     (chain: WalletChain): string => {

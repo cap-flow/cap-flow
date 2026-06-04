@@ -240,6 +240,19 @@ export function buildSettingsCatalog(env: Env): SettingDefinition[] {
       max: 24 * 60 * 60 * 1000,
       hotReload: "live",
     },
+    {
+      key: "frontend.maxConcurrentApiRequests",
+      scope: "frontend",
+      group: "Нагрузка на API",
+      label: "Макс. одновременных запросов к внешним API",
+      description:
+        "Сколько запросов к внешним сервисам (DeBank, Helius, Etherscan, Alchemy, Krystal) может идти ОДНОВРЕМЕННО в браузере юзера. Сглаживает пики при обновлении. 1 = строго по очереди (медленно, но ровно), 3-4 = мягкие пики (по умолчанию 4 ≈ как сейчас), больше = быстрее, но резче. Кошельки и так грузятся последовательно.",
+      valueType: "number",
+      defaultValue: 4,
+      min: 1,
+      max: 20,
+      hotReload: "live",
+    },
 
     /* ------------------- Серверный cron-рефреш (backend) ------------------ */
     {

@@ -17,6 +17,8 @@ export interface AppConfig {
   autoRefreshMinIntervalMs: number;
   /** Мин. интервал между ручными обновлениями кнопкой «Обновить» (мс). 0 = выкл. */
   manualRefreshMinIntervalMs: number;
+  /** Макс. одновременных запросов к внешним API (upstream) в браузере. */
+  maxConcurrentApiRequests: number;
 }
 
 /** Дефолты — синхронны с catalog defaults на бэкенде. */
@@ -25,6 +27,7 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   historyMaxPagesIncremental: 5,
   autoRefreshMinIntervalMs: 60 * 60 * 1000,
   manualRefreshMinIntervalMs: 60 * 60 * 1000,
+  maxConcurrentApiRequests: 4,
 };
 
 /**
@@ -54,6 +57,9 @@ export function useAppConfig(): { config: AppConfig; loading: boolean } {
     manualRefreshMinIntervalMs:
       raw?.["frontend.manualRefreshMinIntervalMs"] ??
       APP_CONFIG_DEFAULTS.manualRefreshMinIntervalMs,
+    maxConcurrentApiRequests:
+      raw?.["frontend.maxConcurrentApiRequests"] ??
+      APP_CONFIG_DEFAULTS.maxConcurrentApiRequests,
   };
 
   return { config, loading: q.isLoading };

@@ -166,6 +166,63 @@ export const api = {
     request<T, B>(path, schema, { method: "POST", body, skipAuth: true }),
 };
 
+/* ------------------------ upstream concurrency limiter -------------------- */
+
+/**
+ * Глобальный ограничитель одновременных запросов к ВНЕШНИМ сервисам (через
+ * upstream-proxy: DeBank, Helius, Etherscan, Alchemy, Krystal). Сглаживает
+ * пики: при обновлении кошельков не уходит всё сразу — не больше N запросов
+ * к внешним API в любой момент. Лимит настраивается админом
+ * (`frontend.maxConcurrentApiRequests`) через `setApiConcurrencyLimit`.
+ * НЕ затрагивает внутренний app-API (auth/settings/portfolio) — только
+ * пути `/v1/upstream/...`.
+ */
+class Semaphore {
+  private active = 0;
+  private readonly queue: Array<() => void> = [];
+  constructor(private limit: number) {}
+
+  setLimit(n: number): void {
+    this.limit = Math.max(1, Math.floor(n));
+    this.pump();
+  }
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.active -= 1;
+      this.pump();
+    }
+  }
+
+  private acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => this.queue.push(resolve));
+  }
+
+  private pump(): void {
+    while (this.active < this.limit && this.queue.length > 0) {
+      this.active += 1;
+      const next = this.queue.shift();
+      next?.();
+    }
+  }
+}
+
+// Дефолт 4 ≈ текущий пик (3 live-вызова на кошелёк). Поставь 1 — строго по
+// очереди, 2-3 — мягкие пики. Кошельки и так грузятся последовательно.
+const upstreamSemaphore = new Semaphore(4);
+
+/** Задать лимит одновременных upstream-запросов (вызывается из app-config). */
+export function setApiConcurrencyLimit(n: number): void {
+  if (Number.isFinite(n) && n >= 1) upstreamSemaphore.setLimit(n);
+}
+
 /* ----------------------------- raw upstream-proxy fetch -------------------- */
 
 /**
@@ -193,6 +250,18 @@ export interface ApiFetchOptions {
 }
 
 export async function apiFetch(
+  path: string,
+  opts: ApiFetchOptions = {}
+): Promise<Response> {
+  // Внешние API (upstream-proxy) — через глобальный лимитер одновременности,
+  // чтобы не было пика запросов. Внутренний app-API не троттлим.
+  if (path.startsWith("/v1/upstream/")) {
+    return upstreamSemaphore.run(() => apiFetchRaw(path, opts));
+  }
+  return apiFetchRaw(path, opts);
+}
+
+async function apiFetchRaw(
   path: string,
   opts: ApiFetchOptions = {}
 ): Promise<Response> {
