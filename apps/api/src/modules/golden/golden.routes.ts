@@ -48,7 +48,10 @@ const createBody = z.object({
   marketKey: z.string().max(200).nullable(),
   openHash: z.string().max(120).nullable(),
   label: z.string().min(1).max(60),
-  positionKey: z.string().max(300).nullable().default(null),
+  // A3.6 stable identity — REQUIRED. A missing key is what let the 2026-06-03
+  // bulk-mark scripts create duplicate rows (null keys escape the active-row
+  // unique index). The UI always sends `positionKey(position)`.
+  positionKey: z.string().min(1).max(300),
   kind: z.enum(["golden", "wrong"]).default("golden"),
   issue: z.string().max(40).nullable().default(null),
   // A3.6 derivation (knowledge base): ops + cost-flow trace, opaque jsonb.

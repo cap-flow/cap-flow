@@ -47,7 +47,8 @@ export interface CreateGoldenBody {
   marketKey: string | null;
   openHash: string | null;
   label: string;
-  positionKey: string | null;
+  /** A3.6 stable identity — required by the server (rejects a missing key). */
+  positionKey: string;
   kind: "golden" | "wrong";
   issue: string | null;
   derivation?: unknown;

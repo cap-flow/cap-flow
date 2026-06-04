@@ -10,7 +10,7 @@
  * the route layer converts to/from `number` at the wire boundary.
  */
 import { type Database, schema } from "@cap-flow/db";
-import { and, desc, eq, isNotNull } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 export type GoldenCaseRow = typeof schema.goldenCases.$inferSelect;
 export type AnomalyFlagRow = typeof schema.anomalyFlags.$inferSelect;
@@ -18,8 +18,13 @@ export type AnomalyFlagRow = typeof schema.anomalyFlags.$inferSelect;
 export interface GoldenCaseInsert {
   readonly walletId: string;
   readonly positionId: string;
-  /** A3.6 stable global identity (see @cap-flow/ucb positionKey). */
-  readonly positionKey: string | null;
+  /**
+   * A3.6 stable global identity (see @cap-flow/ucb positionKey) — the dedup
+   * key. Required (non-null) so the active-row upsert always applies; the
+   * create endpoint rejects a missing key and the promote path derives an
+   * anchor-based fallback.
+   */
+  readonly positionKey: string;
   readonly chain: string;
   readonly protocolId: string;
   readonly marketKey: string | null;
@@ -63,9 +68,10 @@ export class GoldenRepository {
   // ── golden_cases ────────────────────────────────────────────────────
 
   /**
-   * Upsert by (walletId, positionId) — re-marking a position UPDATES its
-   * golden case rather than violating the unique constraint (fixes the 500
-   * on re-mark). Marking is idempotent.
+   * Upsert by the ACTIVE `position_key` — re-marking a position UPDATES its
+   * active golden case rather than inserting a duplicate. Marking is
+   * idempotent. (Fixes the 2026-06-03 duplicate-row bug: the 0028 index was
+   * partial `WHERE position_key IS NOT NULL`, so null keys escaped dedup.)
    */
   async createGolden(input: GoldenCaseInsert): Promise<GoldenCaseRow> {
     const values = {
@@ -98,10 +104,10 @@ export class GoldenRepository {
       .onConflictDoUpdate({
         // A3.6: identity is the stable positionKey, not (wallet, positionId).
         target: schema.goldenCases.positionKey,
-        // The unique index is PARTIAL (WHERE position_key IS NOT NULL); the
-        // ON CONFLICT target MUST repeat that predicate or Postgres can't match
-        // the index (error 42P10 → 500 on save). See migration 0028.
-        targetWhere: isNotNull(schema.goldenCases.positionKey),
+        // The unique index is PARTIAL (WHERE status='active'); the ON CONFLICT
+        // arbiter MUST repeat that predicate or Postgres can't match the index
+        // (error 42P10 → 500 on save). See migration 0032.
+        targetWhere: eq(schema.goldenCases.status, "active"),
         set: {
           positionId: values.positionId,
           label: values.label,

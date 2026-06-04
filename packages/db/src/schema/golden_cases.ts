@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   index,
   jsonb,
@@ -121,9 +122,14 @@ export const goldenCases = pgTable(
       .defaultNow(),
   },
   (table) => [
-    // A3.6: stable global identity. (Partial WHERE position_key IS NOT NULL is
-    // enforced in SQL migration 0028; the builder here is for type/studio.)
-    uniqueIndex("golden_cases_position_key_uq").on(table.positionKey),
+    // A3.6: stable global identity, deduped among ACTIVE rows. (Partial
+    // WHERE status='active' is enforced in SQL migration 0032 — replacing the
+    // 0028 `WHERE position_key IS NOT NULL` index, which let NULL keys escape
+    // dedup; the builder here is for type/studio.) Re-marking an active anchor
+    // updates it; soft-retired history rows are excluded and never block it.
+    uniqueIndex("golden_cases_active_position_key_uq")
+      .on(table.positionKey)
+      .where(sql`${table.status} = 'active'`),
     index("golden_cases_wallet_idx").on(table.walletId),
     index("golden_cases_chain_market_idx").on(table.chain, table.marketKey),
     index("golden_cases_label_idx").on(table.label),

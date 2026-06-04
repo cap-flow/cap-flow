@@ -6,6 +6,8 @@
  * dedicated test account). All mutations are audited, since a golden case is
  * a proven-correct oracle the detector and CI gate on.
  */
+import { realWalletId } from "@cap-flow/ucb/identity";
+
 import { NotFoundError } from "../../core/errors.js";
 import type { AuditService } from "../audit/audit.service.js";
 
@@ -20,8 +22,8 @@ import {
 export interface CreateGoldenInput {
   readonly walletId: string;
   readonly positionId: string;
-  /** A3.6 stable global identity (see @cap-flow/ucb positionKey). */
-  readonly positionKey: string | null;
+  /** A3.6 stable global identity (see @cap-flow/ucb positionKey) — required. */
+  readonly positionKey: string;
   readonly chain: string;
   readonly protocolId: string;
   readonly marketKey: string | null;
@@ -192,9 +194,11 @@ export class GoldenService {
     const result = await this.repo.promoteAnomaly(anomalyId, {
       walletId: anomaly.walletId,
       positionId: anomaly.positionId,
-      // Promoted anomalies lack supply symbols → no precise positionKey;
-      // re-mark from the position UI to attach the stable key.
-      positionKey: null,
+      // Promoted anomalies lack supply symbols → no precise positionKey, but the
+      // key must be non-null so the active-row dedup applies. Derive an
+      // anchor-based fallback (marketKey, else the anomaly id for uniqueness);
+      // re-mark from the position UI to attach the precise supply-aware key.
+      positionKey: `${realWalletId(anomaly.walletId)}|${anomaly.chain ?? ""}|${anomaly.protocolId}|${anomaly.marketKey ?? anomalyId}|`,
       chain: anomaly.chain ?? "",
       protocolId: anomaly.protocolId,
       marketKey: anomaly.marketKey,
