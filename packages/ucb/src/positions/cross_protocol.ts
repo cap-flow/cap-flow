@@ -589,6 +589,14 @@ function emitPositionEvent(
       : tokenUsdHist(m, op.chain, op.time, histPrices);
     const usd = lotCost > 0 ? lotCost : fallbackUsd;
     if (lotCost > 0) attributedCost += lotCost;
+    // UCB: стейбл-OUT без cost-basis лота (= занятый/нетрассированный USDC,
+    // напр. Morpho borrow → купить PT в leverage-петле) — это РЕАЛЬНО
+    // потраченные доллары. Считаем по номиналу ($1), а НЕ роняем receipt
+    // на его market-ценник (anti-recurrence #1: receipt m.usd ≠ уплаченное).
+    // «Доллар = доллар, даже занятый»; долг учитывается отдельно (netStartUsd).
+    // Non-stable с lotCost=0 остаётся strict-0 (Phase I: WBTC withdraw @market
+    // раздувал бы downstream consume) — поэтому ветка ТОЛЬКО для стейблов.
+    else if (isStableSymbol(m.symbol)) attributedCost += m.amount;
     outTokens.push({ symbol: m.symbol, amount: m.amount, usd });
   }
 
