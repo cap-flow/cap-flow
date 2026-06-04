@@ -66,7 +66,21 @@
   web portfolio 521/521, tsc clean. Backlog из верификации: автоматический parity-тест (один fixture-набор
   через оба classifier'а) + isLendingReceipt-agreement guard (server protocols.ts vs @cap-flow/ucb dist).
 - ~~**P0** (6 строк, ±$10k): wrapper'ы `redeemDelegations`/`execute`~~ — см. выше.
-- **P1** (9): UniV3 `collect` → (a) topic0→claim_rewards (классификация сразу), (b) суммы из Krystal/on-chain (`needs_backfill`).
+- **P1 ✅ DONE (2026-06-04, understand-workflow wf_b600e3c8)**: 9 UniV3 `collect` с ПУСТЫМ movement
+  (8 eth + 1 arb, counterparty=NPM `0xc36442…88`) классифицируются как `claim_rewards`. Guard в `classifyDex`
+  перед финальным unknown (оба classifier'а): `protocol && sends==0 && receives==0 && (fnName==='collect' ||
+  to_addr===NPM)` → claim_rewards, notes `['v3-collect-fees','needs_backfill']`. protocol.id chain-префиксуется
+  ОБОБЩЁННО (`startsWith(\`${chain}_\`) ? protocol : prefix`) — чинит eth-баг (голый 'uniswap3' не матчил LP)
+  без мислейбла не-Uniswap dex (Velodrome остаётся velodrome3). **Scope = ТОЛЬКО классификация, без backfill**:
+  on-chain декод обоих sample-txs дал amount0=0/amount1=0 (zero-fee collect, нечего backfill'ить).
+  **Double-count = SAFE** (верифицировано по file:line): пустой movement → $0; `classifyJunk` ставит
+  junk:empty_movement → `isJunkOp` скипает в computeClaimedFeesUsd/buildClaimedFeesHistory ДО чтения movement;
+  Krystal override (override.ts:294-296) полностью заменяет feesClaimedUsd. Тест на инертность подтверждает.
+  Критично: NPM из `it.tx.to_addr` (op.counterparty undefined внутри classifyDex). Тесты +6 (api),
+  +5 (web `classifier.v3collect.test.ts`). Регрессия: api classifier 423/423, web portfolio 526/526, tsc clean.
+  ⚠ 9 строк остаются unknown до ре-синка кошелька. ⚠ Re-audit при будущем backfill movement: realized_pnl.ts
+  handleReward/computeRewardIncomeByFamily НЕ зовут isJunkOp — безопасны только из-за пустого movement сейчас.
+- ~~**P1** (9): UniV3 `collect`~~ — см. выше.
 - **P2** (54): hard-allowlist value-less селекторов (points/approve/referral) → `noise`/`approve`, убрать из unknown-очереди.
 → unknown: 6 типизируются, 9 типизируются+backfill, 54 → noise. **unknown→0.**
 

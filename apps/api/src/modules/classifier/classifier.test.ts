@@ -757,3 +757,82 @@ describe("classifyHistory — delegation/execute wrappers (no project_id)", () =
     expect(classifyHistory([it], ctx())[0]!.type).toBe("swap");
   });
 });
+
+/* ------- P1: UniV3 NPM collect() с пустым movement (claim_rewards) --------- */
+// DeBank иногда возвращает collect() с ПУСТЫМ movement (zero-fee collect или
+// gap). protocol.category=dex -> classifyDex, но все ветки требуют sends/receives
+// -> падало в unknown. Фикс: fnName=collect ЛИБО to_addr=NPM -> claim_rewards.
+// Численно инертно (пустой movement -> $0; junk:empty_movement -> isJunkOp скип;
+// Krystal override владеет fee). protocol.id chain-префиксуется для LP-матчинга.
+describe("classifyHistory — UniV3 collect empty movement (P1)", () => {
+  const NPM = "0xc36442b4a4522e871399cd717abdd847ab11fe88";
+
+  it("eth NPM collect, пустой movement → claim_rewards, protocol.id=eth_uniswap3", () => {
+    const it = item({
+      chain: "eth",
+      projectId: "uniswap3", // как в DeBank для eth — без chain-префикса
+      tx: { name: "collect", to_addr: NPM },
+    });
+    const r = classifyHistory([it], ctx())[0]!;
+    expect(r.type).toBe("claim_rewards");
+    expect(r.protocol?.id).toBe("eth_uniswap3");
+    expect(r.notes ?? []).toContain("v3-collect-fees");
+  });
+
+  it("arb collect → claim_rewards, protocol.id=arb_uniswap3 (префикс сохранён)", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_uniswap3",
+      tx: { name: "collect", to_addr: NPM },
+    });
+    const r = classifyHistory([it], ctx())[0]!;
+    expect(r.type).toBe("claim_rewards");
+    expect(r.protocol?.id).toBe("arb_uniswap3");
+  });
+
+  // Численная инертность (double-count safety): reclassified collect c пустым
+  // movement всё равно получает junk:empty_movement → isJunkOp=true → fee-движок
+  // его скипает; реальную сумму fee владеет Krystal-override. Нет двойного счёта.
+  it("reclassified collect всё ещё junk:empty_movement (inert, no double-count)", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_uniswap3",
+      tx: { name: "collect", to_addr: NPM },
+    });
+    const r = classifyHistory([it], ctx())[0]!;
+    expect(r.type).toBe("claim_rewards");
+    expect(r.notes ?? []).toContain("junk:empty_movement");
+  });
+
+  it("прямой вызов NPM с другим fnName (multicall) → тоже claim_rewards", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_uniswap3",
+      tx: { name: "multicall", to_addr: NPM },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("claim_rewards");
+  });
+
+  // Обобщённый префикс НЕ мислейблит не-Uniswap dex: Velodrome collect остаётся
+  // velodrome3 (а не форсится в uniswap3).
+  it("Velodrome collect empty movement → claim_rewards, protocol.id=op_velodrome3", () => {
+    const it = item({
+      chain: "op",
+      projectId: "op_velodrome3",
+      tx: { name: "collect", to_addr: "0xdeadbeef00000000000000000000000000000000" },
+    });
+    const r = classifyHistory([it], ctx())[0]!;
+    expect(r.type).toBe("claim_rewards");
+    expect(r.protocol?.id).toBe("op_velodrome3");
+  });
+
+  // Негатив: dex-op без collect/NPM и без движения остаётся unknown (guard не широк).
+  it("dex op без collect/NPM и пустой movement → остаётся unknown", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_uniswap3",
+      tx: { name: "someOtherFn", to_addr: "0xdeadbeef00000000000000000000000000000000" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("unknown");
+  });
+});

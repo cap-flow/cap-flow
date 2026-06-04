@@ -478,6 +478,30 @@ function classifyDex(
       "v3-collect-fees",
     ]);
   }
+  // P1: NPM collect() with EMPTY movement. DeBank sometimes returns no token
+  // amounts for a fee collect (zero-fee collect, or a movement gap). Both
+  // sends and receives are empty here, so the branches above can't fire and it
+  // would fall to `unknown`. A `collect` on a DEX — or any direct call to the
+  // Uniswap V3 NonfungiblePositionManager — is a fee claim. Numerically inert:
+  // empty movement → $0; classifyJunk still tags junk:empty_movement so
+  // isJunkOp keeps it out of the fee engine; Krystal owns the real fee value.
+  // We chain-prefix protocol.id (eth rows arrive as bare "uniswap3") so the
+  // op matches its live LP position downstream — generically, so a Velodrome/
+  // Aerodrome collect keeps its own protocol id rather than being forced to uniswap.
+  if (protocol && sends.length === 0 && receives.length === 0) {
+    const fnName = (it.tx?.name ?? "").toLowerCase();
+    const NPM = "0xc36442b4a4522e871399cd717abdd847ab11fe88";
+    const toNpm = (it.tx?.to_addr ?? "").toLowerCase() === NPM;
+    if (fnName === "collect" || toNpm) {
+      const cp = protocol.id.startsWith(`${it.chain}_`)
+        ? protocol
+        : { id: `${it.chain}_${protocol.id}`, name: protocol.name, category: protocol.category };
+      return base(it, seq, "claim_rewards", cp, movement, status, [
+        "v3-collect-fees",
+        "needs_backfill",
+      ]);
+    }
+  }
   return base(it, seq, "unknown", protocol, movement, status);
 }
 

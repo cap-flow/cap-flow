@@ -620,6 +620,28 @@ function classifyDex(
       "v3-decrease-liquidity",
     ]);
   }
+  // P1: NPM collect() с ПУСТЫМ movement. DeBank иногда не отдаёт суммы для
+  // fee-collect (zero-fee collect или gap) — обе стороны пусты, ветки выше не
+  // срабатывают, и op падал в `unknown`. `collect` на DEX — или любой прямой
+  // вызов Uniswap V3 NonfungiblePositionManager — это fee-claim. Численно
+  // инертно: пустой movement → $0; classifyJunk ставит junk:empty_movement →
+  // isJunkOp держит вне fee-движка; реальную сумму fee владеет Krystal.
+  // protocol.id chain-префиксуем (eth-строки приходят как голый "uniswap3"),
+  // generically — Velodrome/Aerodrome collect сохраняет свой id. Зеркало server.
+  if (protocol && sends.length === 0 && receives.length === 0) {
+    const fnName = (it.tx?.name ?? "").toLowerCase();
+    const NPM = "0xc36442b4a4522e871399cd717abdd847ab11fe88";
+    const toNpm = (it.tx?.to_addr ?? "").toLowerCase() === NPM;
+    if (fnName === "collect" || toNpm) {
+      const cp = protocol.id.startsWith(`${it.chain}_`)
+        ? protocol
+        : { id: `${it.chain}_${protocol.id}`, name: protocol.name, category: protocol.category };
+      return base(it, seq, "claim_rewards", cp, movement, status, [
+        "v3-collect-fees",
+        "needs_backfill",
+      ]);
+    }
+  }
   return base(it, seq, "unknown", protocol, movement, status);
 }
 
