@@ -386,6 +386,37 @@ function doClassify(
     return base(it, seq, "transfer_in", protocol, movement, status);
   }
 
+  // 12.5 Value-bearing multi-token ops на протоколах, которых НЕТ в каталоге
+  // (category "other" / null). Сигналы: named bridge → bridge_out/in по net-flow;
+  // LP/vault/BPT receipt-токен на одной стороне (RAMSES RAM-V2-POS, ICHI IV-*,
+  // Balancer-style BPT "a/b/c") или exit/join fnName → lp_remove/lp_add. Идёт
+  // ПОСЛЕ всех категорий + plain-swap (section 9), так что распознанные протоколы
+  // и 1-в-1 свопы не задеты. Зеркало server-classifier.
+  if (sends.length > 0 && receives.length > 0) {
+    const fnName = (it.tx?.name ?? "").toLowerCase();
+    const pname = `${protocol?.id ?? ""} ${protocol?.name ?? ""}`.toLowerCase();
+    if (/debridge|stargate|across|\bhop\b|celer|synapse|wormhole|layerzero|orbiter|squid/.test(pname)) {
+      const outUsd = sends.reduce((s, m) => s + (m.usd ?? 0), 0);
+      const inUsd = receives.reduce((s, m) => s + (m.usd ?? 0), 0);
+      return base(it, seq, outUsd >= inUsd ? "bridge_out" : "bridge_in", protocol, movement, status, [
+        "heuristic-bridge",
+      ]);
+    }
+    const isLpReceipt = (sym: string) =>
+      /-V\d+-POS$/i.test(sym) || /^IV-/i.test(sym) || sym.includes("/");
+    const sentReceipt = sends.some((m) => isLpReceipt(m.symbol));
+    const recvReceipt = receives.some((m) => isLpReceipt(m.symbol));
+    const exitFn =
+      fnName === "exitpool" || fnName === "redeem" || fnName === "removeliquidity";
+    const joinFn = fnName === "joinpool" || fnName === "addliquidity";
+    if (exitFn || (sentReceipt && !recvReceipt)) {
+      return base(it, seq, "lp_remove", protocol, movement, status, ["heuristic-lp"]);
+    }
+    if (joinFn || (recvReceipt && !sentReceipt)) {
+      return base(it, seq, "lp_add", protocol, movement, status, ["heuristic-lp"]);
+    }
+  }
+
   // 13. P2 empty-movement value-less fallback (non-dex / null / other / perp:
   // spam/zero-value transfer, points, referral, multicall, EIP-7702,
   // approveForAll на non-dex). Движения нет → out of `unknown`: approve-семья →

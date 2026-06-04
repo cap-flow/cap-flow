@@ -39,6 +39,18 @@ const TOKENS: Record<string, DeBankToken> = {
   "op:velo-cl-pos": tok("op:velo-cl-pos", "VELO-CL-POS"),
   "op:weth": tok("op:weth", "WETH", 4356),
   "op:wbtc": tok("op:wbtc", "WBTC", 120590),
+  // P3: LP/vault/BPT receipt tokens on protocols the catalog doesn't name.
+  "arb:ram-v2-pos": tok("arb:ram-v2-pos", "RAM-V2-POS"), // RAMSES CL position NFT
+  "arb:iv-ram": tok("arb:iv-ram", "IV-23-RAM", 1.42), // ICHI vault share
+  "arb:ram": tok("arb:ram", "RAM", 0.1),
+  "arb:usdt0": tok("arb:usdt0", "USD₮0", 1),
+  "sei:bpt-frx": tok("sei:bpt-frx", "sfrxETH/frxETH/wETH", 183), // Jellyverse BPT
+  "sei:frxeth": tok("sei:frxeth", "frxETH", 3000),
+  "sei:sfrxeth": tok("sei:sfrxeth", "sfrxETH", 3100),
+  "sei:weth": tok("sei:weth", "WETH", 3000),
+  "eth:king": tok("eth:king", "KING", 1.31),
+  "eth:eigen": tok("eth:eigen", "EIGEN", 3.5),
+  "eth:wbtc": tok("eth:wbtc", "WBTC", 96000),
 };
 
 const PROJECTS: Record<string, DeBankProject> = {
@@ -932,5 +944,95 @@ describe("classifyHistory — P2 empty-movement noise/approve fallback", () => {
     });
     const r = classifyHistory([it], ctx())[0]!;
     expect(r.type).not.toBe("noise");
+  });
+});
+
+/* ---- P3: value-bearing LP/bridge on unnamed protocols (mmaksimuk) --------- */
+// Полный server re-fetch вскрыл value-bearing unknown на протоколах, которых нет
+// в каталоге (категория "other"): RAMSES/Jellyverse/ICHI/King/deBridge. Секция
+// 12.5 классифицирует их по LP/vault/BPT-receipt токену + exit/join fnName +
+// named-bridge. Все примеры — реальные операции mmaksimuk.
+describe("classifyHistory — P3 LP/bridge heuristic (unnamed protocols)", () => {
+  it("RAMSES mint: OUT стейблы + IN RAM-V2-POS → lp_add", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_ramses",
+      sends: [{ token: "arb:usdt0", amount: 10 }, { token: "arb:usdc", amount: 25 }],
+      receives: [{ token: "arb:ram-v2-pos", amount: 1 }],
+      tx: { name: "mint" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("lp_add");
+  });
+
+  it("RAMSES multicall: OUT RAM-V2-POS + IN tokens → lp_remove", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_ramses",
+      sends: [{ token: "arb:ram-v2-pos", amount: 1 }],
+      receives: [{ token: "arb:usdt0", amount: 35 }, { token: "arb:ram", amount: 0.1 }],
+      tx: { name: "multicall" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("lp_remove");
+  });
+
+  it("Jellyverse exitPool: OUT BPT + IN underlying → lp_remove", () => {
+    const it = item({
+      chain: "sei",
+      projectId: "sei_jellyverse",
+      sends: [{ token: "sei:bpt-frx", amount: 1 }],
+      receives: [
+        { token: "sei:frxeth", amount: 0.03 },
+        { token: "sei:sfrxeth", amount: 0.026 },
+        { token: "sei:weth", amount: 0.005 },
+      ],
+      tx: { name: "exitPool" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("lp_remove");
+  });
+
+  it("ICHI withdraw: OUT IV-23-RAM vault + IN underlying → lp_remove", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_ichi",
+      sends: [{ token: "arb:iv-ram", amount: 1 }],
+      receives: [{ token: "arb:ram", amount: 0.29 }, { token: "arb:usdc", amount: 1.57 }],
+      tx: { name: "withdraw" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("lp_remove");
+  });
+
+  it("King Protocol redeem: OUT KING + IN basket → lp_remove", () => {
+    const it = item({
+      chain: "eth",
+      projectId: "kingprotocol",
+      sends: [{ token: "eth:king", amount: 1 }],
+      receives: [{ token: "eth:eigen", amount: 0.2 }, { token: "eth:steth", amount: 0.0001 }],
+      tx: { name: "redeem" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("lp_remove");
+  });
+
+  it("deBridge strictlySwapAndCall: net OUT → bridge_out", () => {
+    const it = item({
+      chain: "eth",
+      projectId: "debridge",
+      sends: [{ token: "eth:wbtc", amount: 0.01 }, { token: "eth:eth", amount: 0.0006 }],
+      receives: [{ token: "arb:usdc", amount: 3.88 }],
+      tx: { name: "strictlySwapAndCall" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("bridge_out");
+  });
+
+  // Регрессия: multi-token swap БЕЗ LP-receipt / bridge / exit-fn остаётся
+  // unknown (эвристика не должна красть обычные мульти-токен свопы).
+  it("multi-token op без LP-receipt/bridge/exit-fn → остаётся unknown", () => {
+    const it = item({
+      chain: "arb",
+      projectId: "arb_someunknowndex",
+      sends: [{ token: "arb:usdc", amount: 100 }, { token: "arb:usdt", amount: 50 }],
+      receives: [{ token: "arb:weth", amount: 0.05 }],
+      tx: { name: "doSomething" },
+    });
+    expect(classifyHistory([it], ctx())[0]!.type).toBe("unknown");
   });
 });
