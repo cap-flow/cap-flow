@@ -365,6 +365,13 @@ export function applyV3CostBasisOverride(
     const nfts = v3PositionMap.get(key) ?? [];
     if (nfts.length === 0) continue;
 
+    // R4: один NFT не должен назначаться двум позициям. PHASE 1.5 ранее исключал
+    // NFT только по openHash/mintTxHash — если они не совпадали (DeBank
+    // ambiguity), уже назначенный в PHASE 1 NFT переиспользовался → дубликат
+    // позиции (Alice PAXG: #1159873 терялся, #1219136 дублировался). Трекаем
+    // фактически назначенные tokenId и исключаем их во всех фазах.
+    const assignedTokenIds = new Set<string>();
+
     // PHASE 1: per-NFT precision via openHash → mintTxHash match. Skip ambiguous
     // openHash (DeBank sometimes returns the same mint tx for two NFTs) → Phase 1.5.
     const openHashCount = new Map<string, number>();
@@ -385,6 +392,7 @@ export function applyV3CostBasisOverride(
         const nftForCb = nfts.find(
           (n) => n.tokenId.toString() === cb.tokenId.toString(),
         );
+        assignedTokenIds.add(cb.tokenId.toString());
         if (oldStartUsd > 0 && Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < DISTANCE_TOLERANCE) {
           let next: OpenPosition = { ...x.p, matchedV3TokenId: cb.tokenId.toString() };
           if (nftForCb) {
@@ -433,6 +441,7 @@ export function applyV3CostBasisOverride(
         .map((x) => (x.p.openHash ?? "").toLowerCase()),
     );
     const availableNfts = nfts.filter((nft) => {
+      if (assignedTokenIds.has(nft.tokenId.toString())) return false;
       const cb = v3CostBasis.get(nft.tokenId.toString());
       if (!cb) return true;
       if (cb.mintTxHash && matchedHashesPhase1.has(cb.mintTxHash.toLowerCase())) {
@@ -462,7 +471,9 @@ export function applyV3CostBasisOverride(
           pairs.push({ itemIdx: i, nftIdx: j, dist: d0 + d1 });
         }
       }
-      pairs.sort((a, b) => a.dist - b.dist);
+      // Стабильный порядок (R4): при равном dist tie-break по индексам, иначе
+      // greedy назначал по-разному между прогонами (недетерминизм матчинга).
+      pairs.sort((a, b) => a.dist - b.dist || a.itemIdx - b.itemIdx || a.nftIdx - b.nftIdx);
       const itemConsumed = new Set<number>();
       const nftConsumed = new Set<number>();
       const greedyMatched: { item: (typeof items)[number]; nft: (typeof nfts)[number] }[] = [];
@@ -486,6 +497,7 @@ export function applyV3CostBasisOverride(
           stillUnmatched.push(item);
           continue;
         }
+        assignedTokenIds.add(nft.tokenId.toString());
         const oldStartUsd = item.p.startUsd;
         const newStartUsd = cb.netCostBasisUsd;
         if (oldStartUsd > 0 && Math.abs(newStartUsd - oldStartUsd) / oldStartUsd < DISTANCE_TOLERANCE) {
