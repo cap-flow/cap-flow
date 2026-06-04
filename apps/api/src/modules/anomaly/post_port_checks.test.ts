@@ -135,6 +135,12 @@ describe("checkFeeAprWithoutFee", () => {
   it("feeApr null → тихо", () => {
     expect(checkFeeAprWithoutFee([pos({ feeAprLifetime: null, feesLifetimeUsd: 0 })])).toEqual([]);
   });
+
+  it("feeApr флоат-пыль (~1e-13) → тихо (регресс-гард Alice POS-002)", () => {
+    expect(
+      checkFeeAprWithoutFee([pos({ feeAprLifetime: 8.7e-13, feesLifetimeUsd: 4.2e-13 })]),
+    ).toEqual([]);
+  });
 });
 
 describe("checkStableAvgpriceOff", () => {
@@ -175,11 +181,11 @@ describe("checkStableAvgpriceOff", () => {
 });
 
 describe("checkCostBasisFromSpot", () => {
-  it("fallback > $100 → warn", () => {
+  it("priceSource=fallback, startUsd > $100 → warn", () => {
     const out = checkCostBasisFromSpot([
       pos({
         startUsd: 5000,
-        supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 150, fallbackUsd: 150 }],
+        supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 150, priceSource: "fallback" }],
       }),
     ]);
     expect(out).toHaveLength(1);
@@ -192,31 +198,42 @@ describe("checkCostBasisFromSpot", () => {
     });
   });
 
-  it("fallback > 50% от startUsd (но < $100) → warn", () => {
+  it("priceSource=fallback > 50% от startUsd (но < $100) → warn", () => {
     const out = checkCostBasisFromSpot([
       pos({
         startUsd: 80,
-        supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 50, fallbackUsd: 50 }],
+        supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 50, priceSource: "fallback" }],
       }),
     ]);
     expect(out.map((f) => f.checkId)).toContain("cost_basis_from_spot");
   });
 
-  it("мелкий fallback ниже обоих порогов → тихо", () => {
+  it("priceSource=fallback мелкий, ниже обоих порогов → тихо", () => {
     expect(
       checkCostBasisFromSpot([
         pos({
           startUsd: 5000,
-          supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 10, fallbackUsd: 10 }],
+          supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 10, priceSource: "fallback" }],
         }),
       ]),
     ).toEqual([]);
   });
 
-  it("нет fallback → тихо", () => {
+  it("priceSource=cost_basis с большим fallbackUsd → ТИХО (регресс-гард Alice: M6 priced-not-trusted ≠ silent-spot)", () => {
     expect(
       checkCostBasisFromSpot([
-        pos({ startUsd: 5000, supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 100 }] }),
+        pos({
+          startUsd: 166,
+          supplyTokens: [{ symbol: "PAXG", isStable: false, avgBuyPrice: null, startUsd: 166, fallbackUsd: 674, priceSource: "cost_basis" }],
+        }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("нет fallback-токенов → тихо", () => {
+    expect(
+      checkCostBasisFromSpot([
+        pos({ startUsd: 5000, supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 100, priceSource: "cost_basis" }] }),
       ]),
     ).toEqual([]);
   });

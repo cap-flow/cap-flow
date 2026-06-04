@@ -96,6 +96,7 @@ function adaptPositions(raw: unknown[]): CanonicalPosition[] {
           avgBuyPrice: t.avgBuyPrice == null ? null : Number(t.avgBuyPrice),
           startUsd: Number(t.startUsd ?? 0),
           fallbackUsd: t.fallbackUsd == null ? undefined : Number(t.fallbackUsd),
+          priceSource: t.priceSource == null ? undefined : String(t.priceSource),
         }))
       : [],
   }));

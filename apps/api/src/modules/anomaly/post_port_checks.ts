@@ -33,7 +33,10 @@ export interface CanonicalPosition {
     isStable: boolean;
     avgBuyPrice: number | null;
     startUsd: number;
+    /** M6 priced-not-trusted доля (оценка по цене входа) — НЕ silent-spot, легитимна. */
     fallbackUsd?: number;
+    /** 'cost_basis' (реальные траты/lot) | 'fallback' (silent m.usd current-spot — anti-pattern #1). */
+    priceSource?: string;
   }[];
 }
 
@@ -68,6 +71,8 @@ export const POST_PORT_THRESHOLDS = {
   costBasisFallbackPct: 0.5,
   /** fee_apr_without_fee: ниже этого |fee| считаем нулём. */
   feeNoiseUsd: 0.01,
+  /** fee_apr_without_fee: APR ниже этого (%, lifetime) — флоат-пыль, не флагуем. */
+  feeAprNoiseFloorPct: 0.1,
 } as const;
 
 function eqKey(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -246,7 +251,9 @@ export function checkFeeAprWithoutFee(
   const out: AnomalyFinding[] = [];
   for (const p of positions) {
     if (p.feeAprLifetime == null) continue;
-    if (Math.abs(p.feeAprLifetime) <= 0) continue;
+    // APR должен быть осмысленным (не флоат-пыль ~1e-13): иначе false-positive на
+    // позициях без комиссий (Alice POS-002 Morpho PT: feeApr=8.7e-13, fees=4.2e-13).
+    if (Math.abs(p.feeAprLifetime) < POST_PORT_THRESHOLDS.feeAprNoiseFloorPct) continue;
     if (Math.abs(p.feesLifetimeUsd ?? 0) >= POST_PORT_THRESHOLDS.feeNoiseUsd) continue;
     out.push({
       checkId: "fee_apr_without_fee",
@@ -312,30 +319,37 @@ export function checkStableAvgpriceOff(
 
 /**
  * `cost_basis_from_spot` (warn) — заметная доля cost basis выведена из текущего
- * спота (m.usd fallback), а не из реальных трат. Триггер: fallbackTotal > $100
- * ЛИБО (startUsd > 0 и fallbackTotal > 50% от startUsd). Сигнал
- * engine_trace_incomplete — провенанс cost basis неполон.
+ * спота (silent `m.usd` fallback, anti-pattern #1), а не из реальных трат.
+ *
+ * Сигнал = per-token `priceSource === 'fallback'` (движок ЯВНО пометил, что у
+ * токена не было ни lot-cost, ни hist-цены → взял current spot). НЕ используем
+ * `fallbackUsd`: это M6 «priced-not-trusted» доля (оценка по цене ВХОДА —
+ * легитимна и помечена; для декомпозированных receipt/LP токенов она > 0, хотя
+ * cost basis корректен — это давало ложные срабатывания на Alice).
+ *
+ * Триггер: Σ startUsd токенов с priceSource='fallback' > $100 ЛИБО > 50% startUsd.
  */
 export function checkCostBasisFromSpot(
   positions: readonly CanonicalPosition[],
 ): AnomalyFinding[] {
   const out: AnomalyFinding[] = [];
   for (const p of positions) {
-    const fallbackTotal = (p.supplyTokens ?? []).reduce(
-      (sum, t) => sum + (t.fallbackUsd ?? 0),
-      0,
+    const spotTokens = (p.supplyTokens ?? []).filter(
+      (t) => t.priceSource === "fallback",
     );
-    if (fallbackTotal <= 0) continue;
-    const overFloor = fallbackTotal > POST_PORT_THRESHOLDS.costBasisFallbackFloorUsd;
+    if (spotTokens.length === 0) continue;
+    const spotTotal = spotTokens.reduce((sum, t) => sum + (t.startUsd ?? 0), 0);
+    if (spotTotal <= 0) continue;
+    const overFloor = spotTotal > POST_PORT_THRESHOLDS.costBasisFallbackFloorUsd;
     const overPct =
-      p.startUsd > 0 && fallbackTotal / p.startUsd > POST_PORT_THRESHOLDS.costBasisFallbackPct;
+      p.startUsd > 0 && spotTotal / p.startUsd > POST_PORT_THRESHOLDS.costBasisFallbackPct;
     if (!overFloor && !overPct) continue;
     out.push({
       checkId: "cost_basis_from_spot",
       anomalyType: "cost_basis",
       severity: "warn",
       phase: "post",
-      observedValue: fallbackTotal,
+      observedValue: spotTotal,
       expectedValue: 0,
       positionId: p.id,
       walletId: p.walletId,
@@ -343,9 +357,10 @@ export function checkCostBasisFromSpot(
       protocolId: p.protocol.id,
       marketKey: marketKeyOf(p),
       detail: {
-        reason: `часть cost basis ($${fallbackTotal.toFixed(2)}) выведена из текущего спота (m.usd fallback), а не из реальных трат — провенанс неполон`,
-        fallbackTotal,
+        reason: `cost basis $${spotTotal.toFixed(2)} (${spotTokens.map((t) => t.symbol).join(",")}) взят из текущего спота (priceSource=fallback), а не из реальных трат — провенанс неполон`,
+        spotTotal,
         startUsd: p.startUsd,
+        spotSymbols: spotTokens.map((t) => t.symbol),
       },
     });
   }
