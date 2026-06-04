@@ -23,6 +23,18 @@ export interface CanonicalPosition {
   currentUsd: number;
   netPnlUsd: number;
   coverageIncomplete?: boolean;
+  /** Annualized fee APR по lifetime (Krystal/engine); null когда не считается. */
+  feeAprLifetime?: number | null;
+  /** Σ pending+claimed fees (база для APR). */
+  feesLifetimeUsd?: number;
+  /** Per-supply-token провенанс cost basis (для pricing/fallback чеков). */
+  supplyTokens?: {
+    symbol: string;
+    isStable: boolean;
+    avgBuyPrice: number | null;
+    startUsd: number;
+    fallbackUsd?: number;
+  }[];
 }
 
 /** Minimal golden-case view (numbers already parsed from numeric). */
@@ -48,6 +60,14 @@ export const POST_PORT_THRESHOLDS = {
   nearZeroCurrentUsdFloor: 100,
   /** pnl_impossible_negative slack (leverage adds real noise). */
   pnlImpossibleNegSlackPct: 0.01,
+  /** stable_avgprice_off: на сколько avgBuyPrice стейбла может отойти от $1. */
+  stableAvgPriceTolerance: 0.05,
+  /** cost_basis_from_spot: абсолютный пол fallback-доли cost basis ($). */
+  costBasisFallbackFloorUsd: 100,
+  /** cost_basis_from_spot: доля cost basis из спота, выше которой шумим. */
+  costBasisFallbackPct: 0.5,
+  /** fee_apr_without_fee: ниже этого |fee| считаем нулём. */
+  feeNoiseUsd: 0.01,
 } as const;
 
 function eqKey(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -211,6 +231,127 @@ export function checkCanonicalInvariants(
   return out;
 }
 
+function marketKeyOf(p: CanonicalPosition): string | null {
+  return p.lpTokenId ?? p.matchedV3TokenId ?? null;
+}
+
+/**
+ * `fee_apr_without_fee` (error) — feeApr > 0, но накопленных fee ≈ $0. APR
+ * начислен на пустую базу: классический симптом stale Krystal lp.rewards
+ * (инцидент POS-004/005), когда APR-override приходит без реальных комиссий.
+ */
+export function checkFeeAprWithoutFee(
+  positions: readonly CanonicalPosition[],
+): AnomalyFinding[] {
+  const out: AnomalyFinding[] = [];
+  for (const p of positions) {
+    if (p.feeAprLifetime == null) continue;
+    if (Math.abs(p.feeAprLifetime) <= 0) continue;
+    if (Math.abs(p.feesLifetimeUsd ?? 0) >= POST_PORT_THRESHOLDS.feeNoiseUsd) continue;
+    out.push({
+      checkId: "fee_apr_without_fee",
+      anomalyType: "lp_data",
+      severity: "error",
+      phase: "post",
+      observedValue: p.feeAprLifetime,
+      expectedValue: 0,
+      positionId: p.id,
+      walletId: p.walletId,
+      chain: p.chain,
+      protocolId: p.protocol.id,
+      marketKey: marketKeyOf(p),
+      detail: {
+        reason:
+          "feeApr > 0, но fee ≈ $0 — APR начислен на пустую базу (инцидент POS-004/005: stale Krystal)",
+        feesLifetimeUsd: p.feesLifetimeUsd ?? 0,
+      },
+    });
+  }
+  return out;
+}
+
+/**
+ * `stable_avgprice_off` (info) — у стейбл-токена avgBuyPrice заметно отошёл от
+ * $1. EUR-стейблы (EURC/agEUR…) законно котируются не по доллару, поэтому это
+ * информационный сигнал на ручной разбор, а не ошибка. Один finding на позицию
+ * с detail.tokens = [{symbol, avgBuyPrice}] (idempotency-ключ схлопнул бы токены).
+ */
+export function checkStableAvgpriceOff(
+  positions: readonly CanonicalPosition[],
+): AnomalyFinding[] {
+  const out: AnomalyFinding[] = [];
+  for (const p of positions) {
+    const off: { symbol: string; avgBuyPrice: number }[] = [];
+    for (const t of p.supplyTokens ?? []) {
+      if (!t.isStable) continue;
+      if (t.avgBuyPrice == null) continue;
+      if (Math.abs(t.avgBuyPrice - 1) <= POST_PORT_THRESHOLDS.stableAvgPriceTolerance) continue;
+      off.push({ symbol: t.symbol, avgBuyPrice: t.avgBuyPrice });
+    }
+    if (off.length === 0) continue;
+    out.push({
+      checkId: "stable_avgprice_off",
+      anomalyType: "pricing",
+      severity: "info",
+      phase: "post",
+      observedValue: off[0]!.avgBuyPrice,
+      expectedValue: 1,
+      positionId: p.id,
+      walletId: p.walletId,
+      chain: p.chain,
+      protocolId: p.protocol.id,
+      marketKey: marketKeyOf(p),
+      detail: {
+        reason: `стейбл ${off.map((o) => o.symbol).join(", ")} имеет avgBuyPrice ≠ $1 (откл. > ${POST_PORT_THRESHOLDS.stableAvgPriceTolerance}); EUR-стейблы законно отклоняются — потому info, не error`,
+        tokens: off,
+      },
+    });
+  }
+  return out;
+}
+
+/**
+ * `cost_basis_from_spot` (warn) — заметная доля cost basis выведена из текущего
+ * спота (m.usd fallback), а не из реальных трат. Триггер: fallbackTotal > $100
+ * ЛИБО (startUsd > 0 и fallbackTotal > 50% от startUsd). Сигнал
+ * engine_trace_incomplete — провенанс cost basis неполон.
+ */
+export function checkCostBasisFromSpot(
+  positions: readonly CanonicalPosition[],
+): AnomalyFinding[] {
+  const out: AnomalyFinding[] = [];
+  for (const p of positions) {
+    const fallbackTotal = (p.supplyTokens ?? []).reduce(
+      (sum, t) => sum + (t.fallbackUsd ?? 0),
+      0,
+    );
+    if (fallbackTotal <= 0) continue;
+    const overFloor = fallbackTotal > POST_PORT_THRESHOLDS.costBasisFallbackFloorUsd;
+    const overPct =
+      p.startUsd > 0 && fallbackTotal / p.startUsd > POST_PORT_THRESHOLDS.costBasisFallbackPct;
+    if (!overFloor && !overPct) continue;
+    out.push({
+      checkId: "cost_basis_from_spot",
+      anomalyType: "cost_basis",
+      severity: "warn",
+      phase: "post",
+      observedValue: fallbackTotal,
+      expectedValue: 0,
+      positionId: p.id,
+      walletId: p.walletId,
+      chain: p.chain,
+      protocolId: p.protocol.id,
+      marketKey: marketKeyOf(p),
+      detail: {
+        reason: `часть cost basis ($${fallbackTotal.toFixed(2)}) выведена из текущего спота (m.usd fallback), а не из реальных трат — провенанс неполон`,
+        fallbackTotal,
+        startUsd: p.startUsd,
+      },
+    });
+  }
+  return out;
+}
+
 /** All post-port checks over canonical positions + golden cases. */
 export function runPostPortChecks(
   positions: readonly CanonicalPosition[],
@@ -219,5 +360,8 @@ export function runPostPortChecks(
   return [
     ...checkGoldenCaseDrift(goldenCases, positions),
     ...checkCanonicalInvariants(positions),
+    ...checkFeeAprWithoutFee(positions),
+    ...checkStableAvgpriceOff(positions),
+    ...checkCostBasisFromSpot(positions),
   ];
 }

@@ -41,6 +41,33 @@ const scanResponse = z.object({
 });
 export type ScanResponse = z.infer<typeof scanResponse>;
 
+/** Тело PATCH-смены статуса аномалии. Бэкенд `resolveBody` принимает только
+ *  acknowledged|resolved, а `note` обязателен (nullable, но НЕ optional) —
+ *  всегда передавать null если заметки нет. */
+export interface ResolveAnomalyBody {
+  status: "acknowledged" | "resolved";
+  note: string | null;
+}
+
+/** Тело промоута аномалии в golden-эталон. */
+export interface PromoteAnomalyBody {
+  label: string;
+  expectedStartUsd: number | null;
+  expectedNetStartUsd: number | null;
+  expectedPnlUsd: number | null;
+  toleranceAbsUsd: number;
+  tolerancePct: number;
+  sourceOfTruth: string;
+  provenanceNote: string | null;
+  methodologyVersion: string;
+  fixturePath: string | null;
+}
+
+const promoteResponse = z.object({
+  golden: z.any(),
+  anomaly: anomalyFlagSchema,
+});
+
 export const adminAnomalyApi = {
   list: (params: { accountId?: string; status?: string }) => {
     const q = new URLSearchParams();
@@ -51,4 +78,8 @@ export const adminAnomalyApi = {
   },
   scan: (account: string) =>
     api.post("/v1/admin/anomaly/scan", { account }, scanResponse),
+  resolve: (id: string, body: ResolveAnomalyBody) =>
+    api.patch(`/v1/admin/golden/anomalies/${id}`, body, anomalyFlagSchema),
+  promote: (id: string, body: PromoteAnomalyBody) =>
+    api.post(`/v1/admin/golden/anomalies/${id}/promote`, body, promoteResponse),
 };

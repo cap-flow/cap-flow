@@ -87,6 +87,17 @@ function adaptPositions(raw: unknown[]): CanonicalPosition[] {
     currentUsd: Number(r.currentUsd ?? 0),
     netPnlUsd: Number(r.netPnlUsd ?? 0),
     coverageIncomplete: Boolean(r.coverageIncomplete),
+    feeAprLifetime: r.feeAprLifetime == null ? null : Number(r.feeAprLifetime),
+    feesLifetimeUsd: Number(r.feesLifetimeUsd ?? 0),
+    supplyTokens: Array.isArray(r.supplyTokens)
+      ? r.supplyTokens.map((t: any) => ({
+          symbol: String(t.symbol ?? ""),
+          isStable: Boolean(t.isStable),
+          avgBuyPrice: t.avgBuyPrice == null ? null : Number(t.avgBuyPrice),
+          startUsd: Number(t.startUsd ?? 0),
+          fallbackUsd: t.fallbackUsd == null ? undefined : Number(t.fallbackUsd),
+        }))
+      : [],
   }));
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */

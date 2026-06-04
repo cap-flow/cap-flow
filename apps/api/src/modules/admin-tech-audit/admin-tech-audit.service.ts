@@ -1,7 +1,10 @@
 import { type Database, schema } from "@cap-flow/db";
 import { sql } from "drizzle-orm";
 
-import { DUPLICATE_PRICING_DEFAULTS } from "../anomaly/registry_checks.js";
+import {
+  DUPLICATE_PRICING_DEFAULTS,
+  SWAP_IMBALANCE_DEFAULTS,
+} from "../anomaly/registry_checks.js";
 
 export type FindingSeverity = "info" | "warning" | "error";
 
@@ -36,6 +39,7 @@ export class AdminTechAuditService {
       ...(await this.accountsStaleSnapshots()),
       ...(await this.recentUpstreamErrors()),
       ...(await this.duplicateOpDivergentPricing()),
+      ...(await this.swapMovementImbalance()),
       ...(await this.activeAdminsWithoutMfa()),
       ...(await this.invitesNearExpiry()),
     ];
@@ -263,6 +267,69 @@ export class AdminTechAuditService {
           wallets: Number(r.wallets),
           accounts: Number(r.accounts),
           crossAccount: Number(r.accounts) > 1,
+        },
+      };
+    });
+  }
+
+  /**
+   * `swap_movement_imbalance` (C5b) — своп-операция, где входящая и исходящая
+   * стороны движения не сходятся по USD: `|out−in|/max(out,in)` превышает
+   * порог. Для честного свопа Σ|out-usd| ≈ Σ|in-usd|; большой разрыв = признак
+   * неполного/искажённого движения в реестре (мис-pricing, недостача leg'а —
+   * инцидент 0xe99d6063: USDC out $12k vs ETH in $5.6k). Читает только
+   * `chain_operations`. Пороги общие с pure `findSwapMovementImbalance`.
+   */
+  private async swapMovementImbalance(): Promise<Finding[]> {
+    const { imbalancePct, minUsd } = SWAP_IMBALANCE_DEFAULTS;
+    const rows = await this.db.execute<{
+      chain: string;
+      tx_hash: string;
+      log_index: number;
+      out_usd: string;
+      in_usd: string;
+      imbalance: string;
+    }>(sql`
+      WITH swap_usd AS (
+        SELECT co.chain, co.tx_hash, co.log_index,
+               (SELECT COALESCE(SUM(ABS((m->>'usd')::numeric)), 0)
+                FROM jsonb_array_elements(co.raw->'movement') m
+                WHERE jsonb_typeof(m->'usd') = 'number'
+                  AND m->>'direction' = 'out') AS out_usd,
+               (SELECT COALESCE(SUM(ABS((m->>'usd')::numeric)), 0)
+                FROM jsonb_array_elements(co.raw->'movement') m
+                WHERE jsonb_typeof(m->'usd') = 'number'
+                  AND m->>'direction' = 'in') AS in_usd
+        FROM chain_operations co
+        WHERE co.op_type = 'swap'
+          AND co.status <> 'failed'
+      )
+      SELECT chain, tx_hash, log_index, out_usd, in_usd,
+             abs(out_usd - in_usd) / greatest(out_usd, in_usd) AS imbalance
+      FROM swap_usd
+      WHERE greatest(out_usd, in_usd) > ${minUsd}
+        AND abs(out_usd - in_usd) / greatest(out_usd, in_usd) > ${imbalancePct}
+      -- both-sided mis-pricing (least>0) перед one-side-zero (least=0, imbalance=100%),
+      -- иначе непрайснутые ноги (распространённый шум) вытесняют actionable строки из LIMIT.
+      ORDER BY (least(out_usd, in_usd) = 0), imbalance DESC
+      LIMIT 50
+    `);
+    return rows.rows.map((r) => {
+      const imbalance = Number(r.imbalance);
+      const outUsdV = Number(r.out_usd);
+      const inUsdV = Number(r.in_usd);
+      return {
+        id: `swap-imbalance:${r.chain}:${r.tx_hash}:${r.log_index}`,
+        severity: "warning" as FindingSeverity,
+        category: "swap-movement-imbalance",
+        message: `Своп не сходится по USD: ${r.chain} ${r.tx_hash.slice(0, 12)}…#${r.log_index} — out $${outUsdV.toFixed(2)} vs in $${inUsdV.toFixed(2)} (разрыв ${(imbalance * 100).toFixed(1)}%) — неполное/искажённое движение в реестре`,
+        details: {
+          chain: r.chain,
+          txHash: r.tx_hash,
+          logIndex: Number(r.log_index),
+          outUsd: outUsdV,
+          inUsd: inUsdV,
+          imbalancePct: imbalance * 100,
         },
       };
     });

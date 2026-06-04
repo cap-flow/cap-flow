@@ -124,3 +124,90 @@ export function findDivergentDuplicatePricing(
   }
   return findings;
 }
+
+/**
+ * `swap_movement_imbalance` (C5b, pre-port) — своп-операция, где входящая и
+ * исходящая стороны движения не сходятся по USD. Для честного свопа
+ * Σ|out-usd| ≈ Σ|in-usd| (с поправкой на спред/комиссию). Большой разрыв =
+ * признак неполного/искажённого движения в реестре: одна сторона не
+ * заполнена, мис-pricing токена, недостача leg'а (инцидент 0xe99d6063:
+ * USDC out $12k vs ETH in $5.6k → imbalance ~53%).
+ *
+ * Читает ТОЛЬКО реестр `chain_operations` (cost basis не нужен) → pre-port.
+ */
+export interface SwapOpRecord {
+  readonly chain: string;
+  readonly txHash: string;
+  readonly logIndex: number;
+  readonly walletId: string;
+  readonly accountId: string;
+  /** Σ|movement[].usd| при direction='out' для этой своп-строки. */
+  readonly outUsd: number;
+  /** Σ|movement[].usd| при direction='in' для этой своп-строки. */
+  readonly inUsd: number;
+}
+
+export interface SwapImbalanceOptions {
+  /** Относит. разрыв |out−in|/max(out,in) выше которого WARN. Default 20%. */
+  readonly imbalancePct?: number;
+  /** Игнорировать свопы где max(out,in) ниже этого (dust). Default $1. */
+  readonly minUsd?: number;
+}
+
+/** Общие пороги — единый источник, чтобы SQL-чекер tech-audit и эта pure-fn
+ *  не разъезжались. */
+export const SWAP_IMBALANCE_DEFAULTS = {
+  imbalancePct: 0.2,
+  minUsd: 1,
+} as const;
+const SWAP_DEFAULTS = SWAP_IMBALANCE_DEFAULTS;
+
+function swapKey(r: SwapOpRecord): string {
+  return `${r.chain}|${r.txHash.toLowerCase()}|${r.logIndex}`;
+}
+
+/**
+ * Флагует своп-строки, где `|outUsd − inUsd| / max(outUsd, inUsd)` превышает
+ * порог (и сама величина свопа выше minUsd). По одному finding на строку;
+ * severity всегда `warn` (это не assertion «позиция сломана», а сигнал на
+ * ревью). Детерминированный порядок: строки сортируются по ключу
+ * `(chain, txHash, logIndex)`.
+ */
+export function findSwapMovementImbalance(
+  records: readonly SwapOpRecord[],
+  options: SwapImbalanceOptions = {},
+): AnomalyFinding[] {
+  const imbalancePct = options.imbalancePct ?? SWAP_DEFAULTS.imbalancePct;
+  const minUsd = options.minUsd ?? SWAP_DEFAULTS.minUsd;
+
+  const findings: AnomalyFinding[] = [];
+  const sorted = [...records].sort((a, b) =>
+    swapKey(a) < swapKey(b) ? -1 : swapKey(a) > swapKey(b) ? 1 : 0,
+  );
+  for (const r of sorted) {
+    const max = Math.max(r.outUsd, r.inUsd);
+    if (!(max > minUsd)) continue;
+    const imbalance = Math.abs(r.outUsd - r.inUsd) / max;
+    if (!(imbalance > imbalancePct)) continue;
+
+    findings.push({
+      checkId: "swap_movement_imbalance",
+      anomalyType: "registry_integrity",
+      severity: "warn",
+      phase: "pre",
+      observedValue: imbalance,
+      expectedValue: imbalancePct,
+      detail: {
+        reason:
+          "своп: входящая и исходящая стороны движения не сходятся по USD — признак неполного/искажённого движения в реестре",
+        chain: r.chain,
+        txHash: r.txHash,
+        logIndex: r.logIndex,
+        outUsd: r.outUsd,
+        inUsd: r.inUsd,
+        imbalancePct: imbalance * 100,
+      },
+    });
+  }
+  return findings;
+}

@@ -5,7 +5,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   checkCanonicalInvariants,
+  checkCostBasisFromSpot,
+  checkFeeAprWithoutFee,
   checkGoldenCaseDrift,
+  checkStableAvgpriceOff,
   runPostPortChecks,
   type CanonicalPosition,
   type GoldenCaseView,
@@ -108,6 +111,114 @@ describe("checkCanonicalInvariants", () => {
 
   it("normal position → no invariant findings", () => {
     expect(checkCanonicalInvariants([pos({ startUsd: 100, currentUsd: 90, netPnlUsd: -10 })])).toEqual([]);
+  });
+});
+
+describe("checkFeeAprWithoutFee", () => {
+  it("feeApr > 0 + fee ≈ $0 → error (POS-004/005)", () => {
+    const out = checkFeeAprWithoutFee([pos({ feeAprLifetime: 0.42, feesLifetimeUsd: 0 })]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      checkId: "fee_apr_without_fee",
+      anomalyType: "lp_data",
+      severity: "error",
+      observedValue: 0.42,
+      expectedValue: 0,
+      positionId: "POS-1",
+    });
+  });
+
+  it("feeApr > 0 с реальными fee → тихо", () => {
+    expect(checkFeeAprWithoutFee([pos({ feeAprLifetime: 0.42, feesLifetimeUsd: 12.5 })])).toEqual([]);
+  });
+
+  it("feeApr null → тихо", () => {
+    expect(checkFeeAprWithoutFee([pos({ feeAprLifetime: null, feesLifetimeUsd: 0 })])).toEqual([]);
+  });
+});
+
+describe("checkStableAvgpriceOff", () => {
+  it("стейбл с avgBuyPrice ≠ $1 → info, один finding с tokens", () => {
+    const out = checkStableAvgpriceOff([
+      pos({
+        supplyTokens: [
+          { symbol: "EURC", isStable: true, avgBuyPrice: 1.12, startUsd: 100 },
+          { symbol: "USDC", isStable: true, avgBuyPrice: 1.0, startUsd: 100 },
+        ],
+      }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      checkId: "stable_avgprice_off",
+      anomalyType: "pricing",
+      severity: "info",
+      observedValue: 1.12,
+      expectedValue: 1,
+    });
+    expect((out[0]!.detail as { tokens: unknown[] }).tokens).toEqual([
+      { symbol: "EURC", avgBuyPrice: 1.12 },
+    ]);
+  });
+
+  it("стейбл в пределах допуска / не-стейбл → тихо", () => {
+    expect(
+      checkStableAvgpriceOff([
+        pos({
+          supplyTokens: [
+            { symbol: "USDC", isStable: true, avgBuyPrice: 1.02, startUsd: 100 },
+            { symbol: "WETH", isStable: false, avgBuyPrice: 3000, startUsd: 100 },
+          ],
+        }),
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("checkCostBasisFromSpot", () => {
+  it("fallback > $100 → warn", () => {
+    const out = checkCostBasisFromSpot([
+      pos({
+        startUsd: 5000,
+        supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 150, fallbackUsd: 150 }],
+      }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      checkId: "cost_basis_from_spot",
+      anomalyType: "cost_basis",
+      severity: "warn",
+      observedValue: 150,
+      expectedValue: 0,
+    });
+  });
+
+  it("fallback > 50% от startUsd (но < $100) → warn", () => {
+    const out = checkCostBasisFromSpot([
+      pos({
+        startUsd: 80,
+        supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 50, fallbackUsd: 50 }],
+      }),
+    ]);
+    expect(out.map((f) => f.checkId)).toContain("cost_basis_from_spot");
+  });
+
+  it("мелкий fallback ниже обоих порогов → тихо", () => {
+    expect(
+      checkCostBasisFromSpot([
+        pos({
+          startUsd: 5000,
+          supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 10, fallbackUsd: 10 }],
+        }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("нет fallback → тихо", () => {
+    expect(
+      checkCostBasisFromSpot([
+        pos({ startUsd: 5000, supplyTokens: [{ symbol: "WETH", isStable: false, avgBuyPrice: null, startUsd: 100 }] }),
+      ]),
+    ).toEqual([]);
   });
 });
 

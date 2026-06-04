@@ -5,7 +5,9 @@ import { describe, it, expect } from "vitest";
 
 import {
   findDivergentDuplicatePricing,
+  findSwapMovementImbalance,
   type OpPriceRecord,
+  type SwapOpRecord,
 } from "./registry_checks.js";
 
 function rec(over: Partial<OpPriceRecord>): OpPriceRecord {
@@ -86,5 +88,68 @@ describe("duplicate_op_divergent_pricing", () => {
       rec({ txHash: "0xabc", walletId: "w2", usd: 70 }),
     ]);
     expect(a).toHaveLength(1); // same group despite case
+  });
+});
+
+function swap(over: Partial<SwapOpRecord>): SwapOpRecord {
+  return {
+    chain: "eth",
+    txHash: "0xabc",
+    logIndex: 0,
+    walletId: "w1",
+    accountId: "a1",
+    outUsd: 100,
+    inUsd: 100,
+    ...over,
+  };
+}
+
+describe("swap_movement_imbalance", () => {
+  it("does NOT flag a balanced swap", () => {
+    expect(
+      findSwapMovementImbalance([swap({ outUsd: 100, inUsd: 100 })]),
+    ).toEqual([]);
+  });
+
+  it("does NOT flag within 20% threshold", () => {
+    expect(
+      findSwapMovementImbalance([swap({ outUsd: 100, inUsd: 85 })]), // 15%
+    ).toEqual([]);
+  });
+
+  it("flags warn when out $100 vs in $50 (50% imbalance)", () => {
+    const f = findSwapMovementImbalance([swap({ outUsd: 100, inUsd: 50 })]);
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("warn");
+    expect(f[0]!.checkId).toBe("swap_movement_imbalance");
+    expect(f[0]!.phase).toBe("pre");
+    expect(f[0]!.observedValue).toBeCloseTo(0.5, 5);
+    expect(f[0]!.detail.outUsd).toBe(100);
+    expect(f[0]!.detail.inUsd).toBe(50);
+    expect(f[0]!.detail.imbalancePct as number).toBeCloseTo(50, 5);
+  });
+
+  it("flags the 0xe99d6063-shaped case (out $12k vs in $5.6k)", () => {
+    const f = findSwapMovementImbalance([
+      swap({ outUsd: 12000, inUsd: 5600 }),
+    ]);
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("warn");
+  });
+
+  it("ignores dust swaps below minUsd", () => {
+    expect(
+      findSwapMovementImbalance([swap({ outUsd: 0.8, inUsd: 0.2 })]),
+    ).toEqual([]);
+  });
+
+  it("is deterministic — sorts findings by (chain,txHash,logIndex)", () => {
+    const f = findSwapMovementImbalance([
+      swap({ txHash: "0xbbb", logIndex: 0, outUsd: 100, inUsd: 10 }),
+      swap({ txHash: "0xaaa", logIndex: 0, outUsd: 100, inUsd: 10 }),
+    ]);
+    expect(f).toHaveLength(2);
+    expect(f[0]!.detail.txHash).toBe("0xaaa");
+    expect(f[1]!.detail.txHash).toBe("0xbbb");
   });
 });
