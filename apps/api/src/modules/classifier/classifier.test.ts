@@ -1036,3 +1036,43 @@ describe("classifyHistory — P3 LP/bridge heuristic (unnamed protocols)", () =>
     expect(classifyHistory([it], ctx())[0]!.type).toBe("unknown");
   });
 });
+
+describe("classifyHistory — topic0 ступень (PRIMARY)", () => {
+  const AAVE_V3_SUPPLY =
+    "0x2b627736bca15cd5381dcf80b0bf11fd197d01a037c52b927a881a10fb73ba61";
+  const MORPHO_BORROW =
+    "0x570954540bed6b1304a87dfe815a5eda4a648f7097a16240dcd85c9b5fd42a43";
+  const TRANSFER =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+  it("логи с topic0 → op_type из события + note topic0:", () => {
+    const it = item({ id: "0xT0A", projectId: "arb_aave3", sends: [{ token: "arb:usdc", amount: 100 }] });
+    const logs = new Map([["0xt0a", [{ topic0: AAVE_V3_SUPPLY }]]]);
+    const r = classifyHistory([it], { ...ctx(), logsByTxHash: logs })[0]!;
+    expect(r.type).toBe("lend_supply");
+    expect(r.notes?.some((n) => n.startsWith("topic0:"))).toBe(true);
+  });
+
+  it("topic0 ВЫИГРЫВАЕТ у DeBank-лестницы (override)", () => {
+    // Движение выглядело бы как swap (USDC out + WETH in), но topic0 = Morpho Borrow.
+    const it = item({ id: "0xT0B", projectId: "arb_morpho-blue", sends: [{ token: "arb:usdc", amount: 100 }], receives: [{ token: "arb:weth", amount: 0.03 }] });
+    const logs = new Map([["0xt0b", [{ topic0: MORPHO_BORROW }]]]);
+    const r = classifyHistory([it], { ...ctx(), logsByTxHash: logs })[0]!;
+    expect(r.type).toBe("borrow");
+  });
+
+  it("без логов → старая лестница, нет topic0-note (ноль регресса)", () => {
+    const it = item({ id: "0xT0C", projectId: "arb_aave3", sends: [{ token: "arb:usdc", amount: 100 }], receives: [{ token: "arb:aArbUSDC", amount: 100 }] });
+    const r = classifyHistory([it], ctx())[0]!;
+    expect(r.notes?.some((n) => n.startsWith("topic0:")) ?? false).toBe(false);
+    expect(r.type).toBe("lend_supply");
+  });
+
+  it("только Transfer (шум) в логах → topic0 пропущен, ладдер работает", () => {
+    const it = item({ id: "0xT0D", projectId: "arb_aave3", sends: [{ token: "arb:usdc", amount: 100 }], receives: [{ token: "arb:aArbUSDC", amount: 100 }] });
+    const logs = new Map([["0xt0d", [{ topic0: TRANSFER }]]]);
+    const r = classifyHistory([it], { ...ctx(), logsByTxHash: logs })[0]!;
+    expect(r.notes?.some((n) => n.startsWith("topic0:")) ?? false).toBe(false);
+    expect(r.type).toBe("lend_supply");
+  });
+});

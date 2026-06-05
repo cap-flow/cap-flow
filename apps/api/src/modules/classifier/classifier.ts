@@ -25,6 +25,7 @@ import type {
   DeBankToken,
 } from "./debank_types.js";
 import type { ClassifiedOp, OpType, TokenMovement } from "./types.js";
+import { classifyByTopic0, type Topic0Log } from "@cap-flow/ucb/topic0_dict";
 
 export interface ClassifyContext {
   readonly ownAddresses: Set<string>;
@@ -32,6 +33,13 @@ export interface ClassifyContext {
   readonly tokens: Record<string, DeBankToken>;
   readonly projects: Record<string, DeBankProject>;
   readonly cex: Record<string, { id: string; name: string }>;
+  /**
+   * Топик0-лестница (PRIMARY): логи tx по хэшу (lowercase) для событийной
+   * классификации (`classifyByTopic0`). Заполняется log-fetch enrichment'ом
+   * (отдельный шаг, за рубильником). Когда не задан / нет логов для tx —
+   * классификатор работает как раньше (топик0 — no-op, ноль регресса).
+   */
+  readonly logsByTxHash?: ReadonlyMap<string, readonly Topic0Log[]>;
 }
 
 export function classifyHistory(
@@ -107,6 +115,25 @@ function doClassify(
 
   if (status === "failed") {
     return base(it, seq, "failed", protocol, movement, status);
+  }
+
+  // ── Ступень 1: topic0 (PRIMARY) — событийная классификация по логам tx ──
+  // Авторитетнее DeBank-эвристик и имён методов (роутеры execute/multicall
+  // бессмысленны по fnName). Срабатывает ТОЛЬКО когда логи для tx переданы
+  // (log-fetch enrichment, за рубильником) И classifyByTopic0 уверен. Иначе —
+  // проваливаемся в существующую лестницу (сеть безопасности; ноль регресса).
+  // DATA-decode семейства (GMX/Fluid/V4) classifyByTopic0 НЕ гадает (→ null) —
+  // их декодеры вживляются отдельным шагом.
+  const txLogs = it.id ? ctx.logsByTxHash?.get(it.id.toLowerCase()) : undefined;
+  if (txLogs && txLogs.length > 0) {
+    const t0 = classifyByTopic0(txLogs, {
+      protocolCategory: protocol?.category ?? null,
+    });
+    if (t0) {
+      return base(it, seq, t0.opType, protocol, movement, status, [
+        `topic0:${t0.event}`,
+      ]);
+    }
   }
 
   const hasRealOut = movement.some(
