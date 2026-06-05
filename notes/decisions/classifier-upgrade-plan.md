@@ -24,6 +24,21 @@
      receipts → `logsByTxHash` → в `classifyHistory`. Per-account → дифф → broaden.
   3. **DATA-декодеры** GMX/Fluid/UniV4 ModifyLiquidity (имя/знак в data; нужны полные topic0
      GMX EventLog1/2 + Fluid LogOperate — выверить on-chain).
+- **✅ Shadow-diff СКРИПТ собран + прогнан на Alice** (`apps/api/scripts/classifier-topic0-shadow.mts`,
+  read-only): 95 tx → **52 agree / 16 disagree / 27 no-signal / 0 no-receipt**. Разбор 16 расхождений =
+  shadow-diff поймал, что topic0 КАК ЕСТЬ **регрессировал бы**:
+  - ✅ topic0 прав: V3 pool Burn `unstake→lp_remove` (DeBank мислейбл).
+  - ❌ **дыра DATA-decode → регресс:** зап `lp_add→swap` (V4 ModifyLiquidity + часть Curve-arity не
+    видны словарём → topic0 падает на Swap). 4 случая.
+  - ⚠ **мульти-action (log_index=0):** fee-collect `claim_rewards→lp_remove` (V3 `decreaseLiquidity(0)`
+    эмитит pool Burn amount=0 + Collect; словарь зовёт Burn→lp_remove по рангу — НЕВЕРНО для fee-collect,
+    нужен data-decode Burn amount=0→collect). 5 случаев. Morpho `borrow↔WithdrawCollateral` в
+    leverage-петле — 3 случая.
+  **ВЕРДИКТ: НЕ флипать topic0 live до фиксов.** ПРЕРЕКВИЗИТЫ перед живым вживлением (этап 1.2):
+  (а) DATA-декодеры V4 ModifyLiquidity (знак int256) + Curve-arity покрытие; (б) co-event/amount правила:
+  V3 pool Burn amount=0 → claim_rewards (а не lp_remove); Swap проигрывает liquidity-событию даже когда
+  оно data-decode; (в) расширить словарь недостающими Curve-arity. Затем **повторный shadow-diff →
+  0 неожиданных регрессов** → только потом live за флагом. Curve/V4 zaps + V3-fee-collect — главные цели.
 
 ## Текущее состояние (карта)
 Классификатор — `apps/api/src/modules/classifier/classifier.ts`, ядро `doClassify` (:86).
