@@ -73,7 +73,7 @@ async function main() {
         const rcpt = await cl.getTransactionReceipt({ hash: r.tx_hash as `0x${string}` });
         const logs: Topic0Log[] = rcpt.logs
           .filter((l) => l.topics[0])
-          .map((l) => ({ address: l.address.toLowerCase(), topic0: l.topics[0]!.toLowerCase() }));
+          .map((l) => ({ address: l.address.toLowerCase(), topic0: l.topics[0]!.toLowerCase(), data: l.data }));
         const t0 = classifyByTopic0(logs, { protocolCategory: (r.category as any) ?? null });
         if (!t0) { tally.noSignal++; continue; }
         if (t0.opType === r.op_type) tally.agree++;

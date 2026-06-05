@@ -17,6 +17,8 @@ export interface Topic0Log {
   readonly address?: string;
   /** topic0 события (lowercase). */
   readonly topic0: string;
+  /** Non-indexed данные лога (hex "0x…") — для DATA-decode (знак/amount). Опц. */
+  readonly data?: string;
 }
 
 export interface Topic0Entry {
@@ -29,6 +31,29 @@ export interface Topic0Entry {
    * используется он; иначе fallback на `opType`.
    */
   readonly byCategory?: Partial<Record<ProtocolCategory, OpType>>;
+  /**
+   * DATA-decode: op_type зависит от данных лога (знак int256 / amount). Если
+   * задан — используется вместо статического opType/byCategory. Возвращает null
+   * когда data недоступна/неоднозначна → событие пропускается (не гадаем).
+   */
+  readonly decode?: (log: Topic0Log) => OpType | null;
+}
+
+/** k-е 32-байтовое слово non-indexed data лога как uint, либо null. */
+function wordAt(data: string | undefined, i: number): bigint | null {
+  if (!data || !data.startsWith("0x")) return null;
+  const hex = data.slice(2);
+  const start = i * 64;
+  if (hex.length < start + 64) return null;
+  try {
+    return BigInt("0x" + hex.slice(start, start + 64));
+  } catch {
+    return null;
+  }
+}
+/** uint256 → int256 (two's complement). */
+function asInt256(u: bigint): bigint {
+  return u >= 1n << 255n ? u - (1n << 256n) : u;
 }
 
 /** Семейства, где op_type/направление закодированы в DATA лога, не в topic0. */
@@ -59,11 +84,10 @@ export const NOISE_TOPIC0 = new Set<string>([
  * topic0 распознаёт семейство, но op_type даёт только декодер семейства.
  */
 export const DATA_DECODE_TOPIC0 = new Map<string, DataDecodeFamily>([
-  // Uniswap V4 ModifyLiquidity — add vs remove = знак int256 liquidityDelta.
-  ["0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec", "univ4"],
   // GMX V2 / Fluid EventEmitter-семейства — topic0 усечены в словаре, полные
   // хэши выверить on-chain при реализации декодеров (TODO):
   //   GMX EventLog1/EventLog2, Fluid LogOperate-family.
+  // (UniV4 ModifyLiquidity перенесён в TOPIC0_DICT с inline-decode по знаку.)
 ]);
 
 /** topic0 (lowercase) → запись. Выверенные сигнатуры (см. topic0-op-dictionary.md). */
@@ -84,12 +108,34 @@ export const TOPIC0_DICT = new Map<string, Topic0Entry>([
   ["0x40d0efd1a53d60ecbf40971b9daf7dc90178c3aadc7aab1765632738fa8b8f01", { opType: "claim_rewards", event: "V3 NPM Collect (LP fee)" }],
   // ── Uniswap V3 — pool-level ──
   ["0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde", { opType: "lp_add", event: "V3 pool Mint" }],
-  ["0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c", { opType: "lp_remove", event: "V3 pool Burn" }],
+  // V3 pool Burn: amount=0 (data word0) = decreaseLiquidity(0) для сбора fee →
+  // claim_rewards, иначе реальное уменьшение → lp_remove. Без data → lp_remove.
+  ["0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c", {
+    opType: "lp_remove",
+    event: "V3 pool Burn",
+    decode: (log) => {
+      const amount = wordAt(log.data, 0); // uint128 amount
+      if (amount == null) return "lp_remove";
+      return amount === 0n ? "claim_rewards" : "lp_remove";
+    },
+  }],
   ["0x70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0", { opType: "claim_rewards", event: "V3 pool Collect (fee)" }],
   ["0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67", { opType: "swap", event: "V3 pool Swap" }],
 
-  // ── Uniswap V4 — singleton (Swap; ModifyLiquidity → DATA_DECODE) ──
+  // ── Uniswap V4 — singleton ──
   ["0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f", { opType: "swap", event: "V4 Swap" }],
+  // V4 ModifyLiquidity: add vs remove = знак int256 liquidityDelta (data word2:
+  // tickLower,tickUpper,liquidityDelta,salt). >0 add, <0 remove, 0/нет data → skip.
+  ["0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec", {
+    opType: "lp_add",
+    event: "V4 ModifyLiquidity",
+    decode: (log) => {
+      const w = wordAt(log.data, 2); // liquidityDelta
+      if (w == null) return null;
+      const d = asInt256(w);
+      return d > 0n ? "lp_add" : d < 0n ? "lp_remove" : null;
+    },
+  }],
 
   // ── Aave V2 (LendingPool) ──
   ["0xde6857219544bb5b7746f48ed30be6386fefc61b2f864cacf559893bf50fd951", { opType: "lend_supply", event: "Aave V2 Deposit" }],
@@ -179,12 +225,15 @@ export function classifyByTopic0(
   for (const log of logs) {
     const t = log.topic0?.toLowerCase();
     if (!t || NOISE_TOPIC0.has(t)) continue;
-    if (DATA_DECODE_TOPIC0.has(t)) continue; // семейство → отдельный декодер
+    if (DATA_DECODE_TOPIC0.has(t)) continue; // EventEmitter-семейство → внешний декодер (GMX/Fluid)
     const entry = TOPIC0_DICT.get(t);
     if (!entry) continue;
-    const opType =
-      (ctx.protocolCategory && entry.byCategory?.[ctx.protocolCategory]) ||
-      entry.opType;
+    // entry.decode (V4 знак / V3 Burn amount) авторитетнее статики; null → skip.
+    const opType = entry.decode
+      ? entry.decode(log)
+      : (ctx.protocolCategory && entry.byCategory?.[ctx.protocolCategory]) ||
+        entry.opType;
+    if (!opType) continue;
     const r = rankOf(opType);
     if (r > bestRank) {
       bestRank = r;

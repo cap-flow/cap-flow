@@ -21,9 +21,14 @@ const T = {
   morphoSupply: "0xedf8870433c83823eb071d3df1caa8d008f12f6440918c20d75a3602cda30fe0",
   morphoBorrow: "0x570954540bed6b1304a87dfe815a5eda4a648f7097a16240dcd85c9b5fd42a43",
   univ4ModLiq: "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec",
+  v3PoolBurn: "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c",
 } as const;
 
 const log = (topic0: string) => ({ topic0 });
+// 32-байтовое слово (two's complement для отрицательных) + сборка data.
+const word = (n: bigint) => ((n < 0n ? (1n << 256n) + n : n).toString(16)).padStart(64, "0");
+const data = (...words: bigint[]) => "0x" + words.map(word).join("");
+const logD = (topic0: string, ...words: bigint[]) => ({ topic0, data: data(...words) });
 
 describe("classifyByTopic0 — базовые сигнатуры", () => {
   it("Aave V3 Supply → lend_supply", () => {
@@ -79,12 +84,39 @@ describe("classifyByTopic0 — шум и выбор главного событ�
   });
 });
 
-describe("detectDataDecodeFamily — семейства с DATA-decode", () => {
-  it("UniV4 ModifyLiquidity → univ4, classifyByTopic0 НЕ гадает (null)", () => {
-    expect(detectDataDecodeFamily([log(T.univ4ModLiq)])).toBe("univ4");
+describe("DATA-decode: V4 ModifyLiquidity (знак int256)", () => {
+  // data words: [tickLower, tickUpper, liquidityDelta, salt]; delta = word2.
+  it("liquidityDelta > 0 → lp_add", () => {
+    expect(classifyByTopic0([logD(T.univ4ModLiq, 0n, 0n, 1000n, 0n)])?.opType).toBe("lp_add");
+  });
+  it("liquidityDelta < 0 → lp_remove", () => {
+    expect(classifyByTopic0([logD(T.univ4ModLiq, 0n, 0n, -1000n, 0n)])?.opType).toBe("lp_remove");
+  });
+  it("без data → не гадаем (null/skip)", () => {
     expect(classifyByTopic0([log(T.univ4ModLiq)])).toBeNull();
   });
-  it("обычное событие → не data-decode", () => {
+  it("zap: V4 Swap + ModifyLiquidity(add) → lp_add (position > swap)", () => {
+    expect(
+      classifyByTopic0([log(T.v3PoolSwap), logD(T.univ4ModLiq, 0n, 0n, 5n, 0n)])?.opType,
+    ).toBe("lp_add");
+  });
+});
+
+describe("DATA-decode: V3 pool Burn (amount=0 → fee-collect)", () => {
+  // data words: [amount(uint128), amount0, amount1]; amount = word0.
+  it("amount=0 (decreaseLiquidity(0) для fee) → claim_rewards", () => {
+    expect(classifyByTopic0([logD(T.v3PoolBurn, 0n, 100n, 200n)])?.opType).toBe("claim_rewards");
+  });
+  it("amount>0 (реальное уменьшение) → lp_remove", () => {
+    expect(classifyByTopic0([logD(T.v3PoolBurn, 5000n, 100n, 200n)])?.opType).toBe("lp_remove");
+  });
+  it("без data → lp_remove (как раньше)", () => {
+    expect(classifyByTopic0([log(T.v3PoolBurn)])?.opType).toBe("lp_remove");
+  });
+});
+
+describe("detectDataDecodeFamily", () => {
+  it("обычное событие → не data-decode (null)", () => {
     expect(detectDataDecodeFamily([log(T.aaveV3Supply)])).toBeNull();
   });
 });
