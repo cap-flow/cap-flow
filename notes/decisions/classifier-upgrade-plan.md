@@ -2,6 +2,29 @@
 
 Сгенерён workflow'ом (карта кода + характеристика unknown + словарь topic0 → синтез). План, не код.
 
+## ✅ ПРОГРЕСС topic0-лестницы (2026-06-04, вечер)
+- **Этап 0 (фундамент) DONE** — `packages/ucb/src/topic0_dict.ts` (commit `1569615`): чистый
+  словарь выверенных сигнатур (ERC4626/UniV2/V3/V4-swap/Aave V2+V3/Compound v2+v3/Curve/
+  Convex/Synthetix/Lido/ether.fi/Morpho) + резолв коллизий по категории + `classifyByTopic0`
+  (главное событие по рангу, шум Transfer/Approval пропущен) + `detectDataDecodeFamily`.
+  В shared-пакете (без web/api drift). Тесты 16/16.
+- **Этап 2a (проводка) DONE** — `classifier.ts`: `ClassifyContext.logsByTxHash` (опц.) →
+  `doClassify` сразу после failed зовёт `classifyByTopic0`; уверенный topic0 выигрывает
+  (op_type + note `topic0:<event>`), иначе старая лестница (сеть безопасности). Без логов =
+  no-op, **ноль регресса**. Capability серверная (web не трогаем). Тесты +4 (classifier 462/462).
+- **Этап 1 (log-fetch enrichment) — ОСТАЛОСЬ.** Тяжёлая внешне-API инфра, гейтить за рубильником
+  (#136-139) + **shadow-diff перед флипом**. Безопасный порядок:
+  1. **Shadow-diff СКРИПТ** (read-only, БЕЗ правки live-refresh): ops аккаунта из
+     `chain_operations` → per (chain,tx_hash) `viem getTransactionReceipt` → logs
+     `[{address, topic0: topics[0]}]` → `classifyByTopic0` → дифф topic0 vs текущий `op_type`
+     (agree/disagree/no-signal). Переиспользовать `makeV3Client` (`v3/positions.fetch.ts:41`) +
+     `alchemyHostForChain` (`integrations/alchemy.ts`). Rate-limit + кэш по tx_hash. Прогнать
+     на 1 аккаунте, отревьюить дифф.
+  2. **Live wiring (за НОВЫМ флагом):** `chain_classifier.service.ts::analyzeAccount` фетчит
+     receipts → `logsByTxHash` → в `classifyHistory`. Per-account → дифф → broaden.
+  3. **DATA-декодеры** GMX/Fluid/UniV4 ModifyLiquidity (имя/знак в data; нужны полные topic0
+     GMX EventLog1/2 + Fluid LogOperate — выверить on-chain).
+
 ## Текущее состояние (карта)
 Классификатор — `apps/api/src/modules/classifier/classifier.ts`, ядро `doClassify` (:86).
 **DeBank-history-driven, НЕ событийный:** роутит по `protocol.category` + направлению движений
