@@ -34,6 +34,18 @@
     эмитит pool Burn amount=0 + Collect; словарь зовёт Burn→lp_remove по рангу — НЕВЕРНО для fee-collect,
     нужен data-decode Burn amount=0→collect). 5 случаев. Morpho `borrow↔WithdrawCollateral` в
     leverage-петле — 3 случая.
+- **✅ DATA-декодеры V4 + V3 сделаны** (commit `db65d90`): V4 ModifyLiquidity (знак int256) + V3 pool
+  Burn (amount=0→claim_rewards). Повторный shadow-diff Alice: disagree 16→14, fee-collect'ы (amount=0)
+  теперь корректно claim. `dump-tx-topics.mts` — инструмент self-extending loop (дамп topic0 логов tx).
+- **🔎 НАХОДКА по остатку `lp_add→swap` (НЕ data-decode!):** дамп логов 2 спорных tx показал — это
+  **аггрегатор/зап**: юзер депозитит в yield-vault `@0x88888888…` (его user-facing событие
+  `0xd3c1d9b397236779b29ee5b5b150c1110fc8221b6b6ec0be49c9f4860ceb2036` нам НЕИЗВЕСТНО), vault ВНУТРИ
+  свопает на Curve TokenExchange / V4 Swap. ModifyLiquidity/AddLiquidity вообще НЕ эмитятся → декодеры
+  не помогут. topic0 берёт внутренний своп → неверно. **ФИКС (follow-up):** (а) self-extending loop —
+  `getContractAbi(0x88888888)` → опознать `0xd3c1d9b3` → добавить в словарь как deposit; (б)
+  **contract-aware ранжировка**: события tx-target контракта важнее внутренних pool-свопов (Swap от
+  DEX-пула не должен перебивать user-facing deposit). Morpho `borrow↔WithdrawCollateral` (3) — multi-action,
+  нужен реальный log_index.
   **ВЕРДИКТ: НЕ флипать topic0 live до фиксов.** ПРЕРЕКВИЗИТЫ перед живым вживлением (этап 1.2):
   (а) DATA-декодеры V4 ModifyLiquidity (знак int256) + Curve-arity покрытие; (б) co-event/amount правила:
   V3 pool Burn amount=0 → claim_rewards (а не lp_remove); Swap проигрывает liquidity-событию даже когда
