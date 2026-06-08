@@ -189,8 +189,12 @@ WETH, USDC назад НЕ вернулся, implied ETH=$2360 (сейчас $16
   `priceSource='fallback'` (явный регресс-тест добавлен на aida-класс).
 - `leverage_flat_pnl_vs_price_move` — плечевая позиция с ~flat PnL при крупном движении
   базового актива за срок (cross-ref hist-цена входа/выхода).
-- `tracker_divergence` — `cross_protocol` vs `position_lot_cost_basis` расходятся на позиции
-  (авто-версия cross-tracker diff).
+- ✅ **`tracker_divergence` РЕАЛИЗОВАН** (commit `880d4b8`): display `startUsd`
+  (buildSupplyToken/lending-override) vs `cross_protocol` PositionTracker (SoT,
+  поле `OpenPosition.costBasisTrackerUsd`, проставляется в `computePositions` для
+  lending). Прямой детект класса — на aida ловил бы $513 vs $719 (Δ $206), НЕ
+  завися от priceSource (сильнее `cost_basis_from_spot`). Scoped на lending (без
+  ложных на LP/Krystal). Работает для ЛЮБОГО юзера (shadow global ON).
 
 ## Связанное
 [[capflow_position_audit_protocol]] · [[capflow_golden_verification_protocol]] ·
