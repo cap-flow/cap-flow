@@ -59,9 +59,16 @@
   (genuine multi-action, log_index=0 → отдаём ладдеру). Shadow-diff Alice: **disagree 10 — ВСЕ
   корректировки topic0, 0 регрессов**; agree 54→49 (5 genuine multi-action tx defer'ятся, исход тот же).
   Тесты 114/114. **topic0 FLIP-SAFE по Alice.**
-  **ОСТАТОК перед live-флипом:** (1) повторить shadow-diff на testakk+egorov+mmaksimuk (подтвердить
-  0 регрессов шире Alice); (2) этап 1.2 — log-fetch enrichment в analyzeAccount (за НОВЫМ флагом) →
-  populate logsByTxHash; (3) включить флаг. Регресс-класс закрыт; осталась инфра log-fetch + broader verify.
+  **ОСТАТОК перед live-флипом:** (1) ~~broader shadow-diff~~ **✅ DONE** — testakk (d96e847e) + egorov
+  (a720742f): по 41 agree / **4 disagree, ВСЕ корректировки, 0 регрессов** (identичны — аккаунты делят
+  кошельки artur+murat; высокий no-signal 105 = GMX data-decode семейство, topic0 молчит → DeBank стоит).
+  **Итог: topic0 flip-safe на Alice+testakk+egorov, 0 регрессов нигде.** (2) этап 1.2 — log-fetch
+  enrichment в analyzeAccount (за НОВЫМ флагом) → populate logsByTxHash; (3) включить флаг.
+  Осталась ТОЛЬКО инфра log-fetch + флаг.
+  > ⚙️ КОРЕНЬ env-хаоса 2026-06-04: sync-тул (iCloud Desktop) переименовывал git-файлы с timestamp-
+  > суффиксом (` 23-XX-XX-XXX.ext`) → 12 tracked-файлов «удалены» (HomePage/cex.service/…) → ломались
+  > web build + api tsc + (возможно) node_modules. Фикс: `git restore` 12 файлов + удалить мусорные копии.
+  > api tsc вернулся 50→36. ⚠ Если повторится — искать ` NN-NN-NN-NNN.` файлы, git restore оригиналы.
   ~~ВЕРДИКТ: НЕ флипать до фиксов~~ → фиксы регрессов сделаны; до флипа = log-fetch инфра + broader shadow-diff. ПРЕРЕКВИЗИТЫ перед живым вживлением (этап 1.2):
   (а) DATA-декодеры V4 ModifyLiquidity (знак int256) + Curve-arity покрытие; (б) co-event/amount правила:
   V3 pool Burn amount=0 → claim_rewards (а не lp_remove); Swap проигрывает liquidity-событию даже когда
