@@ -213,6 +213,23 @@ describe("checkCostBasisFromSpot", () => {
     expect(out.map((f) => f.checkId)).toContain("cost_basis_from_spot");
   });
 
+  // Аудит aida 2026-06-08: token→token swap терял cost basis → ETH в Fluid
+  // получал priceSource='fallback' ($513.50 спот вместо $718.82 уплаченных,
+  // знак «?»). Детектор ОБЯЗАН ловить этот класс (auto-guard против рецидива).
+  // После фикса a93439a priceSource='cost_basis' → чек молчит.
+  it("aida POS-001 класс: Fluid ETH с priceSource=fallback (симптом token→token бага) → ловится", () => {
+    const out = checkCostBasisFromSpot([
+      pos({
+        protocol: { id: "arb_fluid" },
+        startUsd: 513.5,
+        supplyTokens: [
+          { symbol: "ETH", isStable: false, avgBuyPrice: null, startUsd: 513.5, priceSource: "fallback" },
+        ],
+      }),
+    ]);
+    expect(out.map((f) => f.checkId)).toContain("cost_basis_from_spot");
+  });
+
   it("priceSource=fallback мелкий, ниже обоих порогов → тихо", () => {
     expect(
       checkCostBasisFromSpot([
