@@ -115,6 +115,26 @@ describe("DATA-decode: V3 pool Burn (amount=0 → fee-collect)", () => {
   });
 });
 
+describe("context-aware подавление свопа (аггрегатор-запы)", () => {
+  it("swap на position-протоколе (yield) → null (внутренний своп, не доверяем)", () => {
+    expect(classifyByTopic0([log(T.v3PoolSwap)], { protocolCategory: "yield" })).toBeNull();
+  });
+  it("swap на lending → null", () => {
+    expect(classifyByTopic0([log(T.v3PoolSwap)], { protocolCategory: "lending" })).toBeNull();
+  });
+  it("swap на dex → swap (genuine, сохраняем)", () => {
+    expect(classifyByTopic0([log(T.v3PoolSwap)], { protocolCategory: "dex" })?.opType).toBe("swap");
+  });
+  it("swap без категории → swap (сохраняем)", () => {
+    expect(classifyByTopic0([log(T.v3PoolSwap)])?.opType).toBe("swap");
+  });
+  it("position-событие + swap на yield → lp_add (position выигрывает, не подавляется)", () => {
+    expect(
+      classifyByTopic0([log(T.v3PoolSwap), log(T.v3Increase)], { protocolCategory: "yield" })?.opType,
+    ).toBe("lp_add");
+  });
+});
+
 describe("detectDataDecodeFamily", () => {
   it("обычное событие → не data-decode (null)", () => {
     expect(detectDataDecodeFamily([log(T.aaveV3Supply)])).toBeNull();

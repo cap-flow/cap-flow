@@ -240,8 +240,31 @@ export function classifyByTopic0(
       best = { opType, matchedTopic0: t, event: entry.event };
     }
   }
+  // Context-aware подавление свопа: на POSITION-протоколе (yield/lp/lending/…)
+  // единственное распознанное событие = swap почти всегда ВНУТРЕННИЙ своп
+  // аггрегатора/vault'а (Curve/V4 внутри депозита), не действие юзера. Не
+  // доверяем topic0 → null (DeBank-ладдер сохранит свой lp_add/lend_supply).
+  // Фикс аггрегатор-запов (Alice lp_add→swap). Genuine swap (cat=dex/null) — ок.
+  if (
+    best &&
+    best.opType === "swap" &&
+    ctx.protocolCategory &&
+    POSITION_CATEGORIES.has(ctx.protocolCategory)
+  ) {
+    return null;
+  }
   return best;
 }
+
+/** Position-протоколы: на них topic0-swap трактуем как внутренний (не доверяем). */
+const POSITION_CATEGORIES = new Set<ProtocolCategory>([
+  "lending",
+  "lp",
+  "staking",
+  "restaking",
+  "yield",
+  "cdp",
+]);
 
 /**
  * Распознать DATA-decode семейство по логам (GMX/Fluid/UniV4/Pendle) — op_type
