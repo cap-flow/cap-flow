@@ -20,6 +20,14 @@
 - `81eace1` — новые проверки + UI ack/resolve/promote.
 - `75ca947` — убраны ложные срабатывания (cost_basis_from_spot, fee_apr).
 - Re-scan Alice: 0 ложных, golden_case_drift 0/12.
+- `d118358` — **`client_server_cost_basis_divergence`** чек поверх diff_summary:
+  ловит класс POS-011 (клиент кормит движок неполным набором ops), который
+  server-only чеки пропускают. +6 тестов.
+- **Системный скан server-shadow всех 9 аккаунтов** (2026-06-08): 0
+  инвариант-флагов (lp_uncovered_nearzero / pnl_impossible / cost_basis_from_spot)
+  → сервер корректен везде. ⚠ divergence-чек пока без данных: клиент НЕ шлёт
+  shadow-diff POST автоматом (нужен worker+флаг `ucbServerShadow` ON) → 0/247
+  shadow-строк имеют diff_summary. Прод-докрутка: включить shadow-diff поток.
 
 **Golden-датасет**:
 - `d7c74d7` — дедуп эталонов по active position_key + миграция `0032` (требует прогона на БД).
