@@ -53,9 +53,16 @@
   сохраняется DeBank lp_add). **Новых регрессов нет.** Остаток 10 = НЕ регрессы: ~5 topic0
   прав (ERC4626 vault deposit/withdraw, V3 fee-collect), 3 Morpho multi-action (log_index=0),
   2 V3 amount>0 remove (защитимо). Тесты +5, classifier 109/109.
-  **ОСТАТОК перед live-флипом:** только 3 Morpho multi-action (нужен реальный log_index вместо
-  хардкода 0) — последний регресс-риск. Затем live за флагом.
-  **ВЕРДИКТ: НЕ флипать topic0 live до фиксов.** ПРЕРЕКВИЗИТЫ перед живым вживлением (этап 1.2):
+- **✅ Multi-action guard + находка по Morpho** (commit `cb731a2`): дамп on-chain показал — 3 Alice
+  "borrow→lend_withdraw (Morpho)" это НЕ multi-action, а topic0 ПРАВИЛЬНО чинит DeBank (в tx только
+  WithdrawCollateral, Borrow-события нет). Добавлен guard: ≥2 РАЗНЫХ position-события в tx → null
+  (genuine multi-action, log_index=0 → отдаём ладдеру). Shadow-diff Alice: **disagree 10 — ВСЕ
+  корректировки topic0, 0 регрессов**; agree 54→49 (5 genuine multi-action tx defer'ятся, исход тот же).
+  Тесты 114/114. **topic0 FLIP-SAFE по Alice.**
+  **ОСТАТОК перед live-флипом:** (1) повторить shadow-diff на testakk+egorov+mmaksimuk (подтвердить
+  0 регрессов шире Alice); (2) этап 1.2 — log-fetch enrichment в analyzeAccount (за НОВЫМ флагом) →
+  populate logsByTxHash; (3) включить флаг. Регресс-класс закрыт; осталась инфра log-fetch + broader verify.
+  ~~ВЕРДИКТ: НЕ флипать до фиксов~~ → фиксы регрессов сделаны; до флипа = log-fetch инфра + broader shadow-diff. ПРЕРЕКВИЗИТЫ перед живым вживлением (этап 1.2):
   (а) DATA-декодеры V4 ModifyLiquidity (знак int256) + Curve-arity покрытие; (б) co-event/amount правила:
   V3 pool Burn amount=0 → claim_rewards (а не lp_remove); Swap проигрывает liquidity-событию даже когда
   оно data-decode; (в) расширить словарь недостающими Curve-arity. Затем **повторный shadow-diff →
