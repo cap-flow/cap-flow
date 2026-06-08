@@ -9,6 +9,7 @@
  * loads canonical positions + golden cases and feeds them here.
  */
 import type { AnomalyFinding } from "./checks.js";
+import type { ShadowDiffSummary } from "../ucb/shadow-diff.js";
 
 /** Minimal canonical-position view (subset of OpenPosition from ucb_shadow_results). */
 export interface CanonicalPosition {
@@ -73,6 +74,10 @@ export const POST_PORT_THRESHOLDS = {
   feeNoiseUsd: 0.01,
   /** fee_apr_without_fee: APR ниже этого (%, lifetime) — флоат-пыль, не флагуем. */
   feeAprNoiseFloorPct: 0.1,
+  /** client_server_cost_basis_divergence: |delta| ≥ этого ($) → error (иначе warn). */
+  divergenceErrorFloorUsd: 50,
+  /** client_server_cost_basis_divergence: |delta|/server ≥ этого → error. */
+  divergenceErrorPct: 0.05,
 } as const;
 
 function eqKey(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -361,6 +366,69 @@ export function checkCostBasisFromSpot(
         spotTotal,
         startUsd: p.startUsd,
         spotSymbols: spotTokens.map((t) => t.symbol),
+      },
+    });
+  }
+  return out;
+}
+
+/**
+ * `client_server_cost_basis_divergence` — клиент и сервер посчитали РАЗНЫЙ cost
+ * basis для одной позиции (по `ucb_shadow_results.diff_summary`, который пишет
+ * B5 shadow-diff при POST клиентских позиций). Это ловит класс багов, который
+ * server-only чеки пропускают: движок один (`@cap-flow/ucb`), но клиент кормит
+ * его НЕПОЛНЫМ набором ops (server-hydrated/cached историю минует обогащение),
+ * → linkedCostBasisUsd не проставлен → cost basis рушится в receipt-spot.
+ *
+ * Канонический инцидент POS-011 (testakk GLV→Morpho): client $15,209 vs server
+ * $21,588 → deltaStartUsd −$6,379. До фикса (commit e3120f5) этот чек поднял бы
+ * error. После фикса diff = 0 → молчит. Идемпотентный регресс-гейт на дрейф
+ * клиент↔сервер по всем юзерам, как только shadow-diff прогоняется в проде.
+ *
+ * Severity: error при |delta| ≥ $50 ИЛИ ≥ 5% server-значения; иначе warn.
+ * Учитывает и startUsd (gross), и netStartUsd (collateral − debt, для плеча).
+ * presence-mismatch (client_only/server_only) — НЕ здесь: это структурная
+ * нестыковка набора позиций (часто V3-enrichment), отдельный сигнал.
+ */
+export function checkClientServerDivergence(
+  summary: ShadowDiffSummary | null | undefined,
+): AnomalyFinding[] {
+  if (!summary?.deltas?.length) return [];
+  const out: AnomalyFinding[] = [];
+  for (const d of summary.deltas) {
+    if (d.presence !== "both" || !d.divergent) continue;
+    // Берём наибольшее по модулю расхождение из gross/net (оба важны для плеча).
+    const candidates = [d.deltaStartUsd, d.deltaNetStartUsd].filter(
+      (v): v is number => typeof v === "number" && Number.isFinite(v),
+    );
+    if (candidates.length === 0) continue;
+    const delta = candidates.reduce((a, b) => (Math.abs(b) > Math.abs(a) ? b : a), 0);
+    if (Math.abs(delta) <= summary.thresholdUsd) continue;
+    const serverRef = Math.abs(d.serverStartUsd ?? 0);
+    const overFloor = Math.abs(delta) >= POST_PORT_THRESHOLDS.divergenceErrorFloorUsd;
+    const overPct =
+      serverRef > 0 && Math.abs(delta) / serverRef >= POST_PORT_THRESHOLDS.divergenceErrorPct;
+    const severity: AnomalyFinding["severity"] = overFloor || overPct ? "error" : "warn";
+    // key = chain|protocolId|lpTokenId|matchedV3TokenId|firstSupplySymbol
+    const [chain = "", protocolId = "", lpTokenId = "", v3 = ""] = d.key.split("|");
+    const marketKey = v3 || lpTokenId || null;
+    out.push({
+      checkId: "client_server_cost_basis_divergence",
+      anomalyType: "cost_basis",
+      severity,
+      phase: "post",
+      observedValue: d.clientStartUsd,
+      expectedValue: d.serverStartUsd,
+      // walletId не входит в composite-ключ diff'а (keyOf) → опускаем.
+      ...(chain ? { chain } : {}),
+      ...(protocolId ? { protocolId } : {}),
+      marketKey,
+      detail: {
+        reason: `client cost basis $${(d.clientStartUsd ?? 0).toFixed(2)} ≠ server $${(d.serverStartUsd ?? 0).toFixed(2)} (Δ $${delta.toFixed(2)}) — клиент кормит движок неполным набором ops (POS-011 класс)`,
+        key: d.key,
+        deltaStartUsd: d.deltaStartUsd,
+        deltaNetStartUsd: d.deltaNetStartUsd,
+        reasons: d.reasons,
       },
     });
   }

@@ -8,13 +8,23 @@
  * run on a schedule (BullMQ, follow-up) or on demand (admin scan route).
  */
 import { findingKey, type AnomalyFlagsRepository } from "./anomaly-flags.repository.js";
-import { runPostPortChecks, type CanonicalPosition, type GoldenCaseView } from "./post_port_checks.js";
+import {
+  runPostPortChecks,
+  checkClientServerDivergence,
+  type CanonicalPosition,
+  type GoldenCaseView,
+} from "./post_port_checks.js";
+import type { ShadowDiffSummary } from "../ucb/shadow-diff.js";
 
 /** Latest canonical positions for an account (subset of the shadow row). */
 export interface ShadowResultSource {
   findLatestForAccount(
     accountId: string,
-  ): Promise<{ positions: unknown[] } | null>;
+  ): Promise<{
+    positions: unknown[];
+    /** B5 shadow-diff summary (client↔server), null до первого diff'а. */
+    diffSummary?: ShadowDiffSummary | null;
+  } | null>;
 }
 
 /** Golden cases for a wallet (golden.repository shape). */
@@ -136,7 +146,13 @@ export class AnomalyDetectorService {
     }
     const golden = adaptGolden(goldenRows);
 
-    const findings = runPostPortChecks(positions, golden);
+    const findings = [
+      ...runPostPortChecks(positions, golden),
+      // C: client↔server cost basis divergence (по diff_summary, когда B5
+      // shadow-diff прогонялся). Ловит класс POS-011 (клиент кормит движок
+      // неполным набором ops), который server-only чеки не видят.
+      ...checkClientServerDivergence(latest.diffSummary),
+    ];
 
     await this.deps.flagsRepo.upsertMany(accountId, findings, this.deps.detectorVersion);
     const trippingKeys = new Set(findings.map((f) => findingKey(f)));

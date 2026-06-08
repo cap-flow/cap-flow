@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   checkCanonicalInvariants,
+  checkClientServerDivergence,
   checkCostBasisFromSpot,
   checkFeeAprWithoutFee,
   checkGoldenCaseDrift,
@@ -13,6 +14,10 @@ import {
   type CanonicalPosition,
   type GoldenCaseView,
 } from "./post_port_checks.js";
+import type {
+  ShadowDiffSummary,
+  ShadowPositionDelta,
+} from "../ucb/shadow-diff.js";
 
 const pos = (p: Partial<CanonicalPosition>): CanonicalPosition => ({
   id: "POS-1",
@@ -248,5 +253,124 @@ describe("runPostPortChecks", () => {
     const ids = out.map((f) => f.checkId);
     expect(ids).toContain("golden_case_drift");
     expect(ids).toContain("lp_uncovered_nearzero");
+  });
+});
+
+describe("checkClientServerDivergence (client↔server cost basis)", () => {
+  const delta = (d: Partial<ShadowPositionDelta>): ShadowPositionDelta => ({
+    key: "arb|arb_morphoblue|0x6c247b|", // chain|proto|lp|v3|sym (sym пуст)
+    presence: "both",
+    clientStartUsd: null,
+    serverStartUsd: null,
+    deltaStartUsd: null,
+    clientNetStartUsd: null,
+    serverNetStartUsd: null,
+    deltaNetStartUsd: null,
+    coverageMismatch: false,
+    openedAtMismatch: false,
+    reasons: [],
+    divergent: false,
+    ...d,
+  });
+  const summary = (deltas: ShadowPositionDelta[]): ShadowDiffSummary => ({
+    divergentCount: deltas.filter((d) => d.divergent).length,
+    matchedCount: deltas.filter((d) => d.presence === "both").length,
+    clientOnlyCount: 0,
+    serverOnlyCount: 0,
+    materialDivergenceCount: deltas.filter((d) => d.divergent).length,
+    thresholdUsd: 1,
+    deltas,
+  });
+
+  it("POS-011 класс: client < server на $6,379 → error", () => {
+    const out = checkClientServerDivergence(
+      summary([
+        delta({
+          clientStartUsd: 15209.39,
+          serverStartUsd: 21588.55,
+          deltaStartUsd: 15209.39 - 21588.55,
+          reasons: ["startUsd"],
+          divergent: true,
+        }),
+      ]),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.checkId).toBe("client_server_cost_basis_divergence");
+    expect(out[0]!.severity).toBe("error");
+    expect(out[0]!.observedValue).toBeCloseTo(15209.39, 2);
+    expect(out[0]!.expectedValue).toBeCloseTo(21588.55, 2);
+    expect(out[0]!.chain).toBe("arb");
+    expect(out[0]!.protocolId).toBe("arb_morphoblue");
+  });
+
+  it("малое расхождение (<$50 и <5%) → warn", () => {
+    const out = checkClientServerDivergence(
+      summary([
+        delta({
+          clientStartUsd: 1000,
+          serverStartUsd: 1010,
+          deltaStartUsd: -10, // $10 = 0.99% от $1010 → warn
+          reasons: ["startUsd"],
+          divergent: true,
+        }),
+      ]),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.severity).toBe("warn");
+  });
+
+  it("net-плечо: large deltaNet → error даже при малом gross", () => {
+    const out = checkClientServerDivergence(
+      summary([
+        delta({
+          clientStartUsd: 1000,
+          serverStartUsd: 1000,
+          deltaStartUsd: 0,
+          clientNetStartUsd: 200,
+          serverNetStartUsd: 800,
+          deltaNetStartUsd: -600,
+          reasons: ["netStartUsd"],
+          divergent: true,
+        }),
+      ]),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.severity).toBe("error");
+  });
+
+  it("parity (0 divergent) → 0 findings (после фикса diff молчит)", () => {
+    expect(
+      checkClientServerDivergence(
+        summary([
+          delta({
+            clientStartUsd: 21588.55,
+            serverStartUsd: 21588.55,
+            deltaStartUsd: 0,
+            divergent: false,
+          }),
+        ]),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("presence-mismatch (client_only) НЕ flag'ается этим чеком", () => {
+    expect(
+      checkClientServerDivergence(
+        summary([
+          delta({
+            presence: "client_only",
+            clientStartUsd: 500,
+            reasons: ["presence:client_only"],
+            divergent: false,
+          }),
+        ]),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("null/пустой summary → 0 findings (нет shadow-diff)", () => {
+    expect(checkClientServerDivergence(null)).toHaveLength(0);
+    expect(checkClientServerDivergence(undefined)).toHaveLength(0);
+    expect(checkClientServerDivergence(summary([]))).toHaveLength(0);
   });
 });
