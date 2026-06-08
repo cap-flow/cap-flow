@@ -120,7 +120,73 @@ on-chain словарь растёт); паттерн «как классифи�
 - `leverage_collateral_borrow_funded` — плечевой залог на заёмные средства:
   проверять, что cost basis = уплаченный номинал, не receipt-спот.
 
+## Часть D — Worked example aida 2026-06-08 + техники поиска НЕОЧЕВИДНЫХ багов
+
+Аудит **одного нового юзера (aida, 2 позиции)** вскрыл **системный баг движка**,
+скрывавший −28% убыток, и тот же баг **замороженным в golden artur**. Разбор дал
+переносимые проверки/техники — добавляем их в ядро на будущее.
+
+**Что было:** POS-001 Fluid ETH-плечо. Цепочка `transfer_in USDC → swap USDC→WETH →
+swap WETH→ETH (unwrap) → lend_supply ETH`. Движок показал cost basis **$513.50** (PnL
++0.2%), реально уплачено **$718.82** (PnL −28%). Корень: `position_lot_cost_basis.ts`
+в token→token ветке консумил source-лот ДО чтения его WAC → `wacAt`=null → fallback на
+market-спот → реальный cost терялся. On-chain (`0x91c5dcb9`): 718.82 USDC → 0.304514
+WETH, USDC назад НЕ вернулся, implied ETH=$2360 (сейчас $1683). Fix `a93439a`.
+
+### D.1 — Новые ОБЯЗАТЕЛЬНЫЕ проверки (добавить в чек-лист Части A)
+1. **Swap-баланс (conservation).** Для КАЖДОГО swap: `out_usd ≈ in_usd` в пределах
+   fee+slippage (≤~2%). Имбаланс выше → либо DeBank misprice, либо частичный своп →
+   **декодировать on-chain receipt** (это и был тычок к багу aida: out $719 vs in $513).
+2. **token→token / unwrap хопы.** Цепочки `wrapped→native` (WETH→ETH), `token→token`:
+   cost ОБЯЗАН наследоваться от потреблённого лота, НЕ от market-спота на момент свопа.
+   Это слепое пятно (стейбл→token ветка работает, token→token — нет).
+3. **`priceSource='fallback'` / знак «?».** Перечислить все supplyTokens с fallback — это
+   движок САМ пометил cost basis недостоверным = первые цели аудита.
+4. **PnL-vs-price-move plausibility.** Плечевая/любая позиция с ~flat PnL, когда базовый
+   актив сходил на десятки % за срок удержания, — подозрительно (cost basis ≈ текущий
+   спот, а не уплаченное). aida: +0.2% при ETH −28%.
+5. **DeBank historical-price sanity.** Сравнить implied-цену из swap-ratio
+   (`out_amount/in_amount`) с ценой, которой движок оценил токен; расхождение → DeBank
+   price-feed врёт → cost basis якорить к **уплаченному стейблу** (out-side), не к receive-споту.
+
+### D.2 — Техники поиска неочевидных багов
+- **On-chain reconciliation (главный арбитр).** При противоречивых DeBank-USD —
+  декодировать ERC20 `Transfer`-логи receipt'а (`alchemy ethGetTransactionReceipt` →
+  topics from/to, data=amount) для материальных позиций: истинные потоки vs реестр.
+  Единственный надёжный способ отличить «misprice» от «partial swap» от «реальной потери».
+- **Cross-tracker diff.** `cross_protocol.ts` (SoT) vs `position_lot_cost_basis.ts`
+  (popup/lending-override) — параллельные реализации. Отображаемое значение часто из
+  НЕ-SoT трекера. Прогнать обе на позиции, флагнуть расхождение (расширить
+  `dual_pipeline_equivalence` на token→token + unwrap). aida: SoT давал $719, popup-трекер $513.
+- **Signature «сервер прав / клиент нет» + «чинили N раз, возвращается».** → баг на
+  call-site (клиент обогащает частичный набор ops / использует другой трекер), а не в движке.
+- **Golden provenance check.** Фикс сдвинул golden → НЕ откатывать вслепую: проверить
+  провенанс якоря. «pending / skipped / non-verified / engine-frozen» = БЕЗ авторитета →
+  фикс прав, обновить golden. artur ETH Fluid: провенанс прямо помечал Fluid «skipped», и
+  caveat признавал «reproduces client engine value» (= заморожен, не выверен от реестра).
+
+### D.3 — Где и как чинить (по слоям) + ловушки
+- **Число cost basis неверно, а `op_type`/`notes` верны → ДВИЖОК (`@cap-flow/ucb`), НЕ
+  классификатор.** (aida: swap/lend_supply классифицированы верно; корень — WAC-наследование.)
+- **Параллельные трекеры:** чинить SoT (`cross_protocol`) И popup (`position_lot_cost_basis`),
+  либо свести их. Фикс в одном не помогает отображаемому значению из другого.
+- **Test-first:** failing-тест с **on-chain-значениями** ДО фикса (вечный регресс-гард).
+- **⚠ Ловушка сборки:** `@cap-flow/ucb` экспортит из `dist/` → после правки `src` ОБЯЗАТЕЛЬНО
+  `pnpm --filter @cap-flow/ucb build`, иначе web/api тесты И браузер берут СТАРЫЙ код
+  (симптом: тест возвращает ровно прежнее число после «фикса»).
+
+### D.4 — Кандидаты-чеки детектора (из этого аудита)
+- `swap_value_imbalance` — `|out_usd − in_usd| / max > ~2%` (сверх fee+slippage) →
+  DeBank misprice / partial swap. Дешёвый registry-чек, ловит корневой симптом aida.
+- `cost_basis_from_spot` (есть) — подтверждено: ловит token→token-потерю через
+  `priceSource='fallback'` (явный регресс-тест добавлен на aida-класс).
+- `leverage_flat_pnl_vs_price_move` — плечевая позиция с ~flat PnL при крупном движении
+  базового актива за срок (cross-ref hist-цена входа/выхода).
+- `tracker_divergence` — `cross_protocol` vs `position_lot_cost_basis` расходятся на позиции
+  (авто-версия cross-tracker diff).
+
 ## Связанное
 [[capflow_position_audit_protocol]] · [[capflow_golden_verification_protocol]] ·
 [[capflow_debug_protocol]] · [[capflow_data_source_authority]] ·
-[[capflow_anti_recurrence_methodology]] · `notes/golden/alice-2026-06-04.md`
+[[capflow_anti_recurrence_methodology]] · `notes/golden/alice-2026-06-04.md` ·
+`notes/golden/aida-2026-06-08.md`
