@@ -55,6 +55,7 @@ import type { SavedWallet } from "@cap-flow/ucb/wallet";
 import type { ResolvedAnnotation } from "@cap-flow/ucb/annotations";
 import type { LotMethodology } from "@cap-flow/ucb/lots/types";
 import type { LotTracker } from "@cap-flow/ucb/lots/lot_tracker";
+import type { PositionTracker } from "@cap-flow/ucb/positions/position_tracker";
 
 /**
  * Per-wallet engine input. `ops` mirror `chain_operations.raw` with
@@ -166,6 +167,8 @@ export async function computePositions(
 
   // ── Step 1: per-wallet UCB pipeline → lot tracker (= newTrackers) ──
   const lotsByWallet = new Map<string, LotTracker>();
+  // cross_protocol PositionTracker (SoT) per wallet — для tracker_divergence guard.
+  const trackersByWallet = new Map<string, PositionTracker>();
   const walletNameById = new Map<string, string>();
   for (const w of linkedWallets) walletNameById.set(w.wallet.id, w.wallet.name);
   for (const w of linkedWallets) {
@@ -180,6 +183,8 @@ export async function computePositions(
       walletNameById,
     });
     lotsByWallet.set(w.wallet.id, result.lotTracker);
+    if (result.positionTracker)
+      trackersByWallet.set(w.wallet.id, result.positionTracker);
   }
 
   // ── Step 1b: histPrices from the B1 op-token-price cache ──
@@ -293,6 +298,25 @@ export async function computePositions(
     }
   }
 
+  // ── tracker_divergence guard ──
+  // Для lending позиций проставляем cost basis по cross_protocol PositionTracker
+  // (SoT) рядом с display `startUsd` (buildSupplyToken / lending-override). Если
+  // они разойдутся — детектор поднимет `tracker_divergence` (класс aida POS-001:
+  // display падал в market-спот, SoT держал уплаченное). Только lending —
+  // lot-traced, без внешнего Krystal/V3-override → без ложных срабатываний на LP.
+  const enriched = working.map((p) => {
+    if (p.kind !== "lending") return p;
+    const tracker = trackersByWallet.get(p.walletId);
+    if (!tracker) return p;
+    let entry = null;
+    for (const t of p.supplyTokens) {
+      entry = tracker.findByCollateral(p.walletId, p.protocol.id, t.symbol);
+      if (entry) break;
+    }
+    if (!entry) return p;
+    return { ...p, costBasisTrackerUsd: entry.currentCostBasisUsd };
+  });
+
   // V3 cost-basis (B3 step6/7) remains a guarded no-op here.
-  return working;
+  return enriched;
 }

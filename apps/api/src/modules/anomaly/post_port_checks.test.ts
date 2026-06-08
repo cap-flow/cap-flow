@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkCanonicalInvariants,
   checkClientServerDivergence,
+  checkTrackerDivergence,
   checkCostBasisFromSpot,
   checkFeeAprWithoutFee,
   checkGoldenCaseDrift,
@@ -389,5 +390,45 @@ describe("checkClientServerDivergence (client↔server cost basis)", () => {
     expect(checkClientServerDivergence(null)).toHaveLength(0);
     expect(checkClientServerDivergence(undefined)).toHaveLength(0);
     expect(checkClientServerDivergence(summary([]))).toHaveLength(0);
+  });
+});
+
+describe("checkTrackerDivergence (display vs cross_protocol SoT)", () => {
+  it("aida POS-001 класс: display $513.50 vs SoT $718.82 → error", () => {
+    const out = checkTrackerDivergence([
+      pos({
+        protocol: { id: "arb_fluid" },
+        startUsd: 513.5,
+        costBasisTrackerUsd: 718.82,
+      }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.checkId).toBe("tracker_divergence");
+    expect(out[0]!.severity).toBe("error");
+    expect(out[0]!.observedValue).toBeCloseTo(513.5, 2);
+    expect(out[0]!.expectedValue).toBeCloseTo(718.82, 2);
+  });
+
+  it("display == SoT (после фикса) → 0 findings", () => {
+    expect(
+      checkTrackerDivergence([
+        pos({ startUsd: 718.82, costBasisTrackerUsd: 718.82 }),
+      ]),
+    ).toHaveLength(0);
+  });
+
+  it("малое расхождение (<$50 и <2%) → 0 findings", () => {
+    expect(
+      checkTrackerDivergence([
+        pos({ startUsd: 3000, costBasisTrackerUsd: 3030 }), // $30 = 0.99%
+      ]),
+    ).toHaveLength(0);
+  });
+
+  it("costBasisTrackerUsd отсутствует/null (не-lending / старый shadow) → 0", () => {
+    expect(checkTrackerDivergence([pos({ startUsd: 5000 })])).toHaveLength(0);
+    expect(
+      checkTrackerDivergence([pos({ startUsd: 5000, costBasisTrackerUsd: null })]),
+    ).toHaveLength(0);
   });
 });

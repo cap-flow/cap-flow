@@ -96,6 +96,8 @@ function adaptPositions(raw: unknown[]): CanonicalPosition[] {
     startUsd: Number(r.startUsd ?? 0),
     currentUsd: Number(r.currentUsd ?? 0),
     netPnlUsd: Number(r.netPnlUsd ?? 0),
+    costBasisTrackerUsd:
+      r.costBasisTrackerUsd == null ? null : Number(r.costBasisTrackerUsd),
     coverageIncomplete: Boolean(r.coverageIncomplete),
     feeAprLifetime: r.feeAprLifetime == null ? null : Number(r.feeAprLifetime),
     feesLifetimeUsd: Number(r.feesLifetimeUsd ?? 0),

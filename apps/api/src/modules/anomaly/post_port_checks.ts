@@ -23,6 +23,9 @@ export interface CanonicalPosition {
   startUsd: number;
   currentUsd: number;
   netPnlUsd: number;
+  /** cross_protocol PositionTracker cost basis (SoT) — для tracker_divergence.
+   *  Проставляется computePositions только для lending; null/absent иначе. */
+  costBasisTrackerUsd?: number | null;
   coverageIncomplete?: boolean;
   /** Annualized fee APR по lifetime (Krystal/engine); null когда не считается. */
   feeAprLifetime?: number | null;
@@ -78,6 +81,9 @@ export const POST_PORT_THRESHOLDS = {
   divergenceErrorFloorUsd: 50,
   /** client_server_cost_basis_divergence: |delta|/server ≥ этого → error. */
   divergenceErrorPct: 0.05,
+  /** tracker_divergence: ниже обоих порогов (|Δ| и |Δ|/ref) — шум, не флагуем. */
+  trackerDivergenceFloorUsd: 50,
+  trackerDivergencePct: 0.02,
 } as const;
 
 function eqKey(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -435,6 +441,61 @@ export function checkClientServerDivergence(
   return out;
 }
 
+/**
+ * `tracker_divergence` — display `startUsd` (buildSupplyToken / lending-override
+ * path) разошёлся с cross_protocol PositionTracker (SoT, поле
+ * `costBasisTrackerUsd`). Это ПРЯМОЙ детект класса параллельных трекеров: на
+ * aida POS-001 (token→token) display падал в market-спот ($513), а SoT держал
+ * уплаченное ($719) → Δ $206. Не зависит от priceSource/«?» — ловит даже когда
+ * баг даёт уверенно-неверное значение.
+ *
+ * Поле проставляется `computePositions` ТОЛЬКО для lending (lot-traced, без
+ * внешнего Krystal/V3-override) → без ложных срабатываний на LP. На старых
+ * shadow-строках без поля чек молчит.
+ *
+ * Severity: error при |Δ| ≥ $50 ИЛИ ≥ 5% от max(startUsd, tracker); иначе warn.
+ */
+export function checkTrackerDivergence(
+  positions: readonly CanonicalPosition[],
+): AnomalyFinding[] {
+  const out: AnomalyFinding[] = [];
+  for (const p of positions) {
+    const tracker = p.costBasisTrackerUsd;
+    if (tracker == null || !Number.isFinite(tracker)) continue;
+    const diff = Math.abs(p.startUsd - tracker);
+    const ref = Math.max(Math.abs(p.startUsd), Math.abs(tracker));
+    if (ref <= 0) continue;
+    const overFloor = diff >= POST_PORT_THRESHOLDS.trackerDivergenceFloorUsd;
+    const overPct = diff / ref >= POST_PORT_THRESHOLDS.trackerDivergencePct;
+    if (!overFloor && !overPct) continue;
+    const severity: AnomalyFinding["severity"] =
+      diff >= POST_PORT_THRESHOLDS.divergenceErrorFloorUsd ||
+      diff / ref >= POST_PORT_THRESHOLDS.divergenceErrorPct
+        ? "error"
+        : "warn";
+    out.push({
+      checkId: "tracker_divergence",
+      anomalyType: "cost_basis",
+      severity,
+      phase: "post",
+      observedValue: p.startUsd,
+      expectedValue: tracker,
+      positionId: p.id,
+      walletId: p.walletId,
+      chain: p.chain,
+      protocolId: p.protocol.id,
+      marketKey: marketKeyOf(p),
+      detail: {
+        reason: `display startUsd $${p.startUsd.toFixed(2)} расходится с cross_protocol SoT $${tracker.toFixed(2)} (Δ $${diff.toFixed(2)}) — параллельный трекер разошёлся (класс aida token→token)`,
+        startUsd: p.startUsd,
+        costBasisTrackerUsd: tracker,
+        deltaUsd: p.startUsd - tracker,
+      },
+    });
+  }
+  return out;
+}
+
 /** All post-port checks over canonical positions + golden cases. */
 export function runPostPortChecks(
   positions: readonly CanonicalPosition[],
@@ -446,5 +507,6 @@ export function runPostPortChecks(
     ...checkFeeAprWithoutFee(positions),
     ...checkStableAvgpriceOff(positions),
     ...checkCostBasisFromSpot(positions),
+    ...checkTrackerDivergence(positions),
   ];
 }

@@ -333,6 +333,16 @@ export interface OpenPosition {
    */
   netStartUsd: number;
   /**
+   * tracker_divergence guard: cost basis этой позиции по cross_protocol
+   * PositionTracker (SoT), проставляется в `computePositions` для lot-traced
+   * (lending) позиций. Детектор флагует, когда `startUsd` (display-path:
+   * buildSupplyToken / lending-override) расходится с этим SoT-значением —
+   * признак, что параллельный трекер разошёлся (класс aida POS-001 token→token,
+   * где display падал в market-спот, а SoT держал уплаченное). Optional:
+   * только lending (LP/V3 имеют внешний Krystal-override → не сверяем).
+   */
+  costBasisTrackerUsd?: number;
+  /**
    * Collateral-side PnL, set by the cost-basis overrides / buildOne
    * (`currentUsd − startUsd`). Optional because it's computed post-build.
    * (A0: surfaced when this file moved to a strict-typechecked package.)
