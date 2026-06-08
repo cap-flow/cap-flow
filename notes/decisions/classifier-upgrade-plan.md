@@ -3,6 +3,20 @@
 Сгенерён workflow'ом (карта кода + характеристика unknown + словарь topic0 → синтез). План, не код.
 
 ## ✅ ПРОГРЕСС topic0-лестницы (2026-06-04, вечер)
+
+> **2026-06-08 — Этап 1.2 (log-fetch enrichment) КОД DONE** (commit `b305607`).
+> Живая проводка в `ChainClassifierService.analyzeAccount` за НОВЫМ флагом
+> `chain_classifier.topic0.enabled` (отдельный от `chain_classifier.enabled`,
+> default OFF). 2-pass: дешёвая classify → нетривиальные ops → фетч receipts
+> ТОЛЬКО для них (`EvmLogsFetcher` viem+Alchemy, `makeAlchemyEvmLogsFetcher`,
+> подключён в `worker.ts`) → финальная classify с `logsByTxHash`. Fail-soft,
+> ноль регресса при OFF/без адаптера. +4 теста (override, gating, fail-soft,
+> trivial-skip), api 1156, tsc baseline 36.
+> **Остаток трека = операционный rollout (owner-gated):** включить флаг на
+> тест-аккаунте → `npm run dev:worker` refresh → сверить `chain_operations`
+> op_type'ы → расширить. Логика classifyByTopic0 уже flip-safe (shadow-diff
+> Alice+testakk+egorov, 0 регрессов).
+
 - **Этап 0 (фундамент) DONE** — `packages/ucb/src/topic0_dict.ts` (commit `1569615`): чистый
   словарь выверенных сигнатур (ERC4626/UniV2/V3/V4-swap/Aave V2+V3/Compound v2+v3/Curve/
   Convex/Synthetix/Lido/ether.fi/Morpho) + резолв коллизий по категории + `classifyByTopic0`
