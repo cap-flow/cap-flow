@@ -22,6 +22,7 @@ const T = {
   morphoBorrow: "0x570954540bed6b1304a87dfe815a5eda4a648f7097a16240dcd85c9b5fd42a43",
   univ4ModLiq: "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec",
   v3PoolBurn: "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c",
+  morphoWithdrawColl: "0xe80ebd7cc9223d7382aab2e0d1d6155c65651f83d53c8b9b06901d167e321142",
 } as const;
 
 const log = (topic0: string) => ({ topic0 });
@@ -132,6 +133,24 @@ describe("context-aware подавление свопа (аггрегатор-з
     expect(
       classifyByTopic0([log(T.v3PoolSwap), log(T.v3Increase)], { protocolCategory: "yield" })?.opType,
     ).toBe("lp_add");
+  });
+});
+
+describe("multi-action guard (≥2 разных position-события)", () => {
+  it("borrow + withdrawCollateral в одной tx → null (не гадаем, log_index=0)", () => {
+    expect(classifyByTopic0([log(T.morphoBorrow), log(T.morphoWithdrawColl)])).toBeNull();
+  });
+  it("supply + borrow (leverage open) → null", () => {
+    expect(classifyByTopic0([log(T.morphoSupply), log(T.morphoBorrow)])).toBeNull();
+  });
+  it("одиночное position-событие + Transfer-шум → классифицируем (НЕ multi-action)", () => {
+    expect(classifyByTopic0([log(T.morphoWithdrawColl), log(T.transfer)])?.opType).toBe("lend_withdraw");
+  });
+  it("один тип дважды (supply+supply) → не multi-action (1 distinct)", () => {
+    expect(classifyByTopic0([log(T.morphoSupply), log(T.aaveV3Supply)])?.opType).toBe("lend_supply");
+  });
+  it("position + swap → не multi-action (swap rank<3)", () => {
+    expect(classifyByTopic0([log(T.v3Increase), log(T.v3PoolSwap)])?.opType).toBe("lp_add");
   });
 });
 

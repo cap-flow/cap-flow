@@ -222,6 +222,7 @@ export function classifyByTopic0(
 ): Topic0Result | null {
   let best: Topic0Result | null = null;
   let bestRank = -1;
+  const positionTypes = new Set<OpType>();
   for (const log of logs) {
     const t = log.topic0?.toLowerCase();
     if (!t || NOISE_TOPIC0.has(t)) continue;
@@ -235,11 +236,18 @@ export function classifyByTopic0(
         entry.opType;
     if (!opType) continue;
     const r = rankOf(opType);
+    if (r >= 3) positionTypes.add(opType); // position-defining события
     if (r > bestRank) {
       bestRank = r;
       best = { opType, matchedTopic0: t, event: entry.event };
     }
   }
+  // Multi-action guard: ≥2 РАЗНЫХ position-события в одной tx (напр. leverage
+  // supply+borrow, или borrow+withdrawCollateral) — однозначно выбрать нельзя
+  // (log_index хардкод 0 → порядок ненадёжен). Не гадаем → null (DeBank-ладдер
+  // решит). Срабатывает только на genuine multi-action; одиночное position-событие
+  // (даже + AccrueInterest/Transfer-шум) проходит как обычно.
+  if (positionTypes.size >= 2) return null;
   // Context-aware подавление свопа: на POSITION-протоколе (yield/lp/lending/…)
   // единственное распознанное событие = swap почти всегда ВНУТРЕННИЙ своп
   // аггрегатора/vault'а (Curve/V4 внутри депозита), не действие юзера. Не
