@@ -46,6 +46,15 @@
   **contract-aware ранжировка**: события tx-target контракта важнее внутренних pool-свопов (Swap от
   DEX-пула не должен перебивать user-facing deposit). Morpho `borrow↔WithdrawCollateral` (3) — multi-action,
   нужен реальный log_index.
+- **✅ Category-aware подавление свопа сделано + подтверждено** (commit `08879e2`): на
+  position-протоколе (yield/lp/lending/staking/restaking/cdp) одиночный topic0-`swap` →
+  null (внутренний своп аггрегатора, отдаём ладдеру). Повторный shadow-diff Alice:
+  **disagree 14→10** — все 4 аггрегатор-запа `lp_add→swap` (V4 + 3 Curve) УШЛИ (→ no-signal,
+  сохраняется DeBank lp_add). **Новых регрессов нет.** Остаток 10 = НЕ регрессы: ~5 topic0
+  прав (ERC4626 vault deposit/withdraw, V3 fee-collect), 3 Morpho multi-action (log_index=0),
+  2 V3 amount>0 remove (защитимо). Тесты +5, classifier 109/109.
+  **ОСТАТОК перед live-флипом:** только 3 Morpho multi-action (нужен реальный log_index вместо
+  хардкода 0) — последний регресс-риск. Затем live за флагом.
   **ВЕРДИКТ: НЕ флипать topic0 live до фиксов.** ПРЕРЕКВИЗИТЫ перед живым вживлением (этап 1.2):
   (а) DATA-декодеры V4 ModifyLiquidity (знак int256) + Curve-arity покрытие; (б) co-event/amount правила:
   V3 pool Burn amount=0 → claim_rewards (а не lp_remove); Swap проигрывает liquidity-событию даже когда
