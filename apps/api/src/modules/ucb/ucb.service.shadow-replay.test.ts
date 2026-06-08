@@ -94,12 +94,14 @@ describe("ucb.service computePositions — B5 server/client parity (shadow)", ()
     expect(lifo, "artur ETH Fluid leg computed").toBeDefined();
     expect(wac, "artur ETH Fluid leg computed").toBeDefined();
 
-    // The toggle now flows through to the supply-token cost basis: LIFO ≠ WAC.
+    // The toggle still flows through to the supply-token cost basis: LIFO ≠ WAC.
     expect(Math.abs(lifo!.startUsd - wac!.startUsd)).toBeGreaterThan(100);
-    // LIFO reproduces the client-verified golden anchor to the cent ($32,296.72).
-    expect(Math.abs(lifo!.startUsd - 32296.72)).toBeLessThanOrEqual(1);
-    // WAC stays the legacy methodology-independent value ($33,708.57).
-    expect(Math.abs(wac!.startUsd - 33708.57)).toBeLessThanOrEqual(1);
+    // CORRECTED 2026-06-08 (aida POS-001 token→token unwrap fix): values dropped
+    // from LIFO $32,296.72 / WAC $33,708.57 because WETH (returned by lp_remove
+    // with real LP-attributed cost) → ETH swap no longer resets cost to market
+    // spot — it inherits the consumed lot cost (position_lot_cost_basis.ts).
+    expect(Math.abs(lifo!.startUsd - 30953.89)).toBeLessThanOrEqual(1);
+    expect(Math.abs(wac!.startUsd - 32773.02)).toBeLessThanOrEqual(1);
   });
 
   it("deterministic (R4): identical inputs → byte-identical output", async () => {

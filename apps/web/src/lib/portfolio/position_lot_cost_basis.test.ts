@@ -350,3 +350,52 @@ describe("getPositionLotCostBasis — UCB C4 popup SoT consistency", () => {
     expect(result.totalCostUsd).toBeCloseTo(3000, 0);
   });
 });
+
+describe("REGRESSION (aida POS-001): token→token swap наследует реальный cost", () => {
+  // On-chain: aida отдала 718.82 USDC за 0.304514 WETH (ETH тогда ~$2360),
+  // затем WETH→ETH→Fluid. Движок показывал $513.50 = 0.304514 × текущий спот
+  // $1686 → скрыт −28% убыток. Корень: token→token ветка консумила source-лот
+  // ПЕРЕД чтением его WAC → wacAt=null → fallback на market spot.
+  const ops: ClassifiedOp[] = [
+    op({
+      hash: "0xin",
+      type: "transfer_in",
+      time: 1000,
+      movements: [
+        { direction: "in", symbol: "USDC", amount: 718.824102, usd: 719.11, isStable: true },
+      ],
+    }),
+    // stable→token (эта ветка OK): WETH lot = уплаченный USDC $719.11.
+    op({
+      hash: "0xswap1",
+      type: "swap",
+      time: 2000,
+      movements: [
+        { direction: "out", symbol: "USDC", amount: 718.824102, usd: 719.11, isStable: true },
+        { direction: "in", symbol: "WETH", amount: 0.304514, usd: 513.5 },
+      ],
+    }),
+    // token→token: ETH ДОЛЖЕН унаследовать $719.11 от WETH-лота, НЕ market $513.
+    op({
+      hash: "0xswap2",
+      type: "swap",
+      time: 3000,
+      movements: [
+        { direction: "out", symbol: "WETH", amount: 0.304514, usd: 513.5 },
+        { direction: "in", symbol: "ETH", amount: 0.304514, usd: 513.57 },
+      ],
+    }),
+  ];
+
+  it("ETH cost basis = реально уплаченный USDC ($719), не receive-side спот ($513)", () => {
+    const result = getPositionLotCostBasis({
+      ops,
+      walletId: "w1",
+      protocolId: "arb_fluid",
+      chain: "arb",
+      symbol: "ETH",
+      currentAmount: 0.304514,
+    });
+    expect(result.totalCostUsd).toBeCloseTo(719.11, 0);
+  });
+});

@@ -169,16 +169,28 @@ export function getPositionLotCostBasis(
       // критично для корректной "доступной массы": если user продал часть
       // купленных токенов, она не должна оставаться в tracker'е и
       // double-count'иться с current position.
+      //
+      // ВАЖНО: захватываем РЕАЛЬНУЮ стоимость потреблённого лота
+      // (`res.totalCostUsd`) ЗДЕСЬ. token→token ветка ниже наследует её как
+      // cost basis (как cross_protocol.handleSwap). Раньше cost читался через
+      // `wacAt` ПОСЛЕ consume → лот уже потрачен → null → market-spot fallback →
+      // cost терялся (баг aida POS-001: $513 вместо уплаченных $719).
+      let consumedOutCost = 0;
       for (const m of op.movement) {
         if (m.direction !== "out" || isStableSymbol(m.symbol)) continue;
         if (m.amount <= 0 || isGas(m)) continue;
-        tracker.consume({
+        const res = tracker.consume({
           walletId: args.walletId,
           symbol: m.symbol,
           amount: m.amount,
           tokenId: m.tokenId,
           chain: op.chain,
         });
+        // Реальный inherited cost; market spot — только если лот не отслеживался.
+        consumedOutCost +=
+          res.totalCostUsd > 0
+            ? res.totalCostUsd
+            : movementUsd(m, op.chain, op.time, histPrices);
       }
 
       if (stableSum > 0 && totalIn > 0) {
@@ -206,36 +218,13 @@ export function getPositionLotCostBasis(
           });
         }
       } else {
-        // Swap token→token: UCB invariant — cost basis inherited from
-        // consumed source lot's WAC, не market price на момент swap.
-        // Note: outs уже consumed выше (line ~145), но result был
-        // discarded. Здесь re-trace через peek WAC of source before
-        // consume happened — но это сложно. Альтернатива: capture
-        // consumed cost ВЫШЕ и распределить здесь.
-        //
-        // Простая реализация: re-consume не требуется. Используем
-        // wacAt(source.symbol, op.time) × source.amount как proxy для
-        // consumed cost. Это математически equivalent FIFO consume
-        // когда все source lots от одного покупочного происхождения
-        // (common case). Для multi-lot sources с разными WACs может
-        // быть слегка off, но lot tracker WAC mode сглаживает это.
-        //
-        // Лучший fix: capture consumed cost ВЫШЕ в массиве и использовать
-        // здесь. Делаем это сейчас.
-        let inheritedPaid = 0;
-        for (const m of op.movement) {
-          if (m.direction !== "out" || isStableSymbol(m.symbol)) continue;
-          if (m.amount <= 0 || isGas(m)) continue;
-          // Note: already consumed выше. Здесь — peek WAC before consume.
-          // Tracker.wacAt смотрит на acquiredAt <= time. Если все lots
-          // уже потрачены consume'ом, wacAt вернёт null. Используем
-          // movementUsd как fallback.
-          const wac = tracker.wacAt(args.walletId, m.symbol, op.time);
-          const lotCost = wac != null && wac > 0
-            ? wac * m.amount
-            : movementUsd(m, op.chain, op.time, histPrices);
-          inheritedPaid += lotCost;
-        }
+        // Swap token→token: cost basis наследуется от РЕАЛЬНОЙ стоимости
+        // потреблённого source-лота (`consumedOutCost`, захвачен в consume-
+        // loop выше), а НЕ от market price на момент swap. Это UCB-инвариант
+        // (как `cross_protocol.handleSwap` через `consumed.totalCostUsd`).
+        // Раньше cost читался через `wacAt` ПОСЛЕ consume → лот потрачен →
+        // null → market fallback → cost терялся (баг aida POS-001).
+        const inheritedPaid = consumedOutCost;
         // Distribute inheritedPaid across non-stable ins по amount-share.
         const nonStableIns = ins.filter((m) => !isStableSymbol(m.symbol));
         const totalInAmount = nonStableIns.reduce((s, m) => s + m.amount, 0);
