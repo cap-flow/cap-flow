@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ChainClassifierService,
   type EvmHistoryFetcher,
+  type EvmLogsFetcher,
   type SolanaHistoryFetcher,
 } from "./chain_classifier.service.js";
 import type { DeBankHistoryItem, DeBankToken } from "./debank_types.js";
@@ -303,6 +304,141 @@ describe("ChainClassifierService — fail-soft", () => {
     });
     expect(r.errors.length).toBe(1);
     expect(r.classified).toBe(1);
+  });
+});
+
+describe("ChainClassifierService — topic0 log-fetch (этап 1.2)", () => {
+  // Выверенный topic0 Aave V3 Supply (см. topic0_dict). classifyByTopic0 → lend_supply.
+  const AAVE_SUPPLY =
+    "0x2b627736bca15cd5381dcf80b0bf11fd197d01a037c52b927a881a10fb73ba61";
+
+  // Флаг-стаб с per-key значениями (main vs topic0).
+  function keyedFlags(map: Record<string, boolean>): FlagStub {
+    return { enabled: vi.fn(async (key: string) => map[key] ?? false) };
+  }
+
+  // history с одним swap (USDC→ETH, без проекта → swap).
+  const swapHistory = () => ({
+    history_list: [
+      deBankItem({
+        id: "0xswap",
+        time: 100,
+        sends: [{ tokenId: "arb:usdc", amount: 100 }],
+        receives: [{ tokenId: "arb:eth", amount: 0.05 }],
+      }),
+    ],
+    token_dict: { "arb:usdc": USDC_TOKEN, "arb:eth": ETH_TOKEN },
+    project_dict: {},
+    cex_dict: {},
+  });
+
+  it("topic0 ON + logs → событие перебивает DeBank-эвристику (swap → lend_supply)", async () => {
+    const flags = keyedFlags({
+      "chain_classifier.enabled": true,
+      "chain_classifier.topic0.enabled": true,
+    });
+    const evm: EvmHistoryFetcher = vi.fn(async () => swapHistory());
+    const logsFn = vi.fn(
+      async (items: ReadonlyArray<{ chain: string; txHash: string }>) => {
+        const m = new Map<
+          string,
+          { address: string; topic0: string; data: string }[]
+        >();
+        for (const it of items) {
+          m.set(it.txHash.toLowerCase(), [
+            { address: "0xpool", topic0: AAVE_SUPPLY, data: "0x" },
+          ]);
+        }
+        return m;
+      }
+    );
+    const logs: EvmLogsFetcher = logsFn;
+    const svc = new ChainClassifierService(flags, evm, null, logs);
+    const r = await svc.analyzeAccount({
+      accountId: "acct-1",
+      addresses: [{ address: SELF_EVM, type: "evm" }],
+    });
+    expect(r.byType["lend_supply"]).toBe(1);
+    expect(r.byType["swap"]).toBeUndefined();
+    // фетч вызван только для нетривиального swap-хэша.
+    expect(logsFn).toHaveBeenCalledTimes(1);
+    expect(logsFn.mock.calls[0]![0]).toEqual([
+      { chain: "arb", txHash: "0xswap" },
+    ]);
+  });
+
+  it("topic0 флаг OFF (main ON) + адаптер есть → фетч НЕ вызывается, swap остаётся", async () => {
+    const flags = keyedFlags({
+      "chain_classifier.enabled": true,
+      "chain_classifier.topic0.enabled": false,
+    });
+    const evm: EvmHistoryFetcher = vi.fn(async () => swapHistory());
+    const logs: EvmLogsFetcher = vi.fn(async () => new Map());
+    const svc = new ChainClassifierService(flags, evm, null, logs);
+    const r = await svc.analyzeAccount({
+      accountId: "acct-1",
+      addresses: [{ address: SELF_EVM, type: "evm" }],
+    });
+    expect(r.byType["swap"]).toBe(1);
+    expect(logs).not.toHaveBeenCalled();
+  });
+
+  it("fail-soft: фетч логов кидает → классификация без логов (swap), ошибка записана", async () => {
+    const flags = keyedFlags({
+      "chain_classifier.enabled": true,
+      "chain_classifier.topic0.enabled": true,
+    });
+    const evm: EvmHistoryFetcher = vi.fn(async () => swapHistory());
+    const logs: EvmLogsFetcher = vi.fn(async () => {
+      throw new Error("alchemy 429");
+    });
+    const svc = new ChainClassifierService(flags, evm, null, logs);
+    const r = await svc.analyzeAccount({
+      accountId: "acct-1",
+      addresses: [{ address: SELF_EVM, type: "evm" }],
+    });
+    expect(r.byType["swap"]).toBe(1); // упал на существующую лестницу
+    expect(r.errors.some((e) => e.includes("topic0 log-fetch"))).toBe(true);
+  });
+
+  it("тривиальные ops (transfer_out) не попадают в фетч-список", async () => {
+    const flags = keyedFlags({
+      "chain_classifier.enabled": true,
+      "chain_classifier.topic0.enabled": true,
+    });
+    const evm: EvmHistoryFetcher = vi.fn(async () => ({
+      history_list: [
+        deBankItem({
+          id: "0xswap",
+          time: 100,
+          sends: [{ tokenId: "arb:usdc", amount: 100 }],
+          receives: [{ tokenId: "arb:eth", amount: 0.05 }],
+        }),
+        // чистый out на внешний → transfer_out (тривиальный, без receipts).
+        deBankItem({
+          id: "0xout",
+          time: 50,
+          sends: [{ tokenId: "arb:usdc", amount: 25 }],
+        }),
+      ],
+      token_dict: { "arb:usdc": USDC_TOKEN, "arb:eth": ETH_TOKEN },
+      project_dict: {},
+      cex_dict: {},
+    }));
+    const logsFn = vi.fn(
+      async (_items: ReadonlyArray<{ chain: string; txHash: string }>) =>
+        new Map<string, { address: string; topic0: string; data: string }[]>()
+    );
+    const logs: EvmLogsFetcher = logsFn;
+    const svc = new ChainClassifierService(flags, evm, null, logs);
+    await svc.analyzeAccount({
+      accountId: "acct-1",
+      addresses: [{ address: SELF_EVM, type: "evm" }],
+    });
+    const fetched = logsFn.mock.calls[0]![0];
+    const hashes = fetched.map((x) => x.txHash);
+    expect(hashes).toContain("0xswap");
+    expect(hashes).not.toContain("0xout");
   });
 });
 

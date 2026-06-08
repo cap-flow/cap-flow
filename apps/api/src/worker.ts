@@ -30,6 +30,7 @@ import {
   type EvmHistoryFetcher,
   type SolanaHistoryFetcher,
 } from "./modules/classifier/chain_classifier.service.js";
+import { makeAlchemyEvmLogsFetcher } from "./modules/classifier/evm_logs_fetcher.js";
 import { FeatureFlagsRepository } from "./modules/feature-flags/feature-flags.repository.js";
 import { FeatureFlagsService } from "./modules/feature-flags/feature-flags.service.js";
 import { DeBankClient } from "./modules/integrations/debank.js";
@@ -169,10 +170,17 @@ async function main(): Promise<void> {
     (await heliusClient.getTransactions(address)) as unknown as Awaited<
       ReturnType<SolanaHistoryFetcher>
     >;
+  // Этап 1.2: topic0 log-fetch адаптер (viem + Alchemy). Только если ключ есть;
+  // иначе null → топик0-обогащение выключено (классификатор работает как раньше).
+  // Активируется per-account флагом `chain_classifier.topic0.enabled` (default OFF).
+  const evmLogsFetcher = env.ALCHEMY_API_KEY
+    ? makeAlchemyEvmLogsFetcher(env.ALCHEMY_API_KEY)
+    : null;
   const chainClassifier = new ChainClassifierService(
     featureFlagsService,
     evmHistoryFetcher,
-    solHistoryFetcher
+    solHistoryFetcher,
+    evmLogsFetcher
   );
 
   const refreshService = new PortfolioRefreshService(

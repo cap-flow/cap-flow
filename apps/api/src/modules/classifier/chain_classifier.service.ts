@@ -31,6 +31,7 @@ import type {
 } from "./debank_types.js";
 import type { HeliusTransaction } from "./helius_types.js";
 import type { ClassifiedOp, OpType } from "./types.js";
+import type { Topic0Log } from "@cap-flow/ucb/topic0_dict";
 
 export interface EvmHistoryBundle {
   readonly history_list: DeBankHistoryItem[];
@@ -44,6 +45,26 @@ export type EvmHistoryFetcher = (address: string) => Promise<EvmHistoryBundle>;
 export type SolanaHistoryFetcher = (
   address: string
 ) => Promise<HeliusTransaction[]>;
+
+/**
+ * topic0 log-fetch port (этап 1.2). Берёт (chain, txHash) пары → возвращает
+ * Map<txHash(lowercase), Topic0Log[]> из on-chain receipts. Инъектируется (DI):
+ * реальный адаптер (viem + Alchemy) в worker.ts, в тестах — тривиальный мок,
+ * `null` = capability отсутствует (топик0-обогащение пропускается, ноль регресса).
+ */
+export type EvmLogsFetcher = (
+  items: ReadonlyArray<{ readonly chain: string; readonly txHash: string }>
+) => Promise<ReadonlyMap<string, readonly Topic0Log[]>>;
+
+/** op_type'ы, которым topic0 заведомо не нужен — не тратим RPC на receipts. */
+const TOPIC0_TRIVIAL_OPS: ReadonlySet<string> = new Set([
+  "noise",
+  "approve",
+  "transfer_in",
+  "transfer_out",
+  "failed",
+  "gas_topup",
+]);
 
 export interface AnalyzeArgs {
   readonly accountId: string;
@@ -78,12 +99,16 @@ interface FlagResolver {
 }
 
 const FLAG_KEY = "chain_classifier.enabled";
+/** Этап 1.2: topic0 log-fetch обогащение. Отдельный рубильник, default OFF. */
+const TOPIC0_FLAG_KEY = "chain_classifier.topic0.enabled";
 
 export class ChainClassifierService {
   constructor(
     private readonly flags: FlagResolver,
     private readonly evmHistory: EvmHistoryFetcher | null,
-    private readonly solHistory: SolanaHistoryFetcher | null
+    private readonly solHistory: SolanaHistoryFetcher | null,
+    /** topic0 log-fetch адаптер (этап 1.2); null = обогащение выключено. */
+    private readonly evmLogs: EvmLogsFetcher | null = null
   ) {}
 
   async analyzeAccount(
@@ -113,6 +138,12 @@ export class ChainClassifierService {
 
     // EVM addresses.
     const evmAddrs = args.addresses.filter((a) => a.type === "evm");
+    // Этап 1.2: topic0 log-fetch обогащение — отдельный рубильник + наличие
+    // адаптера. Резолвим один раз. Когда OFF / нет адаптера → classifyHistory
+    // без logs (топик0 — no-op, ноль регресса).
+    const topic0Enabled =
+      this.evmLogs != null &&
+      (await this.flags.enabled(TOPIC0_FLAG_KEY, { accountId: args.accountId }));
     for (const a of evmAddrs) {
       if (!this.evmHistory) {
         skippedEvm++;
@@ -123,12 +154,45 @@ export class ChainClassifierService {
         const ownAddresses = new Set(
           evmAddrs.map((x) => x.address.toLowerCase())
         );
-        const classified = classifyHistory(bundle.history_list, {
+        const ctxBase = {
           ownAddresses,
           selfAddress: a.address.toLowerCase(),
           tokens: bundle.token_dict,
           projects: bundle.project_dict,
           cex: bundle.cex_dict,
+        };
+
+        // 2-pass topic0: (1) дешёвая классификация → нетривиальные ops; (2) фетч
+        // receipts ТОЛЬКО для них (бюджет RPC = scope shadow-скрипта); (3) финал
+        // с logsByTxHash. Фетч fail-soft: ошибка → классификация без логов.
+        let logsByTxHash:
+          | ReadonlyMap<string, readonly Topic0Log[]>
+          | undefined;
+        if (topic0Enabled && this.evmLogs) {
+          const pre = classifyHistory(bundle.history_list, ctxBase);
+          const wanted = new Map<string, string>(); // txHash(lc) → chain
+          for (const op of pre) {
+            if (TOPIC0_TRIVIAL_OPS.has(op.type)) continue;
+            if (op.hash) wanted.set(op.hash.toLowerCase(), op.chain);
+          }
+          if (wanted.size > 0) {
+            try {
+              logsByTxHash = await this.evmLogs(
+                [...wanted].map(([txHash, chain]) => ({ chain, txHash }))
+              );
+            } catch (err) {
+              errors.push(
+                `topic0 log-fetch: ${
+                  err instanceof Error ? err.message.slice(0, 160) : String(err)
+                }`
+              );
+            }
+          }
+        }
+
+        const classified = classifyHistory(bundle.history_list, {
+          ...ctxBase,
+          ...(logsByTxHash && { logsByTxHash }),
         });
         for (const op of classified) allOps.push(op);
         opsByAddress.set(a.address.toLowerCase(), classified);
