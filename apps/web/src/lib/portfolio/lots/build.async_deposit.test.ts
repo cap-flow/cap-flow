@@ -29,6 +29,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildLotTrackerFromOps } from "./build";
+import { linkAsyncDeposits } from "../async_deposit_linker";
 import type { ClassifiedOp } from "../types";
 
 function op(args: {
@@ -232,5 +233,87 @@ describe("UCB C8: async-deposit linkedCostBasisUsd inheritance", () => {
     const wac = tracker.wacAt(WALLET, "GM [BTC]", 2000);
     expect(wac).toBeCloseTo(5000 / 4000, 2); // real cost = $1.25/GM
     // Not market $4500/4000 = $1.125
+  });
+});
+
+/**
+ * REGRESSION (POS-011 GLV→Morpho, 2026-06-08): client cost basis вернулся к
+ * receipt-spot ($15,209 вместо $21,588 уплаченных USDC) хотя сервер считал
+ * верно. Root cause: `LoadedWalletsProvider` вызывал `linkAsyncDeposits` ТОЛЬКО
+ * на свежесёт­янных `newOps` (DeBank incremental), ДО `mergeOps(cached, newOps)`.
+ * При server-hydration / incremental-кэше Tx A (USDC out) и Tx B (GLV mint)
+ * приходят в `cached` и МИНУЮТ линкер → `linkedCostBasisUsd` не проставлен →
+ * cost basis рушится в receipt-spot. Fix: линковать ПОЛНЫЙ слитый набор.
+ *
+ * Эти тесты прогоняют САМ линкер end-to-end (не предзадают linkedCostBasisUsd),
+ * проверяя что пара, пришедшая ОДНИМ набором (как обязан давать merged), даёт
+ * корректный cost basis — и что линкер на этом наборе самодостаточен.
+ */
+describe("UCB: async-deposit линковка на ПОЛНОМ наборе ops (provider regression)", () => {
+  const WALLET = "w1";
+  const PROTO = { id: "arb_gmx2", name: "GMX V2", category: "yield" as const };
+
+  // Имитация хвоста merged-набора: оба плеча пары вместе (как после
+  // mergeOps(cached, newOps)). До фикса они оставались в cached и линкер их
+  // не видел. Здесь линкер бежит по объединённому массиву → пара слинкована.
+  function buildMerged(): ClassifiedOp[] {
+    const seedAndPair: ClassifiedOp[] = [
+      op({
+        hash: "0xseed", type: "swap", time: 100,
+        movements: [
+          { direction: "out", symbol: "ETH", amount: 5, usd: 15000, tokenId: "eth" },
+          { direction: "in", symbol: "USDC", amount: 15000, usd: 15000, isStable: true },
+        ],
+      }),
+      // Tx A (creator) — БЕЗ preset linkedCostBasisUsd, линкер должен проставить.
+      op({
+        hash: "0xdepA", type: "lp_add", time: 1000, protocol: PROTO,
+        notes: ["yield-deposit"],
+        movements: [{ direction: "out", symbol: "USDC", amount: 4700, usd: 4700, isStable: true }],
+      }),
+      // Tx B (fill) — receipt mint, m.usd сильно ниже реально уплаченного.
+      op({
+        hash: "0xfillB", type: "lp_add", time: 1005, protocol: PROTO,
+        notes: ["yield-deposit-fill"],
+        movements: [{
+          direction: "in", symbol: "GLV [WETH-USDC]", amount: 2741, usd: 3328,
+          tokenId: "0xglv", isProtocolToken: true,
+        }],
+      }),
+    ];
+    return seedAndPair;
+  }
+
+  it("линкер на объединённом наборе проставляет linkedCostBasisUsd на fill", () => {
+    const linked = linkAsyncDeposits(buildMerged());
+    const fill = linked.find((o) => o.hash === "0xfillB")!;
+    // Σ outgoing USD из Tx A = $4700 (не market $3328).
+    expect(
+      (fill as { linkedCostBasisUsd?: number }).linkedCostBasisUsd,
+    ).toBeCloseTo(4700, 2);
+  });
+
+  it("cost basis = реально уплаченный USDC после link на полном наборе", () => {
+    const tracker = buildLotTrackerFromOps(linkAsyncDeposits(buildMerged()), {
+      walletId: WALLET,
+      histPrices: new Map(),
+    });
+    const wac = tracker.wacAt(WALLET, "GLV [WETH-USDC]", 3000);
+    expect(wac).not.toBeNull();
+    // $4700 / 2741 = $1.7147/GLV (real), НЕ market $3328/2741 = $1.214.
+    expect(wac).toBeCloseTo(4700 / 2741, 2);
+    expect(wac!).toBeGreaterThan(1.5);
+  });
+
+  it("БАГ-сценарий: если линковать ТОЛЬКО fill-подмножество (creator отдельно) — пары нет", () => {
+    // Воспроизводит старый баг: linkAsyncDeposits(newOps) где newOps = только
+    // свежий fill, а creator остался в cached. Линкер не находит Tx A → no link.
+    const merged = buildMerged();
+    const onlyFillBatch = merged.filter((o) => o.hash === "0xfillB"); // creator missing
+    const linked = linkAsyncDeposits(onlyFillBatch);
+    const fill = linked.find((o) => o.hash === "0xfillB")!;
+    expect(
+      (fill as { linkedCostBasisUsd?: number }).linkedCostBasisUsd,
+    ).toBeUndefined();
   });
 });

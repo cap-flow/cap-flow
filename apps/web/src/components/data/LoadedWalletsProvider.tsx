@@ -344,11 +344,12 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
             projects,
             cex,
           });
-          // Линкуем парные tx async-deposit/withdraw (GMX V2, GMSOL,
-          // Flash Trade, …), чтобы Tx A (USDC out) знал mint LP-receipt'а
-          // из своей Tx B (GM in). Без этого все маркеты одного протокола
-          // сливаются в одну позицию в reducer'е.
-          newOps = linkAsyncDeposits(newOps);
+          // Линковка async-deposit/withdraw пар (GMX V2, GMSOL, Flash Trade,
+          // …) перенесена на ПОЛНЫЙ слитый набор ops ниже (после mergeOps).
+          // Запуск ТОЛЬКО на `newOps` был багом: при server-hydration /
+          // incremental-кэше Tx A и Tx B попадают в `cached`, минуют линкер →
+          // linkedCostBasisUsd не проставлен → cost basis падает в receipt-spot
+          // (POS-011 GLV→Morpho: $15 209 вместо $21 588 уплаченных USDC).
         } else {
           const ownSolAddresses = new Set(
             wallets.list.filter((w) => w.chain === "sol").map((w) => w.address),
@@ -508,9 +509,18 @@ export function LoadedWalletsProvider({ children }: { children: React.ReactNode 
         }
 
         // Объединяем новые операции с уже сохранёнными (если incremental).
-        const ops: ClassifiedOp[] = cached
+        const mergedOps: ClassifiedOp[] = cached
           ? mergeOps(cached.ops, newOps)
           : newOps;
+
+        // UCB: async-deposit линковка ОБЯЗАНА бежать на ПОЛНОМ наборе ops, а не
+        // только на свежесёт­янных `newOps`. Иначе server-hydrated / cached
+        // исторические депозиты (GMX GLV/GM, Flash Trade, GMSOL…) минуют линкер →
+        // `linkedCostBasisUsd` не проставлен → cost basis рушится в receipt-spot.
+        // Линкер immutable + идемпотентен, повторный прогон по полному набору
+        // безопасен. Solana ops линкер не трогает (нет lp_add/yield-deposit нот).
+        const ops: ClassifiedOp[] =
+          wallet.chain === "evm" ? linkAsyncDeposits(mergedOps) : mergedOps;
 
         const snapshot = buildSnapshot(wallet.id, wallet.address, ops);
 
