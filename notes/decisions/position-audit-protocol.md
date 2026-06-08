@@ -176,8 +176,15 @@ WETH, USDC назад НЕ вернулся, implied ETH=$2360 (сейчас $16
   (симптом: тест возвращает ровно прежнее число после «фикса»).
 
 ### D.4 — Кандидаты-чеки детектора (из этого аудита)
-- `swap_value_imbalance` — `|out_usd − in_usd| / max > ~2%` (сверх fee+slippage) →
-  DeBank misprice / partial swap. Дешёвый registry-чек, ловит корневой симптом aida.
+- ✅ **`swap_value_imbalance` УЖЕ реализован** как `swap_movement_imbalance`
+  (`registry_checks.ts::findSwapMovementImbalance` + SQL в `admin-tech-audit.service.ts`,
+  порог `|out_usd − in_usd|/max > 20%`, подключён). **Подтверждён на aida** (своп
+  `0x91c5dcb9`: out $719.11 vs in $513.50 = 28.6% → flagged; явный регресс-тест добавлен).
+  ⚠ **ОБЛАСТЬ/ограничение:** ловит только **имбалансные/mispriced** свопы (DeBank misprice /
+  partial / недостача leg'а). **Balanced unwrap** (WETH→ETH, 0%, где cost РЕАЛЬНО терялся в
+  aida) этим чеком НЕ ловится → его берёт `cost_basis_from_spot` (priceSource=fallback).
+  Урок: для класса token→token cost-loss нужны ОБА сигнала (imbalance = lead на misprice,
+  fallback = сама потеря cost). Дубль не плодить — расширять область существующего.
 - `cost_basis_from_spot` (есть) — подтверждено: ловит token→token-потерю через
   `priceSource='fallback'` (явный регресс-тест добавлен на aida-класс).
 - `leverage_flat_pnl_vs_price_move` — плечевая позиция с ~flat PnL при крупном движении

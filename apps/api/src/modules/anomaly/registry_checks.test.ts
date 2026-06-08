@@ -137,6 +137,20 @@ describe("swap_movement_imbalance", () => {
     expect(f[0]!.severity).toBe("warn");
   });
 
+  it("flags aida POS-001 swap 0x91c5dcb9 (out 719.11 USDC vs in 513.50 WETH = 28.6%)", () => {
+    // Аудит aida 2026-06-08: DeBank недооценил WETH ($1686 vs implied $2360) →
+    // out/in разъехались на 28.6% — это был тычок к багу cost basis. Чек ловит
+    // именно этот mispriced-swap класс (audit-lead). NB: balanced unwrap
+    // WETH→ETH (0%, где cost реально терялся) этим чеком НЕ ловится — его берёт
+    // cost_basis_from_spot (priceSource=fallback).
+    const f = findSwapMovementImbalance([
+      swap({ txHash: "0x91c5dcb9", outUsd: 719.11, inUsd: 513.5 }),
+    ]);
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("warn");
+    expect(f[0]!.observedValue as number).toBeCloseTo(0.286, 2);
+  });
+
   it("ignores dust swaps below minUsd", () => {
     expect(
       findSwapMovementImbalance([swap({ outUsd: 0.8, inUsd: 0.2 })]),
