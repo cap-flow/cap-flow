@@ -91,7 +91,20 @@ export function ColumnSettings({ columns, hidden, order, onChange }: ColumnSetti
 
   const reset = () => onChange({ hidden: {}, order: [] });
 
+  // Массовые действия: показать все / скрыть все (кроме обязательных).
+  // Порядок сохраняется — меняем только видимость. Дальше юзер точечно
+  // отмечает нужные колонки чекбоксами.
+  const selectAll = () => onChange({ hidden: {}, order });
+  const deselectAll = () => {
+    const next: Record<string, boolean> = {};
+    for (const c of columns) if (!c.required) next[c.id] = true;
+    onChange({ hidden: next, order });
+  };
+
   const visibleCount = ordered.filter((c) => !hidden[c.id]).length;
+  const allVisible = visibleCount === columns.length;
+  const optionalCount = columns.filter((c) => !c.required).length;
+  const allHidden = visibleCount === columns.length - optionalCount;
 
   return (
     <div className="relative inline-block">
@@ -118,22 +131,52 @@ export function ColumnSettings({ columns, hidden, order, onChange }: ColumnSetti
           ref={panelRef}
           className="absolute right-0 top-full z-50 mt-2 w-80 rounded-lg border border-border bg-popover p-3 shadow-xl"
         >
-          <div className="mb-2 flex items-center justify-between">
-            <div>
-              <div className="text-xs font-semibold uppercase tracking-wider text-foreground">
-                Колонки таблицы
+          <div className="mb-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-foreground">
+                  Колонки таблицы
+                </div>
+                <div className="text-[10px] text-muted-foreground">
+                  Скрытие чекбоксом · перетягивание ⋮⋮
+                </div>
               </div>
-              <div className="text-[10px] text-muted-foreground">
-                Скрытие чекбоксом · перетягивание ⋮⋮
-              </div>
+              <button
+                type="button"
+                onClick={reset}
+                className="rounded px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                Сбросить
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={reset}
-              className="rounded px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground hover:bg-accent hover:text-foreground"
-            >
-              Сбросить
-            </button>
+            <div className="mt-2 flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={selectAll}
+                disabled={allVisible}
+                className={cn(
+                  "flex-1 rounded border border-border px-2 py-1 text-[11px] font-medium transition-colors",
+                  allVisible
+                    ? "cursor-not-allowed text-muted-foreground/40"
+                    : "text-muted-foreground hover:border-brand-cyan/40 hover:text-foreground",
+                )}
+              >
+                Выбрать все
+              </button>
+              <button
+                type="button"
+                onClick={deselectAll}
+                disabled={allHidden}
+                className={cn(
+                  "flex-1 rounded border border-border px-2 py-1 text-[11px] font-medium transition-colors",
+                  allHidden
+                    ? "cursor-not-allowed text-muted-foreground/40"
+                    : "text-muted-foreground hover:border-brand-cyan/40 hover:text-foreground",
+                )}
+              >
+                Снять все
+              </button>
+            </div>
           </div>
           <div className="max-h-80 space-y-0.5 overflow-y-auto pr-1">
             {ordered.map((col) => {
