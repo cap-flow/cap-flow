@@ -1055,7 +1055,9 @@ function CapitalHero({
           помеченные кредитные позиции (иначе не из чего выделить кредитную
           часть текущих активов). */}
       {(creditStartUsd > 0 || leverageView) && (
-        <div className="grid gap-2.5 lg:grid-cols-2">
+        <div
+          className={cn("grid gap-2.5", leverageView && "lg:grid-cols-2")}
+        >
           {creditStartUsd > 0 && (
             <CapitalSplitCard
               label="Совокупный стартовый капитал"
