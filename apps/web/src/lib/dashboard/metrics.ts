@@ -533,6 +533,12 @@ export function computeDashboardMetrics(
   const startMap = new Map<FiatCurrency, StartCapitalByCur>();
   let earliestEntryMs = 0;
   let manualCreditUsd = 0;
+  // Зафиксированный стартовый капитал в долларах — Σ по пометкам.
+  // Это НЕ пересчитывается по текущему курсу: для каждой пометки берём
+  // её зафиксированный `usdAmount` (доллары, реально купленные за фиат
+  // на момент входа). Только legacy-пометки без usdAmount конвертируются
+  // по текущему курсу как fallback.
+  let startUsdFixed = 0;
 
   for (const l of loaded) {
     for (const op of l.ops) {
@@ -544,14 +550,30 @@ export function computeDashboardMetrics(
       const ann = annotations[k];
       if (!ann) continue;
       if (ann.fiatPurchase) {
-        const cur = startMap.get(ann.fiatPurchase.fiatCurrency) ?? {
-          currency: ann.fiatPurchase.fiatCurrency,
+        const fp = ann.fiatPurchase;
+        const cur = startMap.get(fp.fiatCurrency) ?? {
+          currency: fp.fiatCurrency,
           totalFiat: 0,
           opsCount: 0,
         };
-        cur.totalFiat += ann.fiatPurchase.fiatAmount;
+        cur.totalFiat += fp.fiatAmount;
         cur.opsCount += 1;
-        startMap.set(ann.fiatPurchase.fiatCurrency, cur);
+        startMap.set(fp.fiatCurrency, cur);
+        // Стартовый капитал в $ — фиксированный.
+        //   1) usdAmount задан → берём как есть (не трогаем курсом);
+        //   2) валюта USD → fiatAmount уже в долларах;
+        //   3) иначе (legacy без usdAmount) → конвертация по текущему курсу.
+        if (
+          typeof fp.usdAmount === "number" &&
+          Number.isFinite(fp.usdAmount) &&
+          fp.usdAmount >= 0
+        ) {
+          startUsdFixed += fp.usdAmount;
+        } else if (fp.fiatCurrency === "USD") {
+          startUsdFixed += fp.fiatAmount;
+        } else if (opts.usdRub > 0) {
+          startUsdFixed += fp.fiatAmount / opts.usdRub;
+        }
         const tMs = op.time * 1000;
         if (earliestEntryMs === 0 || tMs < earliestEntryMs) earliestEntryMs = tMs;
       }
@@ -566,12 +588,12 @@ export function computeDashboardMetrics(
   const startCapital = [...startMap.values()].sort(
     (a, b) => b.totalFiat - a.totalFiat,
   );
-  let startUsdAll = 0;
-  for (const c of startCapital) {
-    if (c.currency === "USD") startUsdAll += c.totalFiat;
-    else if (c.currency === "RUB" && opts.usdRub > 0)
-      startUsdAll += c.totalFiat / opts.usdRub;
-  }
+  // Стартовый капитал в $ = Σ зафиксированных usdAmount по пометкам.
+  // Фиксированная величина: не «дышит» от текущего курса рубля. Курсовая
+  // переоценка отражается только в ТЕКУЩЕМ капитале и PnL, а не в стартовом.
+  const startUsdAll = startUsdFixed;
+  // Стартовый капитал в ₽ — фиксированная Σ рублёвых пометок (тоже не
+  // пересчитывается обратно из долларов).
   const startRub = startMap.get("RUB")?.totalFiat ?? 0;
 
   // ----- Wallet balances -----
