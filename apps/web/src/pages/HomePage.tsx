@@ -116,6 +116,10 @@ import {
   usePositionOverrides,
 } from "@/lib/portfolio/position_overrides";
 import {
+  positionCreditKey,
+  useCreditOverrides,
+} from "@/lib/portfolio/credit_overrides";
+import {
   expandByComposition,
   normalizeCompositionKey,
   useAssetCompositions,
@@ -248,6 +252,7 @@ export function HomePage(): JSX.Element {
   );
 
   const [positionOverrides] = usePositionOverrides();
+  const [creditOverrides] = useCreditOverrides();
   const [assetCompositions] = useAssetCompositions();
   const [compositionDialog, setCompositionDialog] = useState<
     { symbol: string; scope?: string; label?: string } | null
@@ -432,42 +437,67 @@ export function HomePage(): JSX.Element {
     return m;
   }, [loadedList]);
 
-  // ---- PNL на собственный капитал ----
-  // Используем `startUsdEffective`: ручной startUsdAll если есть, иначе
-  // derived = walletStartUsd (Σ amount × WAC) + protocolsInvestedUsd. Это
-  // позволяет считать PnL даже без ручных фиат-аннотаций — мы знаем
-  // средневзвешенную цену покупки каждого актива из истории операций
-  // и можем сравнить с текущей рыночной ценой.
+  // ---- Капитал: свой + кредит = общий (gross-модель) ----
+  // startEffective — свой стартовый капитал (фиат-пометки, иначе derived WAC).
+  // Кредитные позиции — помеченные «открыта на кредит» на листе позиций.
+  // creditStartUsd — стартовый кредит = ПРИНЦИПАЛ займов на момент взятия,
+  //   БЕЗ набежавших % (накопленные % учитываются в «Совокупном долге»).
+  // totalStartUsd — общий вложенный капитал = свой старт + принципал займа.
+  // Под leverage-моделью (есть помеченные кредитные позиции И принципал > 0)
+  // own/credit/total бьются в сумму на gross-уровне (до вычета долга):
+  //   own_current = totalAssets − creditPositions; credit_current = их стоимость;
+  //   own + credit = totalAssets. «Собственный капитал» (net worth = активы −
+  //   долг) и «Совокупный долг» остаются отдельными balance-метриками.
   const startEffective = m.startUsdEffective;
-  const canSplitOwnCredit = startEffective > 0;
 
-  // Что вы реально заработали на ваших деньгах = ownCapital − стартовый капитал.
-  const clientPnlOwnUsd = canSplitOwnCredit ? m.ownCapitalUsd - startEffective : 0;
+  const creditPositionsUsd = useMemo(() => {
+    let sum = 0;
+    for (const p of openPositions) {
+      const k = positionCreditKey({
+        walletId: p.walletId,
+        chain: p.chain,
+        protocolId: p.protocol.id,
+        symbols: p.supplyTokens.map((t) => t.symbol),
+        ...(p.instanceId && { instanceId: p.instanceId }),
+      });
+      if (creditOverrides[k]) sum += p.currentUsd;
+    }
+    return sum;
+  }, [openPositions, creditOverrides]);
+  const hasCreditPositions = creditPositionsUsd > 0;
+
+  // Стартовый кредит = принципал займа (без %). protocolPrincipalUsd — тело
+  // протокол-займов на момент взятия; manualCreditUsd — ручные «кредит».
+  const creditStartUsd =
+    (m.protocolPrincipalUsd ?? 0) + (m.manualCreditUsd ?? 0);
+  const leverageView = hasCreditPositions && creditStartUsd > 0;
+
+  const ownStartUsd = startEffective;
+  // Общий стартовый = свой старт + принципал займа. Mark-independent (принципал
+  // от реального займа, не от меток позиций).
+  const totalStartUsd = ownStartUsd + creditStartUsd;
+  const creditTotalDebtUsd = m.totalDebtUsd; // тело + накопл. % (к возврату)
+  const canSplitOwnCredit = ownStartUsd > 0;
+
+  const creditCurrentUsd = creditPositionsUsd;
+
+  // ---- PnL на собственный капитал (net worth, ВСЕГДА) ----
+  // = (активы − весь долг) − свой старт. Долг полностью вычитается из
+  // собственного. НЕ зависит от меток кредитных позиций (owner-decision).
+  const clientPnlOwnUsd = canSplitOwnCredit
+    ? m.ownCapitalUsd - ownStartUsd
+    : 0;
   const clientPnlOwnPct = canSplitOwnCredit
-    ? (clientPnlOwnUsd / startEffective) * 100
+    ? (clientPnlOwnUsd / ownStartUsd) * 100
     : null;
 
-  // ---- PNL на кредитный капитал ----
-  // Окупается ли использование кредита (включая стоимость заёма).
-  //   creditTotalDebt = совокупный долг к возврату СЕЙЧАС:
-  //     протокол.долг (= принципал + накопл. %) + ручные «кредит» пометки.
-  //   creditCurrentValue: доля от текущих активов, отвечающая за кредитную
-  //     часть инвестиций (proportional split). Корректно только если есть
-  //     baseline (startUsd) — иначе formula распадается.
-  const creditTotalDebtUsd = m.totalDebtUsd; // = протоколы (с %) + ручные
-  const totalInvestedAll = startEffective + creditTotalDebtUsd;
-  const creditShare =
-    canSplitOwnCredit && totalInvestedAll > 0
-      ? creditTotalDebtUsd / totalInvestedAll
-      : 0;
-  const creditCurrentValueUsd = m.totalAssetsUsd * creditShare;
-  const pnlCreditUsd =
-    canSplitOwnCredit && creditTotalDebtUsd > 0
-      ? creditCurrentValueUsd - creditTotalDebtUsd
-      : 0;
+  // ---- PnL на кредитный капитал (supplementary, по меткам) ----
+  // = стоимость помеченных позиций − ПРИНЦИПАЛ займа (без %). Показывается
+  // только когда есть помеченные кредитные позиции; не входит в own/total.
+  const pnlCreditUsd = leverageView ? creditCurrentUsd - creditStartUsd : 0;
   const pnlCreditPct =
-    canSplitOwnCredit && creditTotalDebtUsd > 0
-      ? (pnlCreditUsd / creditTotalDebtUsd) * 100
+    leverageView && creditStartUsd > 0
+      ? (pnlCreditUsd / creditStartUsd) * 100
       : null;
 
   // F6b slice 4: prefer server-side PNL when the client's cost-basis
@@ -482,11 +512,13 @@ export function HomePage(): JSX.Element {
       ? snapshotMetrics.pnlOwnPct
       : clientPnlOwnPct;
 
-  // ---- PNL на общий капитал (собственный + кредитный) ----
-  const clientPnlTotalUsd = clientPnlOwnUsd + pnlCreditUsd;
+  // ---- PnL на общий капитал = доход на ВЕСЬ задействованный капитал ----
+  // = активы − (свой старт + принципал займа). Mark-independent.
+  const clientPnlTotalUsd =
+    m.totalAssetsUsd > 0 ? m.totalAssetsUsd - totalStartUsd : 0;
   const clientPnlTotalPct =
-    canSplitOwnCredit && totalInvestedAll > 0
-      ? (clientPnlTotalUsd / totalInvestedAll) * 100
+    totalStartUsd > 0 && m.totalAssetsUsd > 0
+      ? (clientPnlTotalUsd / totalStartUsd) * 100
       : null;
 
   // F6b slice 4: when client compute is null (no LoadedWalletsProvider
@@ -728,6 +760,7 @@ export function HomePage(): JSX.Element {
         pnlCreditUsd={pnlCreditUsd}
         pnlCreditPct={pnlCreditPct}
         creditTotalDebtUsd={creditTotalDebtUsd}
+        creditPositionsUsd={creditPositionsUsd}
         aprPct={aprPct}
         aprOwnPct={aprOwnPct}
         aprCreditPct={aprCreditPct}
@@ -824,6 +857,7 @@ function CapitalHero({
   pnlCreditUsd,
   pnlCreditPct,
   creditTotalDebtUsd,
+  creditPositionsUsd,
   aprPct,
   aprOwnPct,
   aprCreditPct,
@@ -848,6 +882,8 @@ function CapitalHero({
   pnlCreditUsd: number;
   pnlCreditPct: number | null;
   creditTotalDebtUsd: number;
+  /** Σ текущей стоимости позиций, помеченных «открыта на кредит». */
+  creditPositionsUsd: number;
   aprPct: number | null;
   aprOwnPct: number | null;
   aprCreditPct: number | null;
@@ -861,6 +897,7 @@ function CapitalHero({
   const positiveTotal = pnlTotalUsd >= 0;
   const positiveOwn = pnlOwnUsd >= 0;
   const positiveCredit = pnlCreditUsd >= 0;
+  const hasCreditPositions = creditPositionsUsd > 0;
 
   // Server snapshot wins over client compute when both are present. The
   // client-side LoadedWalletsProvider is being deprecated (phase F6); for
@@ -891,6 +928,15 @@ function CapitalHero({
     snapshotStartUsd !== null && snapshotStartUsd > 0 && m.startUsdEffective === 0
       ? snapshotStartUsd
       : m.startUsdEffective;
+  // Стартовый кредит = принципал займа (без набежавших %). Общий стартовый
+  // капитал = свой старт + принципал. Показываем разбивку, когда есть
+  // помеченные кредитные позиции И ненулевой принципал (leverage-режим).
+  const creditStartUsd =
+    (m.protocolPrincipalUsd ?? 0) + (m.manualCreditUsd ?? 0);
+  const leverageView = creditPositionsUsd > 0 && creditStartUsd > 0;
+  // Общий стартовый = свой + принципал займа (mark-independent — принципал
+  // от реального займа, а не от меток позиций).
+  const totalStartUsd = startUsdToShow + creditStartUsd;
   // F6b slice 1: own capital + debt come directly from snapshot when
   // the client compute is empty. Server-side these are derived from
   // DeBank's complex_protocol_list (asset/debt per protocol).
@@ -949,21 +995,25 @@ function CapitalHero({
             Вложил → есть сейчас → результат. Цифры на текущий момент.
           </p>
         </div>
-        <span className="inline-flex items-center gap-1 rounded-full border border-border bg-secondary/40 px-2.5 py-0.5 text-[10px] text-muted-foreground">
+        <span className="inline-flex items-center gap-1 rounded-full border border-border bg-secondary/40 px-2.5 py-0.5 text-[11px] text-muted-foreground">
           Сегодня
         </span>
       </div>
 
-      {/* TOP ROW — группа «Капитал»: 5 KPI описывающих СОСТОЯНИЕ капитала
-          (4 капитала + газ за всё время как отдельный bucket — съеденная
-          транзакциями стоимость, не относящаяся к PnL по активам). */}
-      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-5">
+      {/* TOP ROW — «Капитал»: стартовый (свои), совокупный долг, газ.
+          Текущий и собственный (свой/кредит) капитал вынесены в отдельные
+          split-карточки ниже, чтобы не дублировать информацию. */}
+      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-3">
         <BigKpi
           label="Стартовый капитал"
           value={formatUsd(startUsdToShow, locale)}
           delta={
             m.startUsdAll > 0
-              ? `${formatRub(m.startRub, locale)} вложено`
+              ? `${formatRub(m.startRub, locale)} вложено${
+                  m.startRub > 0 && m.startUsdAll > 0
+                    ? ` · по курсу ${formatNumber(m.startRub / m.startUsdAll, locale, 2)} ₽/$`
+                    : ""
+                }`
               : snapshotStartUsd !== null
                 ? "Из server snapshot (Σ totalPaidUsd по cost basis)"
                 : `WAC × текущие активы (нет ручных пометок)`
@@ -972,33 +1022,9 @@ function CapitalHero({
           deltaIcon
           tooltip={
             m.startUsdAll > 0
-              ? "Σ всех ручных пометок «куплено за фиат» в Реестре. $-эквивалент конвертируется по курсу ЦБ."
+              ? "Только свои деньги — Σ ручных пометок «куплено за фиат», зафиксирован на момент покупки (не пересчитывается по текущему курсу). Заёмные показаны отдельно в «Совокупном стартовом капитале»."
               : "Derived: Σ (amount × WAC) активов на кошельке + Σ startUsd по DeFi-позициям. Если поставить ручные fiatPurchase в Реестре — переключится на них."
           }
-        />
-        <BigKpi
-          label="Текущий капитал"
-          value={formatUsd(currentUsdToShow, locale)}
-          delta={
-            cexUsd > 0
-              ? `≈ ${formatRub(currentUsdToShow * usdRub, locale)} · вкл. ${formatUsd(cexUsd, locale)} на CEX`
-              : `≈ ${formatRub(currentUsdToShow * usdRub, locale)}`
-          }
-          deltaPositive
-          tooltip={
-            cexUsd > 0
-              ? `On-chain $${onChainCurrentUsd.toFixed(2)} + CEX $${cexUsd.toFixed(2)}. CEX = балансы Bybit/OKX/Bitget/MEXC/BingX по последнему snapshot.${cexUnpricedCount > 0 ? ` ${cexUnpricedCount} актив(ов) без CoinGecko-цены не учтены.` : ""}`
-              : "Σ on-chain балансов кошельков + брутто-стоимость supply во всех DeFi-позициях. Источник: server snapshot (worker, hourly cron) с fallback на клиентский compute."
-          }
-        />
-        <BigKpi
-          label="Собственный капитал"
-          value={formatUsd(ownCapitalToShow, locale)}
-          delta={`≈ ${formatRub(ownCapitalToShow * usdRub, locale)}`}
-          deltaPositive={ownCapitalToShow >= 0}
-          deltaIcon
-          accent="success"
-          tooltip="Текущий капитал − Совокупный долг. Что реально ваше после погашения всех займов."
         />
         <BigKpi
           label="Совокупный долг"
@@ -1011,7 +1037,7 @@ function CapitalHero({
               : "займов нет"
           }
           deltaPositive={false}
-          accent={debtToShow > 0 ? "destructive" : "muted"}
+          accent="muted"
           tooltip="Σ borrow в DeFi + Σ ручных «кредит». Накопл. % = current_debt − net_borrowed × тек. цена."
         />
         <BigKpi
@@ -1019,10 +1045,48 @@ function CapitalHero({
           value={formatUsd(m.totalGasUsd, locale)}
           delta={`≈ ${formatRub(m.totalGasUsd * usdRub, locale)}`}
           deltaPositive={false}
-          accent={m.totalGasUsd > 0 ? "destructive" : "muted"}
+          accent="muted"
           tooltip="Σ всех комиссий блокчейна (gas) по всем кошелькам с момента первой операции. Это «съеденные» транзакциями деньги, отдельно от PnL по активам."
         />
       </div>
+
+      {/* Разбивка свой/кредитный. Совокупный стартовый показываем при наличии
+          займа (mark-independent). Текущую разбивку — только когда есть
+          помеченные кредитные позиции (иначе не из чего выделить кредитную
+          часть текущих активов). */}
+      {(creditStartUsd > 0 || leverageView) && (
+        <div
+          className={cn("grid gap-2.5", leverageView && "lg:grid-cols-2")}
+        >
+          {creditStartUsd > 0 && (
+            <CapitalSplitCard
+              label="Совокупный стартовый капитал"
+              tooltip="Сколько всего денег было задействовано на старте: свои + тело займов (без набежавших %). База для PnL/APR на весь капитал. Набежавшие % — отдельно в «Совокупном долге»."
+              totalUsd={totalStartUsd}
+              ownUsd={startUsdToShow}
+              creditUsd={creditStartUsd}
+              caption="свои деньги + заёмные (тело займов, без %)"
+              locale={locale}
+            />
+          )}
+          {leverageView && (
+            <CapitalSplitCard
+              label="Текущий капитал: свой и кредитный"
+              tooltip="Текущая стоимость, разнесённая на свой и кредитный капитал. Кредитный = Σ стоимости позиций, помеченных «открыта на кредит» на листе позиций; собственный = всё остальное."
+              totalUsd={currentUsdToShow}
+              ownUsd={currentUsdToShow - creditPositionsUsd}
+              creditUsd={creditPositionsUsd}
+              caption="свои + кредитные позиции сейчас"
+              footnoteLabel="Чистыми после погашения долга · net worth"
+              footnoteValue={formatUsd(ownCapitalToShow, locale)}
+              baselineOwnPct={
+                totalStartUsd > 0 ? (startUsdToShow / totalStartUsd) * 100 : undefined
+              }
+              locale={locale}
+            />
+          )}
+        </div>
+      )}
 
       {/* MIDDLE: Структура портфеля + side cards */}
       <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-3">
@@ -1130,7 +1194,7 @@ function CapitalHero({
             mainValue={`${pnlTotalUsd >= 0 ? "+" : ""}${formatUsd(pnlTotalUsd, locale)}`}
             mainPct={pnlTotalPct}
             mainAccent={positiveTotal ? "success" : "destructive"}
-            mainTooltip="Unrealized PNL по активам (собств. + кредит). Не включает Realized PNL — он показан отдельной строкой ниже. % считается от общего инвестированного капитала."
+            mainTooltip="Unrealized PNL на ВЕСЬ задействованный капитал = (текущая стоимость всех активов) − (общий стартовый: свой + принципал займа без %). Свой + кредит трек дают в сумме этот результат. Не включает Realized PNL (строка ниже)."
             rows={[
               {
                 label: "На собств. капитал",
@@ -1138,23 +1202,21 @@ function CapitalHero({
                 pct: pnlOwnPct,
                 accent: positiveOwn ? "success" : "destructive",
                 tooltip:
-                  "Unrealized: что вы реально заработали на собственных вложениях (= текущий капитал − совокупный долг − стартовый капитал). Считается только по тому, что сейчас на руках.",
+                  "Unrealized на свои деньги = (текущий капитал − весь долг, т.е. net worth) − свой стартовый капитал. Долг полностью учтён. Не зависит от пометок кредитных позиций.",
               },
               {
                 label: "На кредит. капитал",
-                value:
-                  creditTotalDebtUsd > 0
-                    ? `${pnlCreditUsd >= 0 ? "+" : ""}${formatUsd(pnlCreditUsd, locale)}`
-                    : "—",
-                pct: creditTotalDebtUsd > 0 ? pnlCreditPct : null,
-                accent:
-                  creditTotalDebtUsd === 0
-                    ? "muted"
-                    : positiveCredit
-                      ? "success"
-                      : "destructive",
+                value: leverageView
+                  ? `${pnlCreditUsd >= 0 ? "+" : ""}${formatUsd(pnlCreditUsd, locale)}`
+                  : "—",
+                pct: leverageView ? pnlCreditPct : null,
+                accent: !leverageView
+                  ? "muted"
+                  : positiveCredit
+                    ? "success"
+                    : "destructive",
                 tooltip:
-                  "Unrealized: окупается ли кредит. (стоимость активов на кредит) − совокупный долг (тело + накопл. %). Если положительно — кредит приносит больше, чем стоит.",
+                  "В плюсе ли вы на кредитные деньги. = (текущая стоимость позиций, помеченных «открыта на кредит») − (принципал займа на момент взятия, БЕЗ набежавших %). > 0 → то, что куплено на кредит, стоит больше, чем взятое тело займа. Набежавшие % — отдельно в «Совокупном долге». Пометки ставятся на листе открытых позиций.",
               },
               {
                 label: "Realized (закрытые сделки)",
@@ -1206,16 +1268,17 @@ function CapitalHero({
               {
                 label: "На кредит. капитал",
                 value:
-                  creditTotalDebtUsd > 0 && aprCreditPct != null
+                  leverageView && aprCreditPct != null
                     ? `${aprCreditPct >= 0 ? "+" : ""}${aprCreditPct.toFixed(2)}%`
                     : "—",
                 accent:
-                  creditTotalDebtUsd === 0 || aprCreditPct == null
+                  !leverageView || aprCreditPct == null
                     ? "muted"
                     : aprCreditPct >= 0
                       ? "success"
                       : "destructive",
-                tooltip: "Аннуализированная доходность на кредитный капитал.",
+                tooltip:
+                  "Аннуализированная доходность на кредитный капитал (от принципала займа).",
               },
             ]}
           />
@@ -1271,6 +1334,7 @@ function BigKpi({
   deltaIcon,
   accent,
   tooltip,
+  subNote,
 }: {
   label: string;
   value: string;
@@ -1279,6 +1343,8 @@ function BigKpi({
   deltaIcon?: boolean;
   accent?: "success" | "destructive" | "muted";
   tooltip?: string;
+  /** Доп. строка под дельтой (например разбивка «свой + кредит = общий»). */
+  subNote?: string;
 }) {
   const valueCls =
     accent === "success"
@@ -1342,6 +1408,142 @@ function BigKpi({
           </span>
         </div>
       )}
+      {subNote && (
+        <div className="mt-1 text-[11px] tabular-nums text-muted-foreground">
+          {subNote}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Карточка разбивки капитала на собственный и кредитный (заёмный).
+ * Главная цифра крупно + полоса пропорции + две карточки-легенды.
+ * Используется для совокупного стартового И текущего капитала.
+ */
+function CapitalSplitCard({
+  label,
+  tooltip,
+  totalUsd,
+  ownUsd,
+  creditUsd,
+  caption,
+  footnoteLabel,
+  footnoteValue,
+  baselineOwnPct,
+  locale,
+}: {
+  label: string;
+  tooltip: string;
+  totalUsd: number;
+  ownUsd: number;
+  creditUsd: number;
+  caption: string;
+  /** Итоговая строка внизу карточки (например net worth «чистыми после долга»):
+      подпись слева, выделенное число справа. */
+  footnoteLabel?: string;
+  footnoteValue?: string;
+  /** Доля своих на старте (%). Если передана — под баром показываем,
+      как изменилась доля собственного капитала «к старту» (рост плеча). */
+  baselineOwnPct?: number;
+  locale: "en" | "ru";
+}) {
+  const ownPct = totalUsd > 0 ? (ownUsd / totalUsd) * 100 : 0;
+  const creditPct = totalUsd > 0 ? (creditUsd / totalUsd) * 100 : 0;
+  const ownDeltaPp =
+    baselineOwnPct != null ? ownPct - baselineOwnPct : null;
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-brand-cyan/25 bg-gradient-to-br from-brand-cyan/[0.07] via-card/40 to-transparent p-4">
+      <div className="flex items-center gap-1 text-xs font-semibold text-muted-foreground">
+        {label}
+        <Tooltip
+          maxWidth={300}
+          content={
+            <div className="text-[11px] text-foreground/90">{tooltip}</div>
+          }
+        >
+          <span className="cursor-help text-muted-foreground/70 hover:text-foreground">
+            <Info className="h-3 w-3" />
+          </span>
+        </Tooltip>
+      </div>
+      <div className="mt-1 text-3xl font-bold tabular-nums tracking-tight">
+        {formatUsd(totalUsd, locale)}
+      </div>
+      <div className="mt-0.5 text-[11px] text-muted-foreground">{caption}</div>
+      <div className="mt-3 flex h-2.5 overflow-hidden rounded-full bg-secondary/70">
+        <div className="bg-brand-cyan" style={{ width: `${ownPct}%` }} />
+        <div className="bg-amber-400" style={{ width: `${creditPct}%` }} />
+      </div>
+      {ownDeltaPp != null && Math.abs(ownDeltaPp) >= 0.1 && (
+        <div className="mt-1.5 text-[11px] text-muted-foreground">
+          Доля своих{" "}
+          <span className="font-semibold text-foreground tabular-nums">
+            {ownPct.toFixed(1)}%
+          </span>{" "}
+          ·{" "}
+          <span
+            className={cn(
+              "font-medium tabular-nums",
+              ownDeltaPp < 0 ? "text-warning" : "text-success",
+            )}
+          >
+            {ownDeltaPp >= 0 ? "+" : "−"}
+            {Math.abs(ownDeltaPp).toFixed(1)} пп
+          </span>{" "}
+          к старту {ownDeltaPp < 0 ? "(плечо выросло)" : "(плечо снизилось)"}
+        </div>
+      )}
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <StartCapitalLegend
+          color="bg-brand-cyan"
+          label="Собственный"
+          value={formatUsd(ownUsd, locale)}
+          pct={ownPct}
+        />
+        <StartCapitalLegend
+          color="bg-amber-400"
+          label="Кредитный"
+          value={formatUsd(creditUsd, locale)}
+          pct={creditPct}
+        />
+      </div>
+      {footnoteValue && (
+        <div className="mt-3 flex items-center justify-between gap-2 border-t border-border/40 pt-2.5">
+          <span className="text-xs font-medium text-muted-foreground">
+            {footnoteLabel}
+          </span>
+          <span className="text-base font-semibold tabular-nums text-foreground">
+            {footnoteValue}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StartCapitalLegend({
+  color,
+  label,
+  value,
+  pct,
+}: {
+  color: string;
+  label: string;
+  value: string;
+  pct: number;
+}) {
+  return (
+    <div className="rounded-lg border border-border/60 bg-card/50 px-3 py-2">
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <span className={cn("h-2 w-2 flex-shrink-0 rounded-full", color)} />
+        <span className="truncate">{label}</span>
+      </div>
+      <div className="mt-0.5 text-sm font-semibold tabular-nums">{value}</div>
+      <div className="text-[11px] tabular-nums text-muted-foreground">
+        {pct.toFixed(1)}%
+      </div>
     </div>
   );
 }
@@ -1388,7 +1590,7 @@ function AllocationItem({
             {segment.symbol}
           </span>
           {hasMultiple && (
-            <span className="rounded-full bg-slate-100 px-1 py-px text-[9px] font-bold tabular-nums leading-none text-slate-600 dark:bg-white/10 dark:text-slate-300">
+            <span className="rounded-full bg-slate-100 px-1 py-px text-[11px] font-bold tabular-nums leading-none text-slate-600 dark:bg-white/10 dark:text-slate-300">
               {segment.tokens.length}
             </span>
           )}
@@ -1399,7 +1601,7 @@ function AllocationItem({
           <span className="text-[12px] font-bold text-slate-900 dark:text-white">
             {formatUsd(segment.usd, locale)}
           </span>
-          <span className="min-w-[2.5rem] text-right text-[10px] font-semibold text-slate-500 dark:text-slate-400">
+          <span className="min-w-[2.5rem] text-right text-[11px] font-semibold text-slate-500 dark:text-slate-400">
             {segment.share.toFixed(1)}%
           </span>
         </span>
@@ -1417,7 +1619,7 @@ function AllocationItem({
               : "invisible scale-95 opacity-0",
           )}
         >
-          <div className="mb-1 flex items-center justify-between gap-2 border-b border-border/40 pb-1 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="mb-1 flex items-center justify-between gap-2 border-b border-border/40 pb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
             <span>{segment.symbol} · подробно</span>
             <span>{segment.tokens.length} токенов</span>
           </div>
@@ -1432,7 +1634,7 @@ function AllocationItem({
                   <span className="font-semibold">
                     {formatUsd(t.usd, locale)}
                   </span>
-                  <span className="text-[9px] text-muted-foreground">
+                  <span className="text-[11px] text-muted-foreground">
                     {t.share.toFixed(2)}%
                   </span>
                 </span>
@@ -1493,7 +1695,7 @@ function StrategyBar({
     <div className="relative mt-4 rounded-lg border border-white/60 bg-white/90 px-3 py-2.5 shadow-sm backdrop-blur-sm dark:border-cyan-400/15 dark:bg-slate-900/55">
       {/* Header: title + strategy chip */}
       <div className="flex items-center justify-between gap-2">
-        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
           Стратегия портфеля
           <Tooltip
             maxWidth={300}
@@ -1513,7 +1715,7 @@ function StrategyBar({
         </span>
         <span
           className={cn(
-            "inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold ring-1",
+            "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-bold ring-1",
             strategyChip,
           )}
         >
@@ -1534,7 +1736,7 @@ function StrategyBar({
       </div>
 
       {/* Легенда */}
-      <div className="mt-2 grid grid-cols-2 gap-2 text-[10px]">
+      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]">
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400" />
           <div className="min-w-0 flex-1">
@@ -1560,7 +1762,7 @@ function StrategyBar({
       </div>
 
       {/* Описание стратегии */}
-      <div className="mt-2 border-t border-slate-200 pt-1.5 text-[10px] italic text-slate-500 dark:border-slate-800 dark:text-slate-400">
+      <div className="mt-2 border-t border-slate-200 pt-1.5 text-[11px] italic text-slate-500 dark:border-slate-800 dark:text-slate-400">
         {strategy.desc}
       </div>
     </div>
@@ -1640,7 +1842,7 @@ function CompoundMetricCard({
         {mainPct != null && (
           <span
             className={cn(
-              "text-[10px] font-semibold tabular-nums",
+              "text-[11px] font-semibold tabular-nums",
               mainAccent === "success"
                 ? "text-success/80"
                 : mainAccent === "destructive"
@@ -1659,7 +1861,7 @@ function CompoundMetricCard({
         {rows.map((r, i) => (
           <div
             key={i}
-            className="flex items-baseline justify-between gap-2 text-[10px]"
+            className="flex items-baseline justify-between gap-2 text-[11px]"
           >
             <span className="inline-flex items-center gap-1 truncate text-muted-foreground">
               <span className="truncate">{r.label}</span>
@@ -1692,7 +1894,7 @@ function CompoundMetricCard({
               {r.pct != null && (
                 <span
                   className={cn(
-                    "text-[9px] opacity-80",
+                    "text-[11px] opacity-80",
                     r.accent === "success"
                       ? "text-success"
                       : r.accent === "destructive"
@@ -1751,7 +1953,7 @@ function SideStatCard({
         {sub && (
           <span
             className={cn(
-              "rounded-md px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
+              "rounded-md px-1.5 py-0.5 text-[11px] font-medium tabular-nums",
               deltaPositive
                 ? "bg-success/15 text-success"
                 : "bg-destructive/15 text-destructive",
@@ -1762,7 +1964,7 @@ function SideStatCard({
         )}
       </div>
       {note && (
-        <div className="mt-1 text-[10px] leading-snug text-muted-foreground">
+        <div className="mt-1 text-[11px] leading-snug text-muted-foreground">
           {note}
         </div>
       )}
@@ -1787,7 +1989,7 @@ function OwnCapitalCard({
 }) {
   return (
     <div className="rounded-lg border border-border bg-card/40 px-3 py-2.5 transition-colors hover:bg-card/70">
-      <div className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      <div className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         Собственный капитал
         <Tooltip
           maxWidth={260}
@@ -1811,7 +2013,7 @@ function OwnCapitalCard({
           ≈ {formatRub(ownRub, locale)}
         </span>
       </div>
-      <div className="mt-1 flex items-center justify-between gap-2 border-t border-border/40 pt-1 text-[10px]">
+      <div className="mt-1 flex items-center justify-between gap-2 border-t border-border/40 pt-1 text-[11px]">
         <span className="font-medium uppercase tracking-wider text-muted-foreground">
           PNL ₽ от вложенных
         </span>
@@ -1856,7 +2058,7 @@ function SmallStatCard({
         : "text-foreground";
   return (
     <div className="rounded-lg border border-border bg-card/40 px-3 py-2.5 transition-colors hover:bg-card/70">
-      <div className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      <div className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         {label}
         {tooltip && (
           <Tooltip
@@ -1882,7 +2084,7 @@ function SmallStatCard({
       {sub && (
         <div
           className={cn(
-            "text-[10px] tabular-nums",
+            "text-[11px] tabular-nums",
             accent === "success"
               ? "text-success/80"
               : accent === "destructive"
@@ -1966,7 +2168,7 @@ function BreakdownStage({
         >
           {icon}
         </div>
-        <span className="inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <span className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           {title}
           {tooltip && (
             <Tooltip
@@ -1984,7 +2186,7 @@ function BreakdownStage({
       </div>
 
       {/* Main: всего активов $ */}
-      <div className="mt-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      <div className="mt-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         {mainLabel}
       </div>
       <div className="mt-0.5 text-lg font-semibold tabular-nums tracking-tight">
@@ -2006,7 +2208,7 @@ function BreakdownStage({
       <div className="mt-2 space-y-1.5 border-t border-border/40 pt-1.5">
         {breakdown.map((b, i) => (
           <div key={i} className="rounded-md bg-card/50 px-2 py-1.5">
-            <div className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            <div className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
               {b.icon}
               {b.label}
               {b.tooltip && (
@@ -2040,7 +2242,7 @@ function BreakdownStage({
               </div>
             </div>
             {b.pnlRub != null && (
-              <div className="mt-0.5 flex items-baseline justify-between text-[9px] tabular-nums">
+              <div className="mt-0.5 flex items-baseline justify-between text-[11px] tabular-nums">
                 <span className="uppercase tracking-wider text-muted-foreground">
                   PNL ₽
                 </span>
@@ -2124,7 +2326,7 @@ function Stage({
         >
           {icon}
         </div>
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground inline-flex items-center gap-1">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground inline-flex items-center gap-1">
           {title}
           {tooltip && (
             <Tooltip
@@ -2142,7 +2344,7 @@ function Stage({
       </div>
       <div
         className={cn(
-          "mt-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground",
+          "mt-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground",
           centered && "text-center",
         )}
       >
@@ -2157,7 +2359,7 @@ function Stage({
         {mainValue}
       </div>
       <div className="mt-1.5 flex items-baseline justify-between gap-2 border-t border-border/40 pt-1.5">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
           {subLabel}
         </span>
         <span className="text-[13px] font-semibold tabular-nums">
@@ -2165,7 +2367,7 @@ function Stage({
         </span>
       </div>
       {footer && (
-        <div className="mt-1 text-[10px] leading-snug text-muted-foreground">
+        <div className="mt-1 text-[11px] leading-snug text-muted-foreground">
           {footer}
         </div>
       )}
@@ -2229,13 +2431,13 @@ function SectionBlock({
               {title}
             </div>
             {subtitle && (
-              <div className="text-[10px] text-muted-foreground">{subtitle}</div>
+              <div className="text-[11px] text-muted-foreground">{subtitle}</div>
             )}
           </div>
         </div>
         {headline && (
           <div className="flex items-baseline gap-2">
-            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
               {headline.label}
               {headline.tooltip && (
                 <Tooltip
@@ -2300,7 +2502,7 @@ function PnlSubMetric({
   const positive = usd >= 0;
   return (
     <div className="rounded-md border border-border/60 bg-card/40 p-2.5">
-      <div className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      <div className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         {label}
         {tooltip && (
           <Tooltip
@@ -2346,7 +2548,7 @@ function PnlSubMetric({
         </div>
       )}
       {note && (
-        <div className="mt-0.5 text-[10px] leading-snug text-muted-foreground">
+        <div className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
           {note}
         </div>
       )}
@@ -2374,7 +2576,7 @@ function AprMetric({
         : "text-destructive";
   return (
     <div className="rounded-lg border border-border/60 bg-card/40 p-3">
-      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+      <div className="flex items-center gap-1 text-[11px] uppercase tracking-wider text-muted-foreground">
         {label}
         {tooltip && (
           <Tooltip
@@ -2421,13 +2623,13 @@ function DividendsMetric({
         : "text-foreground";
   return (
     <div className="rounded-lg border border-border/60 bg-card/40 p-3">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
       <div className={cn("mt-1 text-lg font-semibold tabular-nums", valueCls)}>
         <AnimatedNumber value={value} format={(v) => formatUsd(v, locale)} />
       </div>
-      {note && <div className="text-[10px] text-muted-foreground">{note}</div>}
+      {note && <div className="text-[11px] text-muted-foreground">{note}</div>}
     </div>
   );
 }
@@ -2455,7 +2657,7 @@ function DetailMetric({
         : "text-foreground";
   return (
     <div className="rounded-lg border border-border/60 bg-card/40 p-3 transition-colors hover:bg-card/70">
-      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+      <div className="flex items-center gap-1 text-[11px] uppercase tracking-wider text-muted-foreground">
         {icon}
         {label}
         {formula && (
@@ -2477,7 +2679,7 @@ function DetailMetric({
         {value}
       </div>
       {sub && (
-        <div className="text-[10px] text-muted-foreground tabular-nums">
+        <div className="text-[11px] text-muted-foreground tabular-nums">
           {sub}
         </div>
       )}
@@ -2914,7 +3116,7 @@ function WalletBalancesBlock({
               <Wallet className="h-4 w-4" />
             </div>
             <div className="min-w-0">
-              <div className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+              <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                 Cap Wallet
               </div>
               <div className="truncate text-[11px] font-semibold tracking-tight">
@@ -2944,7 +3146,7 @@ function WalletBalancesBlock({
 
         {/* Большой баланс — общий капитал (свободные + DeFi) */}
         <div className={compact ? "mt-2.5" : "mt-4"}>
-          <div className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
             Общий капитал
           </div>
           <div
@@ -2958,7 +3160,7 @@ function WalletBalancesBlock({
               format={(v) => formatUsd(v, locale)}
             />
           </div>
-          <div className="text-[10px] tabular-nums text-muted-foreground">
+          <div className="text-[11px] tabular-nums text-muted-foreground">
             ≈ {formatRub(totalCapitalUsd * usdRub, locale)}
           </div>
         </div>
@@ -2969,7 +3171,7 @@ function WalletBalancesBlock({
         {defiAssetUsd > 0.5 && (
           <div className={cn("grid grid-cols-2 gap-1.5", compact ? "mt-2.5" : "mt-3")}>
             <div className="rounded-md border border-border bg-secondary/40 px-2 py-1.5">
-              <div className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+              <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                 Свободные
               </div>
               <div className="mt-0.5 text-[12px] font-semibold tabular-nums">
@@ -2977,7 +3179,7 @@ function WalletBalancesBlock({
               </div>
               {cexUsd > 0 && (
                 <div
-                  className="text-[9px] tabular-nums text-brand-cyan/80"
+                  className="text-[11px] tabular-nums text-brand-cyan/80"
                   title="Включает балансы подключённых CEX-бирж."
                 >
                   вкл. {formatUsd(cexUsd, locale)} CEX
@@ -2985,13 +3187,13 @@ function WalletBalancesBlock({
               )}
             </div>
             <div className="rounded-md border border-brand-cyan/30 bg-brand-cyan/5 px-2 py-1.5">
-              <div className="text-[9px] font-medium uppercase tracking-wider text-brand-cyan/80">
+              <div className="text-[11px] font-medium uppercase tracking-wider text-brand-cyan/80">
                 В DeFi
               </div>
               <div className="mt-0.5 text-[12px] font-semibold tabular-nums text-brand-cyan">
                 {formatUsd(defiAssetUsd, locale)}
               </div>
-              <div className="text-[9px] tabular-nums text-muted-foreground">
+              <div className="text-[11px] tabular-nums text-muted-foreground">
                 lending + LP + vaults
               </div>
             </div>
@@ -2999,7 +3201,7 @@ function WalletBalancesBlock({
         )}
         {defiAssetUsd <= 0.5 && cexUsd > 0 && (
           <div
-            className="mt-1 text-[10px] tabular-nums text-brand-cyan/90"
+            className="mt-1 text-[11px] tabular-nums text-brand-cyan/90"
             title="Включает балансы подключённых CEX-бирж."
           >
             · вкл. {formatUsd(cexUsd, locale)} на CEX
@@ -3075,7 +3277,7 @@ function WalletBalancesBlock({
               availableOnchainWallets.length > 1 ||
               cexAccounts.length > 0) && (
               <details className="group border-b border-border bg-secondary/30">
-                <summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground">
+                <summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground hover:text-foreground">
                   <span className="flex items-center gap-1.5">
                     <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
                     Фильтры
@@ -3094,7 +3296,7 @@ function WalletBalancesBlock({
                         setWalletFilter(new Set());
                         setSourceFilter(new Set());
                       }}
-                      className="text-[10px] font-normal normal-case tracking-normal text-muted-foreground hover:text-foreground"
+                      className="text-[11px] font-normal normal-case tracking-normal text-muted-foreground hover:text-foreground"
                     >
                       × сбросить
                     </button>
@@ -3189,7 +3391,7 @@ function WalletBalancesBlock({
                             </span>
                           </Tooltip>
                         </div>
-                        <span className="text-[10px] font-medium normal-case text-brand-cyan/80">
+                        <span className="text-[11px] font-medium normal-case text-brand-cyan/80">
                           collateral
                         </span>
                       </div>
@@ -3221,7 +3423,7 @@ function WalletBalancesBlock({
                             </span>
                           </Tooltip>
                         </div>
-                        <span className="text-[10px] font-medium normal-case text-brand-cyan/80">
+                        <span className="text-[11px] font-medium normal-case text-brand-cyan/80">
                           не входят в капитал
                         </span>
                       </div>
@@ -3259,7 +3461,7 @@ function WalletBalancesBlock({
                     <span className="inline-block h-3 w-0.5 rounded bg-brand-cyan" />
                     Биржи (CEX)
                   </span>
-                  <span className="flex items-center gap-2 text-[10px]">
+                  <span className="flex items-center gap-2 text-[11px]">
                     {!cexSectionCollapsed && (() => {
                       const totalDust = filteredCexAccounts.reduce(
                         (s, a) =>
@@ -3358,18 +3560,18 @@ function CexAccountGroup({
           compact ? "px-3 py-1" : "px-4 py-1.5",
         )}
       >
-        <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-foreground/80">
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-foreground/80">
           {headerName}
           {account.unpricedCount > 0 && (
             <span
-              className="rounded border border-warning/40 bg-warning/10 px-1 py-px text-[9px] normal-case text-warning"
+              className="rounded border border-warning/40 bg-warning/10 px-1 py-px text-[11px] normal-case text-warning"
               title={`${account.unpricedCount} актив(ов) без CoinGecko-цены — не учтены в сумме.`}
             >
               {account.unpricedCount} без цены
             </span>
           )}
         </span>
-        <span className="text-[10px] tabular-nums text-muted-foreground">
+        <span className="text-[11px] tabular-nums text-muted-foreground">
           {formatUsd(account.totalUsd, locale)}
           {pct > 0 && <span className="ml-1 opacity-70">· {pct.toFixed(1)}%</span>}
         </span>
@@ -3434,10 +3636,10 @@ function FilterChipRow({
 }) {
   return (
     <div className="space-y-0.5">
-      <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         {label}
         {selected.size > 0 && (
-          <span className="ml-1 rounded-full bg-brand-cyan/15 px-1 text-[9px] font-bold text-brand-cyan">
+          <span className="ml-1 rounded-full bg-brand-cyan/15 px-1 text-[11px] font-bold text-brand-cyan">
             {selected.size}
           </span>
         )}
@@ -3451,7 +3653,7 @@ function FilterChipRow({
               type="button"
               onClick={() => onToggle(it.value)}
               className={cn(
-                "inline-flex items-center rounded-full border px-1.5 py-px text-[10px] transition-all",
+                "inline-flex items-center rounded-full border px-1.5 py-px text-[11px] transition-all",
                 active
                   ? "border-brand-cyan/60 bg-brand-cyan/15 text-brand-cyan"
                   : "border-border bg-secondary/50 text-muted-foreground hover:border-brand-cyan/30 hover:text-foreground",
@@ -3510,7 +3712,7 @@ function SourcesIndicator({
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center justify-between gap-2 px-4 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground transition-colors hover:bg-secondary/40"
+        className="flex w-full items-center justify-between gap-2 px-4 py-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground transition-colors hover:bg-secondary/40"
       >
         <span className="flex items-center gap-1.5">
           <ChevronDown
@@ -3528,7 +3730,7 @@ function SourcesIndicator({
             <span
               key={name}
               className={cn(
-                "rounded border px-1 py-0.5 text-[9px] font-mono uppercase tracking-wide",
+                "rounded border px-1 py-0.5 text-[11px] font-mono uppercase tracking-wide",
                 info.fails > 0
                   ? "border-warning/40 bg-warning/10 text-warning"
                   : "border-success/30 bg-success/10 text-success",
@@ -3543,14 +3745,14 @@ function SourcesIndicator({
             </span>
           ))}
           {summary.length > 4 && (
-            <span className="text-[9px] text-muted-foreground/70">
+            <span className="text-[11px] text-muted-foreground/70">
               +{summary.length - 4}
             </span>
           )}
         </span>
       </button>
       {expanded && (
-        <div className="space-y-1 px-4 py-2 text-[10px]">
+        <div className="space-y-1 px-4 py-2 text-[11px]">
           {loadedList.map((l) => (
             <div key={l.wallet.name} className="flex flex-col gap-0.5">
               <div className="font-semibold text-foreground/90">
@@ -3655,7 +3857,7 @@ function ChainGroupSection({
         type="button"
         onClick={() => setExpanded((v) => !v)}
         className={cn(
-          "relative flex w-full items-center justify-between gap-2 border-y border-l-2 px-4 py-1.5 text-[10px] font-medium uppercase tracking-wider transition-colors",
+          "relative flex w-full items-center justify-between gap-2 border-y border-l-2 px-4 py-1.5 text-[11px] font-medium uppercase tracking-wider transition-colors",
           isReceipts
             ? "border-y-warning/20 border-l-warning/70 bg-warning/[0.03] text-warning/90 hover:bg-warning/10"
             : isLpVault
@@ -3676,7 +3878,7 @@ function ChainGroupSection({
           {isReceipts && (
             <Badge
               variant="outline"
-              className="ml-1 h-3.5 border-warning/40 px-1 text-[8px] text-warning"
+              className="ml-1 h-3.5 border-warning/40 px-1 text-[11px] text-warning"
             >
               расписка
             </Badge>
@@ -3684,7 +3886,7 @@ function ChainGroupSection({
           {isLpVault && (
             <Badge
               variant="outline"
-              className="ml-1 h-3.5 border-brand-cyan/40 px-1 text-[8px] text-brand-cyan/90"
+              className="ml-1 h-3.5 border-brand-cyan/40 px-1 text-[11px] text-brand-cyan/90"
             >
               LP / vault
             </Badge>
@@ -3789,7 +3991,7 @@ function TokenListRow({
               {token.symbol}
             </span>
             {token.isStable && (
-              <Badge variant="muted" className="h-3.5 px-1 text-[8px]">
+              <Badge variant="muted" className="h-3.5 px-1 text-[11px]">
                 stable
               </Badge>
             )}
@@ -3799,11 +4001,11 @@ function TokenListRow({
               size="xs"
             />
           </div>
-          <div className="text-[9px] tabular-nums text-muted-foreground">
+          <div className="text-[11px] tabular-nums text-muted-foreground">
             {formatNumber(token.amount, locale, 4)} · {share.toFixed(1)}%
           </div>
           {token.avgBuyPrice != null && token.currentPrice != null && (
-            <div className="text-[9px] tabular-nums text-muted-foreground/80">
+            <div className="text-[11px] tabular-nums text-muted-foreground/80">
               ср. {formatUsd(token.avgBuyPrice, locale)}
               <span className="opacity-60"> → </span>
               {formatUsd(token.currentPrice, locale)}
@@ -3818,7 +4020,7 @@ function TokenListRow({
             <>
               <div
                 className={cn(
-                  "text-[10px] font-semibold",
+                  "text-[11px] font-semibold",
                   positive ? "text-success" : "text-destructive",
                 )}
               >
@@ -3827,7 +4029,7 @@ function TokenListRow({
               </div>
               <div
                 className={cn(
-                  "text-[9px] font-medium",
+                  "text-[11px] font-medium",
                   positive ? "text-success/80" : "text-destructive/80",
                 )}
               >
@@ -3836,7 +4038,7 @@ function TokenListRow({
               </div>
             </>
           ) : (
-            <div className="text-[9px] italic text-muted-foreground">
+            <div className="text-[11px] italic text-muted-foreground">
               cost basis ?
             </div>
           )}
@@ -3854,7 +4056,7 @@ function TokenListRow({
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-sm font-semibold">{token.symbol}</span>
           {token.isStable && (
-            <Badge variant="muted" className="h-4 px-1 text-[9px]">
+            <Badge variant="muted" className="h-4 px-1 text-[11px]">
               stable
             </Badge>
           )}
@@ -3867,13 +4069,13 @@ function TokenListRow({
             <Badge
               key={c}
               variant="outline"
-              className="h-4 px-1 text-[9px] uppercase"
+              className="h-4 px-1 text-[11px] uppercase"
             >
               {c}
             </Badge>
           ))}
         </div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
           {token.wallets.map((w, i) => (
             <span key={i} className="inline-flex items-center gap-1">
               <span className="truncate font-medium text-foreground/80">
@@ -3922,7 +4124,7 @@ function TokenListRow({
             </div>
             <div
               className={cn(
-                "text-[10px]",
+                "text-[11px]",
                 positive ? "text-success/80" : "text-destructive/80",
               )}
             >
@@ -3949,7 +4151,7 @@ function TokenListRow({
               style={{ width: `${Math.min(100, share)}%` }}
             />
           </div>
-          <span className="text-[10px] font-medium text-muted-foreground">
+          <span className="text-[11px] font-medium text-muted-foreground">
             {share.toFixed(1)}%
           </span>
         </div>
@@ -3996,7 +4198,7 @@ function SnapshotProtocolsBlock({
           </div>
         </div>
         <div className="text-right">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
             Активы в работе
           </div>
           <div className="text-xl font-semibold tabular-nums text-foreground">
@@ -4026,7 +4228,7 @@ function SnapshotProtocolsBlock({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-foreground">{p.name}</span>
-                  <Badge variant="muted" className="text-[9px]">
+                  <Badge variant="muted" className="text-[11px]">
                     {p.chain}
                   </Badge>
                 </div>
@@ -4044,7 +4246,7 @@ function SnapshotProtocolsBlock({
                   {formatUsd(p.assetUsd, locale)}
                 </div>
                 {p.debtUsd > 0 && (
-                  <div className="text-[10px] text-destructive">
+                  <div className="text-[11px] text-destructive">
                     − {formatUsd(p.debtUsd, locale)}
                   </div>
                 )}
@@ -4116,7 +4318,7 @@ function ProtocolsBlock({
             <button
               type="button"
               onClick={toggleAll}
-              className="ml-2 inline-flex items-center gap-1 self-center rounded-md border border-border bg-secondary/40 px-2 py-1 text-[10px] font-medium text-muted-foreground transition-colors hover:border-brand-cyan/40 hover:text-foreground"
+              className="ml-2 inline-flex items-center gap-1 self-center rounded-md border border-border bg-secondary/40 px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-brand-cyan/40 hover:text-foreground"
               title={allExpanded ? "Свернуть все" : "Развернуть все"}
             >
               <ChevronDown
@@ -4130,7 +4332,7 @@ function ProtocolsBlock({
           )}
         </div>
         <div className="text-right">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
             Активы в работе
           </div>
           <div className="text-xl font-semibold tabular-nums text-foreground">
@@ -4151,7 +4353,7 @@ function ProtocolsBlock({
           {totalPnlPct != null && (
             <div
               className={cn(
-                "mt-0.5 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium",
+                "mt-0.5 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium",
                 totalPnlUsd >= 0
                   ? "bg-success/15 text-success"
                   : "bg-destructive/15 text-destructive",
@@ -4286,7 +4488,7 @@ function ProtocolRow({
             </span>
             <Badge
               variant="outline"
-              className="h-4 shrink-0 px-1 text-[9px] font-semibold uppercase"
+              className="h-4 shrink-0 px-1 text-[11px] font-semibold uppercase"
             >
               {p.chain}
             </Badge>
@@ -4333,7 +4535,7 @@ function ProtocolRow({
                 <Badge
                   key={repr}
                   variant="outline"
-                  className="h-5 px-1.5 text-[10px] font-semibold tabular-nums"
+                  className="h-5 px-1.5 text-[11px] font-semibold tabular-nums"
                 >
                   {repr}
                 </Badge>
@@ -4342,7 +4544,7 @@ function ProtocolRow({
             {minHf != null && hfTone && (
               <span
                 className={cn(
-                  "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-bold tabular-nums",
+                  "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[11px] font-bold tabular-nums",
                   minHf < 1.3
                     ? "border-destructive/40 bg-destructive/10"
                     : minHf < 1.6
@@ -4355,7 +4557,7 @@ function ProtocolRow({
               </span>
             )}
             {p.debtUsd > 0 && (
-              <span className="inline-flex items-center rounded-full border border-destructive/30 bg-destructive/5 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-destructive">
+              <span className="inline-flex items-center rounded-full border border-destructive/30 bg-destructive/5 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-destructive">
                 {formatUsd(p.debtUsd, locale)} долг
               </span>
             )}
@@ -4396,12 +4598,12 @@ function ProtocolRow({
               )}
             </div>
           ) : (
-            <div className="text-[10px] italic text-muted-foreground">
+            <div className="text-[11px] italic text-muted-foreground">
               cost basis ?
             </div>
           )}
           {p.feesClaimedUsd > 0 && (
-            <div className="text-[10px] font-medium tabular-nums text-success/80">
+            <div className="text-[11px] font-medium tabular-nums text-success/80">
               + {formatUsd(p.feesClaimedUsd, locale)} див.
             </div>
           )}
@@ -4542,14 +4744,14 @@ function LendingDetail({
     <div className={cn("rounded-md border p-2", status.chrome)}>
       <div
         className={cn(
-          "mb-1.5 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider",
+          "mb-1.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wider",
           status.header,
         )}
       >
         <Landmark className="h-3 w-3" />
         Параметры займа
         {hf != null && (
-          <span className="ml-auto text-[9px] font-medium normal-case opacity-80">
+          <span className="ml-auto text-[11px] font-medium normal-case opacity-80">
             {hf >= 1.6
               ? "Здоровая"
               : hf >= 1.3
@@ -4651,13 +4853,13 @@ function LendingDetail({
         <div className="mt-2">
           <div
             className={cn(
-              "mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider",
+              "mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider",
               status.header,
             )}
           >
             <span className="inline-block h-3 w-0.5 rounded bg-brand-gradient" />
             Залоговые активы
-            <span className="ml-auto text-[9px] font-medium normal-case opacity-80">
+            <span className="ml-auto text-[11px] font-medium normal-case opacity-80">
               {assetLiquidationPrices.length} актива · «изолированный» сценарий
             </span>
           </div>
@@ -4684,13 +4886,13 @@ function LendingDetail({
         >
           <div
             className={cn(
-              "mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider",
+              "mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider",
               status.header,
             )}
           >
             <span className="inline-block h-3 w-0.5 rounded bg-destructive" />
             Заёмы
-            <span className="ml-auto text-[9px] font-medium normal-case opacity-80">
+            <span className="ml-auto text-[11px] font-medium normal-case opacity-80">
               {lending.borrows.length}{" "}
               {lending.borrows.length === 1 ? "актив" : "активов"}
             </span>
@@ -4765,7 +4967,7 @@ function CollateralAssetCard({
           >
             {asset.symbol}
           </span>
-          <div className="flex shrink-0 items-center gap-1 text-[9px]">
+          <div className="flex shrink-0 items-center gap-1 text-[11px]">
             <span
               className="rounded bg-secondary/60 px-1 py-0.5 font-bold text-brand-cyan tabular-nums"
               title="Доля от общего залога (по USD стоимости)"
@@ -4782,7 +4984,7 @@ function CollateralAssetCard({
             )}
           </div>
         </div>
-        <div className="text-[10px] tabular-nums text-muted-foreground leading-tight">
+        <div className="text-[11px] tabular-nums text-muted-foreground leading-tight">
           {formatNumber(asset.amount, locale, 6)}
           <span className="opacity-50"> · </span>
           {formatUsd(asset.usdValue, locale)}
@@ -4840,7 +5042,7 @@ function CollateralMetric({
         highlight ? "bg-secondary/40 ring-1 ring-border/60" : "bg-secondary/20",
       )}
     >
-      <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
       <div
@@ -4852,7 +5054,7 @@ function CollateralMetric({
         {value}
       </div>
       {sub && (
-        <div className="text-[9px] text-muted-foreground italic leading-tight">
+        <div className="text-[11px] text-muted-foreground italic leading-tight">
           {sub}
         </div>
       )}
@@ -4903,7 +5105,7 @@ function DebtAssetCard({
           <span className="text-sm font-bold uppercase tracking-tight text-destructive">
             {borrow.symbol}
           </span>
-          <div className="flex shrink-0 items-center gap-1 text-[9px]">
+          <div className="flex shrink-0 items-center gap-1 text-[11px]">
             {apr != null && (
               <span
                 className={cn(
@@ -4922,7 +5124,7 @@ function DebtAssetCard({
             )}
           </div>
         </div>
-        <div className="text-[10px] tabular-nums text-muted-foreground leading-tight">
+        <div className="text-[11px] tabular-nums text-muted-foreground leading-tight">
           {formatNumber(borrow.netBorrowedAmount, locale, 4)} {borrow.symbol}
           <span className="opacity-50"> · net занято</span>
         </div>
@@ -4977,7 +5179,7 @@ function LendingMetric({
   return (
     <div className="rounded-md border border-border bg-card/80 px-2 py-1.5">
       {/* Компактная шкала: label 9px, value 14px, sub 10px */}
-      <div className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <div className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         <span className="truncate">{label}</span>
         {tooltip && (
           <Tooltip
@@ -4999,7 +5201,7 @@ function LendingMetric({
         {value}
       </div>
       {sub && (
-        <div className="text-[10px] font-medium tabular-nums text-muted-foreground leading-tight">
+        <div className="text-[11px] font-medium tabular-nums text-muted-foreground leading-tight">
           {sub}
         </div>
       )}
@@ -5306,7 +5508,7 @@ function PositionDetail({
               {inferred && (
                 <Badge
                   variant="warning"
-                  className="h-4 shrink-0 px-1 text-[9px] uppercase"
+                  className="h-4 shrink-0 px-1 text-[11px] uppercase"
                 >
                   Из истории
                 </Badge>
@@ -5339,7 +5541,7 @@ function PositionDetail({
         {tokensInline && (
           <div className="hidden shrink-0 md:block">
             <div className="rounded-md border border-brand-cyan/30 bg-brand-cyan/5 px-3 py-1 text-center">
-              <div className="flex items-center justify-center gap-1 text-[8px] font-medium uppercase tracking-wider text-muted-foreground">
+              <div className="flex items-center justify-center gap-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                 {pos.kind === "lending"
                   ? "Залог · Долг"
                   : pos.kind === "lp"
@@ -5382,7 +5584,7 @@ function PositionDetail({
         {/* Правая часть — компактные 3 столбца. Label 9px, value 14px (sm). */}
         <div className="flex shrink-0 items-stretch gap-2 text-right">
           <div className="border-r border-border/60 pr-2">
-            <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
               {inferred ? "Внесено" : "Стоимость"}
             </div>
             <div className="text-sm font-bold tabular-nums leading-tight">
@@ -5391,7 +5593,7 @@ function PositionDetail({
           </div>
           {pos.currentDebtUsd > 0 && (
             <div className="border-r border-border/60 pr-2">
-              <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Долг
               </div>
               <div className="text-sm font-bold tabular-nums leading-tight text-destructive">
@@ -5401,7 +5603,7 @@ function PositionDetail({
           )}
           {pnlUsd != null && pnlPct != null && (
             <div>
-              <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                 PnL
               </div>
               <div
@@ -5415,7 +5617,7 @@ function PositionDetail({
               </div>
               <div
                 className={cn(
-                  "text-[10px] font-semibold tabular-nums leading-tight",
+                  "text-[11px] font-semibold tabular-nums leading-tight",
                   positive ? "text-success/80" : "text-destructive/80",
                 )}
               >
@@ -5524,7 +5726,7 @@ function PositionTimelineBlock({
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[10px] font-bold uppercase tracking-wider text-muted-foreground transition-colors hover:bg-secondary/40"
+        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] font-bold uppercase tracking-wider text-muted-foreground transition-colors hover:bg-secondary/40"
       >
         <ChevronDown
           className={cn(
@@ -5539,7 +5741,7 @@ function PositionTimelineBlock({
         {/* Inline сводка чтобы было видно в свернутом виде */}
         <span className="ml-auto flex items-center gap-2 normal-case">
           {totalDepositedUsd > 0 && (
-            <span className="text-[9px] font-medium tabular-nums text-foreground/70">
+            <span className="text-[11px] font-medium tabular-nums text-foreground/70">
               внесено{" "}
               <span className="font-bold text-foreground">
                 {formatUsd(totalDepositedUsd, locale)}
@@ -5547,7 +5749,7 @@ function PositionTimelineBlock({
             </span>
           )}
           {totalClaimedUsd > 0 && (
-            <span className="text-[9px] font-medium tabular-nums text-success/70">
+            <span className="text-[11px] font-medium tabular-nums text-success/70">
               собрано{" "}
               <span className="font-bold text-success">
                 {formatUsd(totalClaimedUsd, locale)}
@@ -5559,7 +5761,7 @@ function PositionTimelineBlock({
       {expanded && (
         <div className="border-t border-border/60 px-2 py-2">
           {/* Сводные cumulative цифры */}
-          <div className="mb-2 grid grid-cols-3 gap-1.5 text-[10px]">
+          <div className="mb-2 grid grid-cols-3 gap-1.5 text-[11px]">
             <div className="rounded bg-card/60 px-1.5 py-1">
               <div className="font-semibold uppercase tracking-wider text-muted-foreground">
                 Внесено
@@ -5589,7 +5791,7 @@ function PositionTimelineBlock({
           <div className="grid grid-cols-[auto_auto_1fr_auto] gap-x-2 gap-y-1 text-[11px] tabular-nums">
             {events.map((e, idx) => (
               <Fragment key={idx}>
-                <span className="text-[10px] text-muted-foreground">
+                <span className="text-[11px] text-muted-foreground">
                   {new Date(e.time * 1000).toLocaleDateString(
                     locale === "ru" ? "ru-RU" : "en-US",
                     { day: "2-digit", month: "2-digit", year: "2-digit" },
@@ -5597,7 +5799,7 @@ function PositionTimelineBlock({
                 </span>
                 <span
                   className={cn(
-                    "rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider",
+                    "rounded px-1.5 py-0.5 text-[11px] font-bold uppercase tracking-wider",
                     eventKindStyle(e.kind),
                   )}
                 >
@@ -5667,7 +5869,7 @@ function RewardsBlock({
       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <span className="h-1.5 w-1.5 rounded-full bg-success" />
-          <span className="text-[10px] font-bold uppercase tracking-wider text-success">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-success">
             Награды (pending)
           </span>
           <span className="text-[13px] font-bold tabular-nums text-success">
@@ -5698,7 +5900,7 @@ function RewardsBlock({
               </div>
             }
           >
-            <span className="inline-flex cursor-help items-center gap-1 rounded-full border border-success/40 bg-success/15 px-2 py-0.5 text-[10px] font-bold text-success">
+            <span className="inline-flex cursor-help items-center gap-1 rounded-full border border-success/40 bg-success/15 px-2 py-0.5 text-[11px] font-bold text-success">
               {feeAprLifetime.toFixed(2)}% APR
               <Info className="h-3 w-3" />
             </span>
@@ -5707,16 +5909,16 @@ function RewardsBlock({
       </div>
       {/* Per-token breakdown: 4-колоночный grid (символ / amount / USD / APR) */}
       <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2.5 gap-y-0.5 text-[11px] tabular-nums">
-        <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           Токен
         </div>
-        <div className="text-right text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <div className="text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           Amount
         </div>
-        <div className="text-right text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <div className="text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           USD
         </div>
-        <div className="text-right text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <div className="text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           APR
         </div>
         {tokens.map((l, i) => {
@@ -5748,12 +5950,12 @@ function RewardsBlock({
                     </div>
                   }
                 >
-                  <span className="cursor-help justify-self-end rounded-full border border-success/30 bg-success/10 px-1.5 py-0.5 text-[10px] font-bold text-success">
+                  <span className="cursor-help justify-self-end rounded-full border border-success/30 bg-success/10 px-1.5 py-0.5 text-[11px] font-bold text-success">
                     {tokenApr.toFixed(2)}%
                   </span>
                 </Tooltip>
               ) : (
-                <span className="text-right text-[10px] italic text-muted-foreground">
+                <span className="text-right text-[11px] italic text-muted-foreground">
                   —
                 </span>
               )}
@@ -5771,7 +5973,7 @@ function RewardsBlock({
               {formatUsd(feesClaimedUsd, locale)}
             </span>
             {ageDays != null && ageDays > 0 && (
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-[11px] text-muted-foreground">
                 за {ageDays.toFixed(0)} дн.
               </span>
             )}
