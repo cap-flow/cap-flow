@@ -116,6 +116,10 @@ import {
   usePositionOverrides,
 } from "@/lib/portfolio/position_overrides";
 import {
+  positionCreditKey,
+  useCreditOverrides,
+} from "@/lib/portfolio/credit_overrides";
+import {
   expandByComposition,
   normalizeCompositionKey,
   useAssetCompositions,
@@ -248,6 +252,7 @@ export function HomePage(): JSX.Element {
   );
 
   const [positionOverrides] = usePositionOverrides();
+  const [creditOverrides] = useCreditOverrides();
   const [assetCompositions] = useAssetCompositions();
   const [compositionDialog, setCompositionDialog] = useState<
     { symbol: string; scope?: string; label?: string } | null
@@ -432,42 +437,65 @@ export function HomePage(): JSX.Element {
     return m;
   }, [loadedList]);
 
-  // ---- PNL на собственный капитал ----
-  // Используем `startUsdEffective`: ручной startUsdAll если есть, иначе
-  // derived = walletStartUsd (Σ amount × WAC) + protocolsInvestedUsd. Это
-  // позволяет считать PnL даже без ручных фиат-аннотаций — мы знаем
-  // средневзвешенную цену покупки каждого актива из истории операций
-  // и можем сравнить с текущей рыночной ценой.
+  // ---- Капитал: свой + кредит = общий (gross-модель) ----
+  // startEffective — свой стартовый капитал (фиат-пометки, иначе derived WAC).
+  // Кредитные позиции — помеченные «открыта на кредит» на листе позиций.
+  // creditStartUsd — стартовый кредит = ПРИНЦИПАЛ займов на момент взятия,
+  //   БЕЗ набежавших % (накопленные % учитываются в «Совокупном долге»).
+  // totalStartUsd — общий вложенный капитал = свой старт + принципал займа.
+  // Под leverage-моделью (есть помеченные кредитные позиции И принципал > 0)
+  // own/credit/total бьются в сумму на gross-уровне (до вычета долга):
+  //   own_current = totalAssets − creditPositions; credit_current = их стоимость;
+  //   own + credit = totalAssets. «Собственный капитал» (net worth = активы −
+  //   долг) и «Совокупный долг» остаются отдельными balance-метриками.
   const startEffective = m.startUsdEffective;
-  const canSplitOwnCredit = startEffective > 0;
 
-  // Что вы реально заработали на ваших деньгах = ownCapital − стартовый капитал.
-  const clientPnlOwnUsd = canSplitOwnCredit ? m.ownCapitalUsd - startEffective : 0;
+  const creditPositionsUsd = useMemo(() => {
+    let sum = 0;
+    for (const p of openPositions) {
+      const k = positionCreditKey({
+        walletId: p.walletId,
+        chain: p.chain,
+        protocolId: p.protocol.id,
+        symbols: p.supplyTokens.map((t) => t.symbol),
+        ...(p.instanceId && { instanceId: p.instanceId }),
+      });
+      if (creditOverrides[k]) sum += p.currentUsd;
+    }
+    return sum;
+  }, [openPositions, creditOverrides]);
+  const hasCreditPositions = creditPositionsUsd > 0;
+
+  // Стартовый кредит = принципал займа (без %). protocolPrincipalUsd — тело
+  // протокол-займов на момент взятия; manualCreditUsd — ручные «кредит».
+  const creditStartUsd =
+    (m.protocolPrincipalUsd ?? 0) + (m.manualCreditUsd ?? 0);
+  const leverageView = hasCreditPositions && creditStartUsd > 0;
+
+  const ownStartUsd = startEffective;
+  const totalStartUsd = ownStartUsd + (leverageView ? creditStartUsd : 0);
+  const creditTotalDebtUsd = m.totalDebtUsd; // тело + накопл. % (к возврату)
+  const canSplitOwnCredit = ownStartUsd > 0;
+
+  // Текущее по трекам.
+  const creditCurrentUsd = creditPositionsUsd;
+  const ownCurrentUsd = leverageView
+    ? m.totalAssetsUsd - creditCurrentUsd // gross own-funded активы
+    : m.ownCapitalUsd; // net worth, когда плеча нет
+
+  // ---- PnL на собственный капитал ----
+  const clientPnlOwnUsd = canSplitOwnCredit ? ownCurrentUsd - ownStartUsd : 0;
   const clientPnlOwnPct = canSplitOwnCredit
-    ? (clientPnlOwnUsd / startEffective) * 100
+    ? (clientPnlOwnUsd / ownStartUsd) * 100
     : null;
 
-  // ---- PNL на кредитный капитал ----
-  // Окупается ли использование кредита (включая стоимость заёма).
-  //   creditTotalDebt = совокупный долг к возврату СЕЙЧАС:
-  //     протокол.долг (= принципал + накопл. %) + ручные «кредит» пометки.
-  //   creditCurrentValue: доля от текущих активов, отвечающая за кредитную
-  //     часть инвестиций (proportional split). Корректно только если есть
-  //     baseline (startUsd) — иначе formula распадается.
-  const creditTotalDebtUsd = m.totalDebtUsd; // = протоколы (с %) + ручные
-  const totalInvestedAll = startEffective + creditTotalDebtUsd;
-  const creditShare =
-    canSplitOwnCredit && totalInvestedAll > 0
-      ? creditTotalDebtUsd / totalInvestedAll
-      : 0;
-  const creditCurrentValueUsd = m.totalAssetsUsd * creditShare;
-  const pnlCreditUsd =
-    canSplitOwnCredit && creditTotalDebtUsd > 0
-      ? creditCurrentValueUsd - creditTotalDebtUsd
-      : 0;
+  // ---- PnL на кредитный капитал ----
+  // = стоимость кредитных позиций − ПРИНЦИПАЛ займа (без %). > 0 → то, что
+  // куплено на кредит, стоит больше, чем взятое тело займа.
+  const pnlCreditUsd = leverageView ? creditCurrentUsd - creditStartUsd : 0;
   const pnlCreditPct =
-    canSplitOwnCredit && creditTotalDebtUsd > 0
-      ? (pnlCreditUsd / creditTotalDebtUsd) * 100
+    leverageView && creditStartUsd > 0
+      ? (pnlCreditUsd / creditStartUsd) * 100
       : null;
 
   // F6b slice 4: prefer server-side PNL when the client's cost-basis
@@ -482,12 +510,11 @@ export function HomePage(): JSX.Element {
       ? snapshotMetrics.pnlOwnPct
       : clientPnlOwnPct;
 
-  // ---- PNL на общий капитал (собственный + кредитный) ----
+  // ---- PnL на общий капитал (свой + кредит, gross) ----
+  // own + credit = totalAssets − totalStart (бьётся в сумму).
   const clientPnlTotalUsd = clientPnlOwnUsd + pnlCreditUsd;
   const clientPnlTotalPct =
-    canSplitOwnCredit && totalInvestedAll > 0
-      ? (clientPnlTotalUsd / totalInvestedAll) * 100
-      : null;
+    totalStartUsd > 0 ? (clientPnlTotalUsd / totalStartUsd) * 100 : null;
 
   // F6b slice 4: when client compute is null (no LoadedWalletsProvider
   // data) but the server snapshot has a real cost-basis-derived PNL,
@@ -728,6 +755,7 @@ export function HomePage(): JSX.Element {
         pnlCreditUsd={pnlCreditUsd}
         pnlCreditPct={pnlCreditPct}
         creditTotalDebtUsd={creditTotalDebtUsd}
+        creditPositionsUsd={creditPositionsUsd}
         aprPct={aprPct}
         aprOwnPct={aprOwnPct}
         aprCreditPct={aprCreditPct}
@@ -824,6 +852,7 @@ function CapitalHero({
   pnlCreditUsd,
   pnlCreditPct,
   creditTotalDebtUsd,
+  creditPositionsUsd,
   aprPct,
   aprOwnPct,
   aprCreditPct,
@@ -848,6 +877,8 @@ function CapitalHero({
   pnlCreditUsd: number;
   pnlCreditPct: number | null;
   creditTotalDebtUsd: number;
+  /** Σ текущей стоимости позиций, помеченных «открыта на кредит». */
+  creditPositionsUsd: number;
   aprPct: number | null;
   aprOwnPct: number | null;
   aprCreditPct: number | null;
@@ -861,6 +892,7 @@ function CapitalHero({
   const positiveTotal = pnlTotalUsd >= 0;
   const positiveOwn = pnlOwnUsd >= 0;
   const positiveCredit = pnlCreditUsd >= 0;
+  const hasCreditPositions = creditPositionsUsd > 0;
 
   // Server snapshot wins over client compute when both are present. The
   // client-side LoadedWalletsProvider is being deprecated (phase F6); for
@@ -891,6 +923,13 @@ function CapitalHero({
     snapshotStartUsd !== null && snapshotStartUsd > 0 && m.startUsdEffective === 0
       ? snapshotStartUsd
       : m.startUsdEffective;
+  // Стартовый кредит = принципал займа (без набежавших %). Общий стартовый
+  // капитал = свой старт + принципал. Показываем разбивку, когда есть
+  // помеченные кредитные позиции И ненулевой принципал (leverage-режим).
+  const creditStartUsd =
+    (m.protocolPrincipalUsd ?? 0) + (m.manualCreditUsd ?? 0);
+  const leverageView = creditPositionsUsd > 0 && creditStartUsd > 0;
+  const totalStartUsd = startUsdToShow + (leverageView ? creditStartUsd : 0);
   // F6b slice 1: own capital + debt come directly from snapshot when
   // the client compute is empty. Server-side these are derived from
   // DeBank's complex_protocol_list (asset/debt per protocol).
@@ -954,16 +993,20 @@ function CapitalHero({
         </span>
       </div>
 
-      {/* TOP ROW — группа «Капитал»: 5 KPI описывающих СОСТОЯНИЕ капитала
-          (4 капитала + газ за всё время как отдельный bucket — съеденная
-          транзакциями стоимость, не относящаяся к PnL по активам). */}
-      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-5">
+      {/* TOP ROW — «Капитал»: стартовый (свои), совокупный долг, газ.
+          Текущий и собственный (свой/кредит) капитал вынесены в отдельные
+          split-карточки ниже, чтобы не дублировать информацию. */}
+      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-3">
         <BigKpi
           label="Стартовый капитал"
           value={formatUsd(startUsdToShow, locale)}
           delta={
             m.startUsdAll > 0
-              ? `${formatRub(m.startRub, locale)} вложено`
+              ? `${formatRub(m.startRub, locale)} вложено${
+                  m.startRub > 0 && m.startUsdAll > 0
+                    ? ` · по курсу ${formatNumber(m.startRub / m.startUsdAll, locale, 2)} ₽/$`
+                    : ""
+                }`
               : snapshotStartUsd !== null
                 ? "Из server snapshot (Σ totalPaidUsd по cost basis)"
                 : `WAC × текущие активы (нет ручных пометок)`
@@ -972,33 +1015,9 @@ function CapitalHero({
           deltaIcon
           tooltip={
             m.startUsdAll > 0
-              ? "Σ всех ручных пометок «куплено за фиат» в Реестре. $-эквивалент конвертируется по курсу ЦБ."
+              ? "Только свои деньги — Σ ручных пометок «куплено за фиат», зафиксирован на момент покупки (не пересчитывается по текущему курсу). Заёмные показаны отдельно в «Совокупном стартовом капитале»."
               : "Derived: Σ (amount × WAC) активов на кошельке + Σ startUsd по DeFi-позициям. Если поставить ручные fiatPurchase в Реестре — переключится на них."
           }
-        />
-        <BigKpi
-          label="Текущий капитал"
-          value={formatUsd(currentUsdToShow, locale)}
-          delta={
-            cexUsd > 0
-              ? `≈ ${formatRub(currentUsdToShow * usdRub, locale)} · вкл. ${formatUsd(cexUsd, locale)} на CEX`
-              : `≈ ${formatRub(currentUsdToShow * usdRub, locale)}`
-          }
-          deltaPositive
-          tooltip={
-            cexUsd > 0
-              ? `On-chain $${onChainCurrentUsd.toFixed(2)} + CEX $${cexUsd.toFixed(2)}. CEX = балансы Bybit/OKX/Bitget/MEXC/BingX по последнему snapshot.${cexUnpricedCount > 0 ? ` ${cexUnpricedCount} актив(ов) без CoinGecko-цены не учтены.` : ""}`
-              : "Σ on-chain балансов кошельков + брутто-стоимость supply во всех DeFi-позициях. Источник: server snapshot (worker, hourly cron) с fallback на клиентский compute."
-          }
-        />
-        <BigKpi
-          label="Собственный капитал"
-          value={formatUsd(ownCapitalToShow, locale)}
-          delta={`≈ ${formatRub(ownCapitalToShow * usdRub, locale)}`}
-          deltaPositive={ownCapitalToShow >= 0}
-          deltaIcon
-          accent="success"
-          tooltip="Текущий капитал − Совокупный долг. Что реально ваше после погашения всех займов."
         />
         <BigKpi
           label="Совокупный долг"
@@ -1023,6 +1042,32 @@ function CapitalHero({
           tooltip="Σ всех комиссий блокчейна (gas) по всем кошелькам с момента первой операции. Это «съеденные» транзакциями деньги, отдельно от PnL по активам."
         />
       </div>
+
+      {/* Разбивка свой/кредитный — старт и сейчас. Показываем только когда
+          есть кредитное плечо (помеченные позиции + принципал займа). */}
+      {leverageView && (
+        <div className="grid gap-2.5 lg:grid-cols-2">
+          <CapitalSplitCard
+            label="Совокупный стартовый капитал"
+            tooltip="Сколько всего денег было задействовано на старте: свои + тело займов (без набежавших %). База для PnL/APR на весь капитал. Набежавшие % — отдельно в «Совокупном долге»."
+            totalUsd={totalStartUsd}
+            ownUsd={startUsdToShow}
+            creditUsd={creditStartUsd}
+            caption="свои деньги + заёмные (тело займов, без %)"
+            locale={locale}
+          />
+          <CapitalSplitCard
+            label="Текущий капитал: свой и кредитный"
+            tooltip="Текущая стоимость, разнесённая на свой и кредитный капитал. Кредитный = Σ стоимости позиций, помеченных «открыта на кредит» на листе позиций; собственный = всё остальное."
+            totalUsd={currentUsdToShow}
+            ownUsd={currentUsdToShow - creditPositionsUsd}
+            creditUsd={creditPositionsUsd}
+            caption="свои + кредитные позиции сейчас"
+            footnote={`Чистыми после погашения долга (net worth): ${formatUsd(ownCapitalToShow, locale)}`}
+            locale={locale}
+          />
+        </div>
+      )}
 
       {/* MIDDLE: Структура портфеля + side cards */}
       <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-3">
@@ -1130,7 +1175,7 @@ function CapitalHero({
             mainValue={`${pnlTotalUsd >= 0 ? "+" : ""}${formatUsd(pnlTotalUsd, locale)}`}
             mainPct={pnlTotalPct}
             mainAccent={positiveTotal ? "success" : "destructive"}
-            mainTooltip="Unrealized PNL по активам (собств. + кредит). Не включает Realized PNL — он показан отдельной строкой ниже. % считается от общего инвестированного капитала."
+            mainTooltip="Unrealized PNL на ВЕСЬ задействованный капитал = (текущая стоимость всех активов) − (общий стартовый: свой + принципал займа без %). Свой + кредит трек дают в сумме этот результат. Не включает Realized PNL (строка ниже)."
             rows={[
               {
                 label: "На собств. капитал",
@@ -1138,23 +1183,21 @@ function CapitalHero({
                 pct: pnlOwnPct,
                 accent: positiveOwn ? "success" : "destructive",
                 tooltip:
-                  "Unrealized: что вы реально заработали на собственных вложениях (= текущий капитал − совокупный долг − стартовый капитал). Считается только по тому, что сейчас на руках.",
+                  "Unrealized на свои деньги. В leverage-режиме = (активы, профинансированные своими = все активы − кредитные позиции) − свой стартовый капитал. Без плеча = текущий капитал (net worth) − стартовый.",
               },
               {
                 label: "На кредит. капитал",
-                value:
-                  creditTotalDebtUsd > 0
-                    ? `${pnlCreditUsd >= 0 ? "+" : ""}${formatUsd(pnlCreditUsd, locale)}`
-                    : "—",
-                pct: creditTotalDebtUsd > 0 ? pnlCreditPct : null,
-                accent:
-                  creditTotalDebtUsd === 0
-                    ? "muted"
-                    : positiveCredit
-                      ? "success"
-                      : "destructive",
+                value: leverageView
+                  ? `${pnlCreditUsd >= 0 ? "+" : ""}${formatUsd(pnlCreditUsd, locale)}`
+                  : "—",
+                pct: leverageView ? pnlCreditPct : null,
+                accent: !leverageView
+                  ? "muted"
+                  : positiveCredit
+                    ? "success"
+                    : "destructive",
                 tooltip:
-                  "Unrealized: окупается ли кредит. (стоимость активов на кредит) − совокупный долг (тело + накопл. %). Если положительно — кредит приносит больше, чем стоит.",
+                  "В плюсе ли вы на кредитные деньги. = (текущая стоимость позиций, помеченных «открыта на кредит») − (принципал займа на момент взятия, БЕЗ набежавших %). > 0 → то, что куплено на кредит, стоит больше, чем взятое тело займа. Набежавшие % — отдельно в «Совокупном долге». Пометки ставятся на листе открытых позиций.",
               },
               {
                 label: "Realized (закрытые сделки)",
@@ -1206,16 +1249,17 @@ function CapitalHero({
               {
                 label: "На кредит. капитал",
                 value:
-                  creditTotalDebtUsd > 0 && aprCreditPct != null
+                  leverageView && aprCreditPct != null
                     ? `${aprCreditPct >= 0 ? "+" : ""}${aprCreditPct.toFixed(2)}%`
                     : "—",
                 accent:
-                  creditTotalDebtUsd === 0 || aprCreditPct == null
+                  !leverageView || aprCreditPct == null
                     ? "muted"
                     : aprCreditPct >= 0
                       ? "success"
                       : "destructive",
-                tooltip: "Аннуализированная доходность на кредитный капитал.",
+                tooltip:
+                  "Аннуализированная доходность на кредитный капитал (от принципала займа).",
               },
             ]}
           />
@@ -1271,6 +1315,7 @@ function BigKpi({
   deltaIcon,
   accent,
   tooltip,
+  subNote,
 }: {
   label: string;
   value: string;
@@ -1279,6 +1324,8 @@ function BigKpi({
   deltaIcon?: boolean;
   accent?: "success" | "destructive" | "muted";
   tooltip?: string;
+  /** Доп. строка под дельтой (например разбивка «свой + кредит = общий»). */
+  subNote?: string;
 }) {
   const valueCls =
     accent === "success"
@@ -1342,6 +1389,109 @@ function BigKpi({
           </span>
         </div>
       )}
+      {subNote && (
+        <div className="mt-1 text-[11px] tabular-nums text-muted-foreground">
+          {subNote}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Карточка разбивки капитала на собственный и кредитный (заёмный).
+ * Главная цифра крупно + полоса пропорции + две карточки-легенды.
+ * Используется для совокупного стартового И текущего капитала.
+ */
+function CapitalSplitCard({
+  label,
+  tooltip,
+  totalUsd,
+  ownUsd,
+  creditUsd,
+  caption,
+  footnote,
+  locale,
+}: {
+  label: string;
+  tooltip: string;
+  totalUsd: number;
+  ownUsd: number;
+  creditUsd: number;
+  caption: string;
+  /** Доп. строка внизу карточки (например net worth «чистыми после долга»). */
+  footnote?: string;
+  locale: "en" | "ru";
+}) {
+  const ownPct = totalUsd > 0 ? (ownUsd / totalUsd) * 100 : 0;
+  const creditPct = totalUsd > 0 ? (creditUsd / totalUsd) * 100 : 0;
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-brand-cyan/25 bg-gradient-to-br from-brand-cyan/[0.07] via-card/40 to-transparent p-4">
+      <div className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+        <Tooltip
+          maxWidth={300}
+          content={
+            <div className="text-[11px] text-foreground/90">{tooltip}</div>
+          }
+        >
+          <span className="cursor-help text-muted-foreground/70 hover:text-foreground">
+            <Info className="h-3 w-3" />
+          </span>
+        </Tooltip>
+      </div>
+      <div className="mt-1 text-3xl font-bold tabular-nums tracking-tight">
+        {formatUsd(totalUsd, locale)}
+      </div>
+      <div className="mt-0.5 text-[11px] text-muted-foreground">{caption}</div>
+      <div className="mt-3 flex h-2.5 overflow-hidden rounded-full bg-secondary/70">
+        <div className="bg-brand-cyan" style={{ width: `${ownPct}%` }} />
+        <div className="bg-amber-400" style={{ width: `${creditPct}%` }} />
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <StartCapitalLegend
+          color="bg-brand-cyan"
+          label="Собственный"
+          value={formatUsd(ownUsd, locale)}
+          pct={ownPct}
+        />
+        <StartCapitalLegend
+          color="bg-amber-400"
+          label="Кредитный"
+          value={formatUsd(creditUsd, locale)}
+          pct={creditPct}
+        />
+      </div>
+      {footnote && (
+        <div className="mt-2 border-t border-border/40 pt-2 text-[11px] text-muted-foreground">
+          {footnote}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StartCapitalLegend({
+  color,
+  label,
+  value,
+  pct,
+}: {
+  color: string;
+  label: string;
+  value: string;
+  pct: number;
+}) {
+  return (
+    <div className="rounded-lg border border-border/60 bg-card/50 px-3 py-2">
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <span className={cn("h-2 w-2 flex-shrink-0 rounded-full", color)} />
+        <span className="truncate">{label}</span>
+      </div>
+      <div className="mt-0.5 text-sm font-semibold tabular-nums">{value}</div>
+      <div className="text-[10px] tabular-nums text-muted-foreground">
+        {pct.toFixed(1)}%
+      </div>
     </div>
   );
 }

@@ -11,7 +11,7 @@
  * соответствующем типе показывается зелёный/жёлтый бейдж.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Banknote,
   Landmark,
@@ -33,6 +33,7 @@ import {
   type FiatPurchaseAnnotation,
   type CreditAssetAnnotation,
 } from "@/lib/portfolio/manual_annotations";
+import { useUsdRub } from "@/lib/dashboard/fxRate";
 import { formatNumber } from "@/i18n/format";
 import { useI18n } from "@/i18n/I18nProvider";
 import { cn } from "@/lib/utils";
@@ -251,6 +252,7 @@ function FiatPurchaseDialog({
   onSave: (p: FiatPurchaseAnnotation) => void;
 }) {
   const { locale } = useI18n();
+  const { rate: usdRubRate } = useUsdRub();
   const [fiatAmount, setFiatAmount] = useState(
     initial ? String(initial.fiatAmount) : "",
   );
@@ -274,12 +276,44 @@ function FiatPurchaseDialog({
     ? customCode.trim().toUpperCase()
     : fiatCurrency;
   const validCurrency = effectiveCurrency.length >= 2;
-  const valid = validAmount && validCurrency;
 
   const rate =
-    valid && primaryToken && primaryToken.amount > 0
+    validAmount && validCurrency && primaryToken && primaryToken.amount > 0
       ? parsedAmount / primaryToken.amount
       : null;
+
+  // --- Зафиксированный $-эквивалент (стартовый капитал в долларах) ---
+  // Для USD сумма уже в долларах. Для другого фиата — редактируемое поле:
+  // по умолчанию подставляем текущий курс ЦБ, пользователь может поправить
+  // на курс, по которому реально купил доллары. Значение сохраняется и НЕ
+  // пересчитывается потом по текущему курсу.
+  const isUsd = effectiveCurrency === "USD";
+  const [usdStr, setUsdStr] = useState(
+    initial?.usdAmount != null ? String(initial.usdAmount) : "",
+  );
+  // Поле тронуто вручную? Тогда не перетираем авто-подстановкой по курсу.
+  const [usdTouched, setUsdTouched] = useState(initial?.usdAmount != null);
+  const autoUsd =
+    validAmount && usdRubRate > 0 ? parsedAmount / usdRubRate : null;
+  useEffect(() => {
+    if (isUsd || usdTouched) return;
+    setUsdStr(autoUsd != null ? autoUsd.toFixed(2) : "");
+  }, [autoUsd, isUsd, usdTouched]);
+  const parsedUsd = Number(usdStr.replace(/\s/g, "").replace(",", "."));
+  // Итоговый $-эквивалент: USD → сама сумма; иначе → значение поля.
+  const usdAmountFinal = isUsd
+    ? parsedAmount
+    : Number.isFinite(parsedUsd) && parsedUsd >= 0
+      ? parsedUsd
+      : null;
+  // Подразумеваемый курс фиат/$ для отображения и аудита.
+  const usdRateImplied =
+    !isUsd && usdAmountFinal != null && usdAmountFinal > 0
+      ? parsedAmount / usdAmountFinal
+      : null;
+
+  const valid =
+    validAmount && validCurrency && (isUsd || usdAmountFinal != null);
 
   return (
     <Dialog
@@ -310,6 +344,8 @@ function FiatPurchaseDialog({
                 fiatAmount: parsedAmount,
                 fiatCurrency: effectiveCurrency,
               };
+              if (usdAmountFinal != null) p.usdAmount = usdAmountFinal;
+              if (usdRateImplied != null) p.usdRate = usdRateImplied;
               if (note.trim()) p.note = note.trim();
               onSave(p);
             }}
@@ -390,6 +426,41 @@ function FiatPurchaseDialog({
               {formatNumber(rate, locale, 4)} {fiatSymbol(effectiveCurrency)}{" "}
               за 1 {primaryToken.symbol}
             </div>
+          </div>
+        )}
+        {/* $-эквивалент — фиксируется в стартовый капитал. Для USD не нужен. */}
+        {!isUsd && (
+          <div>
+            <Label htmlFor="fp-usd">
+              Эквивалент в $
+              <span className="ml-1 text-[10px] text-muted-foreground">
+                (фиксируется в стартовый капитал)
+              </span>
+            </Label>
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm text-muted-foreground">$</span>
+              <Input
+                id="fp-usd"
+                inputMode="decimal"
+                value={usdStr}
+                onChange={(e) => {
+                  setUsdTouched(true);
+                  setUsdStr(e.target.value);
+                }}
+                placeholder="0.00"
+              />
+            </div>
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              {usdRateImplied != null ? (
+                <>
+                  Курс {formatNumber(usdRateImplied, locale, 2)}{" "}
+                  {fiatSymbol(effectiveCurrency)}/$ ·{" "}
+                </>
+              ) : null}
+              {usdTouched
+                ? "зафиксирован вручную"
+                : `по текущему курсу ЦБ (${formatNumber(usdRubRate, locale, 2)} ₽/$)`}
+            </p>
           </div>
         )}
         <div>

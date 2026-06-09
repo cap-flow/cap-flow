@@ -2940,12 +2940,18 @@ function buildOne(
   // instanceId — стабильный per-position discriminator. Для V3 NFT и других
   // multi-position-в-одном-пуле случаев нужен, чтобы override'ы (credit
   // toggle, hidden, currentValue) применялись к КАЖДОЙ позиции отдельно.
-  // Используем hash supply-amounts (округлённых до 4 знаков) — уникальный
-  // отпечаток позиции даже без NFT tokenId.
-  // Приоритет: mint op.hash (для V3 NFT, стабилен per-NFT) > supplyHash
-  // (fallback для всего остального, чувствителен к ребалансировке amounts).
+  // Приоритет:
+  //   1) mint op.hash (V3 NFT, стабилен per-NFT);
+  //   2) openHash открывающей tx (стабилен между перезагрузками для GMX,
+  //      lending и прочих не-NFT позиций — это РЕАЛЬНЫЙ tx-хеш, не плывёт);
+  //   3) supplyHash (hash текущих amounts) — последний fallback ТОЛЬКО для
+  //      inferred-позиций без открывающей tx. ⚠ Он чувствителен к
+  //      ребалансировке amounts и «уплывает» между обновлениями, из-за чего
+  //      раньше credit/value/hidden метки слетали при перезагрузке.
   const supplyHash = supplyAmountsHash(supplyTokens);
-  const stableInstanceId = v3MintOpHash || supplyHash || undefined;
+  const stableOpenHash = coverageIncomplete ? null : (opened?.hash ?? null);
+  const stableInstanceId =
+    v3MintOpHash || stableOpenHash || supplyHash || undefined;
 
   return {
     id: "", // будет проставлен снаружи после сортировки
