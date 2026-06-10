@@ -1,9 +1,13 @@
 /**
- * UCB D6: tests for claim_rewards lot acquisition.
+ * UCB D6 (РЕВИЗИЯ owner 2026-06-10): claim_rewards lot acquisition.
  *
- * После D6 reward lots создаются с `costPerUnitUsd = 0` и
- * `acquiredVia = "received_as_reward"`. FMV at receipt сохраняется
- * на лоте в `fmvAtAcquisitionUsd` для income reporting.
+ * Было (D6 v1): reward lots с `costPerUnitUsd = 0` (награда «бесплатна»).
+ * Стало (owner-решение на трейсе testakk Artur, клейм 4.98 ETH 31.01.2026):
+ * **rewards входят в пул ПО РЫНОЧНОЙ ЦЕНЕ на момент клейма** — это
+ * зафиксированный доход («получил актив стоимостью $X»); cost=0 занижал WAC
+ * вдвое и завышал будущий PnL. `acquiredVia = "received_as_reward"` и
+ * `fmvAtAcquisitionUsd` (для income reporting) сохраняются как раньше —
+ * теперь fmv == cost basis лота.
  */
 import { describe, expect, it } from "vitest";
 
@@ -54,8 +58,8 @@ function op(args: Partial<ClassifiedOp> & {
   } as ClassifiedOp;
 }
 
-describe("buildLotTrackerFromOps — UCB D6 reward lots", () => {
-  it("claim_rewards создаёт лот с cost=0 и acquiredVia=received_as_reward", () => {
+describe("buildLotTrackerFromOps — UCB D6 reward lots (rewards @ market, owner 2026-06-10)", () => {
+  it("claim_rewards создаёт лот с cost = FMV (рынок на момент клейма)", () => {
     const ops: ClassifiedOp[] = [
       op({
         hash: "0xclaim",
@@ -69,12 +73,13 @@ describe("buildLotTrackerFromOps — UCB D6 reward lots", () => {
     const lots = tracker.getLots("w1", "ARB");
     expect(lots).toHaveLength(1);
     const lot = lots[0]!;
-    expect(lot.costPerUnitUsd).toBe(0);
+    // $200 за 100 ARB → $2/шт — зафиксированный доход
+    expect(lot.costPerUnitUsd).toBeCloseTo(2, 6);
     expect(lot.acquiredVia).toBe("received_as_reward");
     expect(lot.fmvAtAcquisitionUsd).toBeCloseTo(200, 2);
   });
 
-  it("WAC = 0 если только reward lots в pool (sale → full proceeds)", () => {
+  it("WAC = market если только reward lots в pool", () => {
     const ops: ClassifiedOp[] = [
       op({
         hash: "0xclaim",
@@ -85,10 +90,10 @@ describe("buildLotTrackerFromOps — UCB D6 reward lots", () => {
       }),
     ];
     const tracker = buildLotTrackerFromOps(ops, { walletId: "w1" });
-    expect(tracker.wacAt("w1", "ARB", 2000)).toBe(0);
+    expect(tracker.wacAt("w1", "ARB", 2000)).toBeCloseTo(2, 6);
   });
 
-  it("buy + reward: WAC = (1*2000 + 1*0) / 2 = 1000", () => {
+  it("buy + reward: WAC = (1×2000 + 1×3000) / 2 = 2500", () => {
     const ops: ClassifiedOp[] = [
       // Buy 1 ETH for $2000
       op({
@@ -101,7 +106,7 @@ describe("buildLotTrackerFromOps — UCB D6 reward lots", () => {
           { direction: "in", symbol: "ETH", amount: 1, usd: 2000 },
         ],
       }),
-      // Claim 1 ETH reward (cost=0 в D6)
+      // Claim 1 ETH reward по рынку $3000
       op({
         hash: "0xclaim",
         type: "claim_rewards",
@@ -111,10 +116,10 @@ describe("buildLotTrackerFromOps — UCB D6 reward lots", () => {
       }),
     ];
     const tracker = buildLotTrackerFromOps(ops, { walletId: "w1" });
-    expect(tracker.wacAt("w1", "ETH", 2000)).toBeCloseTo(1000, 2);
+    expect(tracker.wacAt("w1", "ETH", 2000)).toBeCloseTo(2500, 2);
   });
 
-  it("stable rewards: cost=0, fmv = amount (e.g. USDC airdrop)", () => {
+  it("stable rewards: cost = номинал ($1=$1), fmv = amount", () => {
     const ops: ClassifiedOp[] = [
       op({
         hash: "0xclaim",
@@ -126,7 +131,7 @@ describe("buildLotTrackerFromOps — UCB D6 reward lots", () => {
     ];
     const tracker = buildLotTrackerFromOps(ops, { walletId: "w1" });
     const lots = tracker.getLots("w1", "USDC");
-    expect(lots[0]?.costPerUnitUsd).toBe(0);
+    expect(lots[0]?.costPerUnitUsd).toBeCloseTo(1, 6);
     expect(lots[0]?.fmvAtAcquisitionUsd).toBeCloseTo(50, 2);
   });
 
@@ -143,7 +148,7 @@ describe("buildLotTrackerFromOps — UCB D6 reward lots", () => {
           { direction: "in", symbol: "ETH", amount: 1, usd: 2000 },
         ],
       }),
-      // Claim 1 ETH reward
+      // Claim 1 ETH reward @ $2500
       op({
         hash: "0xclaim",
         type: "claim_rewards",
@@ -152,7 +157,7 @@ describe("buildLotTrackerFromOps — UCB D6 reward lots", () => {
         movements: [{ direction: "in", symbol: "ETH", amount: 1, usd: 2500 }],
       }),
       // Sell 1 ETH for $3000 USDT
-      // WAC = 1000, consume 1 ETH → $1000 cost. Proceeds 3000 → realized $2000.
+      // WAC = (2000+2500)/2 = 2250, consume 1 ETH → $2250 cost. Realized $750.
       op({
         hash: "0xsell",
         type: "swap",
@@ -165,9 +170,9 @@ describe("buildLotTrackerFromOps — UCB D6 reward lots", () => {
       }),
     ];
     const tracker = buildLotTrackerFromOps(ops, { walletId: "w1" });
-    // After selling 1 ETH @ WAC=1000: 1 ETH остался, WAC всё ещё 1000 (drift fix).
+    // After selling 1 ETH @ WAC=2250: 1 ETH остался, WAC всё ещё 2250 (drift fix).
     const remaining = tracker.currentAmount("w1", "ETH");
     expect(remaining).toBeCloseTo(1, 6);
-    expect(tracker.wacAt("w1", "ETH", 3000)).toBeCloseTo(1000, 2);
+    expect(tracker.wacAt("w1", "ETH", 3000)).toBeCloseTo(2250, 2);
   });
 });

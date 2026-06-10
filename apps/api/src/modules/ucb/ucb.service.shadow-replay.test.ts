@@ -100,8 +100,13 @@ describe("ucb.service computePositions — B5 server/client parity (shadow)", ()
     // from LIFO $32,296.72 / WAC $33,708.57 because WETH (returned by lp_remove
     // with real LP-attributed cost) → ETH swap no longer resets cost to market
     // spot — it inherits the consumed lot cost (position_lot_cost_basis.ts).
-    expect(Math.abs(lifo!.startUsd - 30953.89)).toBeLessThanOrEqual(1);
-    expect(Math.abs(wac!.startUsd - 32773.02)).toBeLessThanOrEqual(1);
+    // CORRECTED 2026-06-10 (owner-методика testakk GMX rebalance): стейблы
+    // ВЕЗДЕ по номиналу («доллар = доллар», не lot-cost потреблённых USDC),
+    // rewards по рынку на момент клейма (ревизия D6), async-withdraw ноги
+    // наследуют стоимость burn-пары. LIFO $30,953.89 → $30,983.50,
+    // WAC $32,773.02 → $32,759.55.
+    expect(Math.abs(lifo!.startUsd - 30983.5)).toBeLessThanOrEqual(1);
+    expect(Math.abs(wac!.startUsd - 32759.55)).toBeLessThanOrEqual(1);
   });
 
   it("deterministic (R4): identical inputs → byte-identical output", async () => {

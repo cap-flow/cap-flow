@@ -129,6 +129,15 @@ export function buildLotsAndPositions(
     { amount: number; totalCost: number }
   >();
 
+  // Owner-методика 2026-06-10 (testakk GMX rebalance): async-withdraw пары
+  // (GMX V2 multicall-burn → executeWithdrawal-legs, разные tx). Tx A
+  // списывает receipt-лоты (их стоимость = attributedCost), но ноги приходят
+  // в Tx B. Раньше стоимость ВЫБРАСЫВАЛАСЬ → ноги получали лоты cost=0 →
+  // Fluid supply падал на market-fallback (терялся унаследованный PnL GM).
+  // Здесь: Tx A складывает списанную стоимость по своему hash; Tx B забирает
+  // её через op.linkedHash (выставлен async_deposit_linker'ом).
+  const pendingWithdrawCost = new Map<string, number>();
+
   const sorted = [...ops].sort((a, b) => a.time - b.time);
 
   for (const op of sorted) {
@@ -165,6 +174,7 @@ export function buildLotsAndPositions(
         lots,
         histPrices,
         selfLoopCollateral,
+        pendingWithdrawCost,
       );
     }
   }
@@ -243,13 +253,18 @@ function handleSwap(
       consumedAt: op.time,
       walletId,
     });
-    if (consumed.totalCostUsd > 0) {
+    // Owner-методика 2026-06-10: «доллар = доллар» — стейбл-оплата ВСЕГДА
+    // по номиналу, независимо от стоимости потреблённых стейбл-лотов.
+    // Раньше consumed.totalCostUsd стейблов (среди них cost-0 лоты от
+    // borrow/rewards) давал фантомную «скидку»: testakk Artur 14.03 покупка
+    // WBTC за 10 000 USDC получала лот $1 901 (lots.consume оставляем —
+    // баланс стейблов вести нужно, но цена расхода = номинал).
+    if (isStableSymbol(m.symbol)) {
+      paidUsd += m.amount;
+    } else if (consumed.totalCostUsd > 0) {
       paidUsd += consumed.totalCostUsd;
     } else {
-      const fallbackUsd = isStableSymbol(m.symbol)
-        ? m.amount
-        : tokenUsdHist(m, op.chain, op.time, histPrices);
-      paidUsd += fallbackUsd;
+      paidUsd += tokenUsdHist(m, op.chain, op.time, histPrices);
     }
   }
 
@@ -432,8 +447,12 @@ function handleClaim(
   walletId: string,
   histPrices: Map<string, number>,
 ): void {
-  // UCB D6: rewards = cost basis $0. FMV at receipt сохраняется
-  // отдельно для income reporting. См. build.ts.handleClaim.
+  // UCB D6 (РЕВИЗИЯ owner 2026-06-10, testakk Artur trace): rewards входят в
+  // пул ПО РЫНОЧНОЙ ЦЕНЕ на момент клейма — это зафиксированный доход
+  // («получил актив стоимостью $X»). Прежнее правило cost=$0 занижало WAC
+  // и завышало будущий PnL (Artur: клейм 4.98 ETH 31.01 — почти половина
+  // ETH-пула). FMV при получении = и есть cost basis; отдельное поле
+  // fmvAtAcquisitionUsd сохраняем для income reporting.
   for (const m of op.movement) {
     if (m.direction !== "in" || m.amount <= 0) continue;
     const fmvUsd = isStableSymbol(m.symbol)
@@ -444,7 +463,7 @@ function handleClaim(
       tokenId: m.tokenId,
       chain: op.chain,
       amount: m.amount,
-      costPerUnitUsd: 0,
+      costPerUnitUsd: m.amount > 0 ? fmvUsd / m.amount : 0,
       acquiredAt: op.time,
       acquiredVia: "received_as_reward",
       sourceHash: op.hash,
@@ -524,6 +543,7 @@ function emitPositionEvent(
   lots: LotTracker,
   histPrices: Map<string, number>,
   selfLoopCollateral: Map<string, { amount: number; totalCost: number }>,
+  pendingWithdrawCost: Map<string, number>,
 ): void {
   const protoId = op.protocol?.id ?? "";
   const isReceipt = (m: TokenMovement) =>
@@ -555,7 +575,12 @@ function emitPositionEvent(
         consumedAt: op.time,
         walletId,
       });
-      lotCost = consumed.totalCostUsd;
+      // Owner-методика 2026-06-10: «доллар = доллар» — стейбл-оплата ВСЕГДА
+      // по номиналу, НЕ по стоимости потреблённых стейбл-лотов (среди них
+      // cost-0 лоты от borrow/rewards → фантомная «скидка»: testakk Artur
+      // депозит 9 000 USDC в GM получал лот $3 091). lots.consume оставляем —
+      // баланс стейблов вести нужно.
+      lotCost = isStableSymbol(m.symbol) ? m.amount : consumed.totalCostUsd;
       // UCB C10: record consumed collateral cost basis для self-loop borrow
       // inheritance. consumedCost == 0 fallback на m.usd чтобы borrow
       // мог наследовать market-derived cost даже когда lots tracker пустой
@@ -623,10 +648,60 @@ function emitPositionEvent(
     eventType === "withdraw_collateral" &&
     (attributedCost > 0 || inTokens.length > 0)
   ) {
-    const totalInUsd = inTokens.reduce((s, t) => s + t.usd, 0);
+    // Owner-методика 2026-06-10 (async-withdraw carry): Tx A (burn receipt,
+    // ноги придут отдельной tx) — стоимость НЕ выбрасываем, паркуем по hash;
+    // Tx B (ноги без receipt-out) забирает её через linkedHash.
+    let carryCost = attributedCost;
+    const linkedHash = (op as { linkedHash?: string }).linkedHash;
+    if (carryCost > 0 && inTokens.length === 0) {
+      pendingWithdrawCost.set(op.hash, carryCost);
+    } else if (carryCost <= 0 && linkedHash) {
+      const parked = pendingWithdrawCost.get(linkedHash);
+      if (parked != null && parked > 0) {
+        carryCost = parked;
+        pendingWithdrawCost.delete(linkedHash);
+      }
+    }
+
+    // Распределение стоимости по ногам (owner-методика, locked 2026-06-10):
+    // стейбл-нога забирает свою долю ПО НОМИНАЛУ ($1=$1, cap'нуто общей
+    // стоимостью), весь ОСТАТОК ложится на волатильные ноги (по USD-долям
+    // между ними). Излишек стейбла сверх стоимости = реализованный gain;
+    // нехватка — реализованный loss. Это сохраняет деньги:
+    // Σ(стоимость ног) = списанная стоимость receipt-лотов.
+    const stables = inTokens.filter((t) => isStableSymbol(t.symbol));
+    const vols = inTokens.filter((t) => !isStableSymbol(t.symbol));
+    const stableFace = stables.reduce((s, t) => s + t.amount, 0);
+    const stableCost = Math.min(stableFace, carryCost);
+    const residual = Math.max(0, carryCost - stableCost);
+    const volUsd = vols.reduce((s, t) => s + t.usd, 0);
+
     for (const t of inTokens) {
-      const share = totalInUsd > 0 ? t.usd / totalInUsd : 1 / inTokens.length;
-      const costForLot = attributedCost * share; // 0 if attributedCost=0
+      let costForLot: number;
+      if (carryCost <= 0) {
+        // Receipt-less возврат залога (Morpho withdrawCollateral → теперь
+        // lend_withdraw, owner 2026-06-10): наследуем стоимость из C10
+        // selfLoopCollateral-пула (туда её положил lend_supply того же
+        // актива в тот же протокол). Нет пула → strict UCB Phase I ($0).
+        costForLot = 0;
+        const slKey = `${walletId}|${protoId}|${t.symbol.toUpperCase()}`;
+        const slPool = selfLoopCollateral.get(slKey);
+        if (slPool && slPool.amount > 0 && slPool.totalCost > 0) {
+          const inheritAmount = Math.min(t.amount, slPool.amount);
+          const pricePerUnit = slPool.totalCost / slPool.amount;
+          costForLot = inheritAmount * pricePerUnit;
+          slPool.amount -= inheritAmount;
+          slPool.totalCost -= costForLot;
+          if (slPool.amount <= 1e-9) selfLoopCollateral.delete(slKey);
+          else selfLoopCollateral.set(slKey, slPool);
+        }
+      } else if (isStableSymbol(t.symbol)) {
+        costForLot =
+          stableFace > 0 ? stableCost * (t.amount / stableFace) : 0;
+      } else {
+        const share = volUsd > 0 ? t.usd / volUsd : 1 / Math.max(1, vols.length);
+        costForLot = residual * share;
+      }
       lots.acquire({
         symbol: t.symbol,
         tokenId: "",
@@ -660,6 +735,27 @@ function emitPositionEvent(
     const receiptIns = op.movement.filter(
       (m) => m.direction === "in" && isReceipt(m) && m.amount > 0,
     );
+    // Owner-методика 2026-06-10 (симметрично withdraw-carry): async-deposit
+    // creator (Tx A) уже посчитал НАСТОЯЩУЮ стоимость оплаты (stable по
+    // номиналу + consumed лоты волатильной оплаты) — паркуем её; fill (Tx B)
+    // забирает по linkedHash. Это ПРИОРИТЕТНЕЕ linkedCostBasisUsd из линкера:
+    // тот суммирует sync-priced movement.usd (POS-005 класс — testakk 0x450b:
+    // ETH-оплата 2.5 ETH по sync-цене $4 063 вместо $6 624 из лотов).
+    const depositLinkedHash = (op as { linkedHash?: string }).linkedHash;
+    if (
+      attributedCost > 0 &&
+      receiptIns.length === 0 &&
+      depositLinkedHash != null
+    ) {
+      pendingWithdrawCost.set(op.hash, attributedCost);
+    }
+    const parkedCost =
+      receiptIns.length > 0 && depositLinkedHash != null
+        ? pendingWithdrawCost.get(depositLinkedHash)
+        : undefined;
+    if (parkedCost != null && depositLinkedHash != null) {
+      pendingWithdrawCost.delete(depositLinkedHash);
+    }
     const linkedCost = (op as { linkedCostBasisUsd?: number })
       .linkedCostBasisUsd;
     const useLinkedCost =
@@ -667,7 +763,12 @@ function emitPositionEvent(
       Number.isFinite(linkedCost) &&
       linkedCost > 0 &&
       attributedCost <= 0;
-    let totalCostForReceipts = useLinkedCost ? linkedCost! : attributedCost;
+    let totalCostForReceipts =
+      parkedCost != null && parkedCost > 0 && attributedCost <= 0
+        ? parkedCost
+        : useLinkedCost
+          ? linkedCost!
+          : attributedCost;
     // UCB C5 Phase 3 v2 (Task #18): legacy `build.ts:handleSupply` создавал
     // receipt lot с cost = m.usd когда не было ни attributedCost (нет
     // out-side underlying) ни linkedCostBasisUsd (standalone mint без

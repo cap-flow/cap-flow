@@ -51,9 +51,11 @@ function findProtocolToken(
 }
 
 function sumOutgoingUsd(op: ClassifiedOp): number {
+  // Owner-методика 2026-06-10: «доллар = доллар» — стейблы по номиналу
+  // (m.usd у DeBank sync-priced: 9 000 USDC отдавались как $9 005.40).
   return op.movement
     .filter((m) => m.direction === "out")
-    .reduce((s, m) => s + (m.usd ?? 0), 0);
+    .reduce((s, m) => s + (m.isStable ? m.amount : (m.usd ?? 0)), 0);
 }
 
 /**

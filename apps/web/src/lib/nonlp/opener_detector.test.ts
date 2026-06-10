@@ -372,3 +372,45 @@ describe("Stage 2: OUT-side startUsd in resolveOpenersFromTransfers", () => {
     expect(r.openedInTokens[0]!.amount).toBe(300); // 200 + 100
   });
 });
+
+/**
+ * Owner-методика 2026-06-10 (testakk Artur GMX 0x70d9, ребаланс 2026-06-09):
+ * частичный вывод + ре-депозит = ПОСЛЕДОВАТЕЛЬНАЯ WAC по конкретному
+ * receipt-токену, НЕ «gross × netFraction задним числом».
+ *
+ *   buy  5 150.841208 GM за 9 000 USDC  → $1.7472874114/GM
+ *   burn 3 090 GM → списано 3 090 × 1.7472874114 = $5 399.12
+ *   buy  1 527.239336 GM за 2 308.038775 USDC
+ *   → startUsd = 9 000 − 5 399.12 + 2 308.04 = $5 908.92
+ *
+ * Анти-таргет (старое поведение): (9 000 + 2 308.04) × (3 588.08/6 678.08)
+ * = $6 075.55 — нарушает сохранение денег на $166.80 (списанная при продаже
+ * база + остаток ≠ вложенное).
+ */
+describe("sequential per-token WAC (owner methodology 2026-06-10)", () => {
+  const GM = "0x70d95587d40a2caf56bd97485ab3eec10bee6336";
+  const rebalance = [
+    // BUY №1: request (USDC → vault) + fill (mint GM з 0x0), async pair
+    tx({ hash: "0xreq1", timeStamp: 1000, from: WALLET, to: VAULT, contractAddress: USDC, value: "9000000000", tokenDecimal: 6, tokenSymbol: "USDC" }),
+    tx({ hash: "0xfill1", timeStamp: 1004, from: ZERO, to: WALLET, contractAddress: GM, value: "5150841208000000000000", tokenDecimal: 18, tokenSymbol: "GM" }),
+    // BURN: 3 090 GM уходит с кошелька (запрос на вывод)
+    tx({ hash: "0xburn1", timeStamp: 2000, from: WALLET, to: VAULT, contractAddress: GM, value: "3090000000000000000000", tokenDecimal: 18, tokenSymbol: "GM" }),
+    // BUY №2 (ре-депозит стейбл-ноги): request + fill
+    tx({ hash: "0xreq2", timeStamp: 3000, from: WALLET, to: VAULT, contractAddress: USDC, value: "2308038775", tokenDecimal: 6, tokenSymbol: "USDC" }),
+    tx({ hash: "0xfill2", timeStamp: 3004, from: ZERO, to: WALLET, contractAddress: GM, value: "1527239336000000000000", tokenDecimal: 18, tokenSymbol: "GM" }),
+  ];
+
+  it("startUsd = $5 908.92 (деньги сходятся), НЕ gross×frac $6 075.55", () => {
+    const op = resolveOpenersFromTransfers(rebalance, [GM], WALLET).get(GM)!;
+    expect(op).toBeDefined();
+    expect(op.startUsd).toBeGreaterThan(5907);
+    expect(op.startUsd!).toBeLessThan(5911);
+  });
+
+  it("сохранение денег: вложено − списано при продаже = остаток", () => {
+    const op = resolveOpenersFromTransfers(rebalance, [GM], WALLET).get(GM)!;
+    const invested = 9000 + 2308.038775;
+    const consumed = 3090 * (9000 / 5150.841208);
+    expect(op.startUsd!).toBeCloseTo(invested - consumed, 1);
+  });
+});

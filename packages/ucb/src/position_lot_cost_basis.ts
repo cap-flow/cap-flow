@@ -147,6 +147,8 @@ export function getPositionLotCostBasis(
   const tracker = new LotTracker(methodology);
 
   const sorted = [...args.ops].sort((a, b) => a.time - b.time);
+  // Для async-withdraw пар (burn в Tx A, ноги в Tx B) — лукап linked-операции.
+  const opByHash = new Map(sorted.map((o) => [o.hash, o]));
 
   for (const op of sorted) {
     if (op.status === "failed") continue;
@@ -404,13 +406,34 @@ export function getPositionLotCostBasis(
         (m) =>
           m.direction === "out" && m.isProtocolToken && m.amount > 0,
       );
-      const underlyingIns = op.movement.filter(
+      let underlyingIns = op.movement.filter(
         (m) =>
           m.direction === "in" &&
           !m.isProtocolToken &&
           !m.isStable &&
           m.amount > 0,
       );
+      let legsOp: ClassifiedOp = op;
+      // Owner-методика 2026-06-10 (async-withdraw GMX V2 и т.п.): burn
+      // (receipt OUT) и ноги (underlying IN) — РАЗНЫЕ tx; ноги достаём из
+      // linked-пары (`async_deposit_linker`). Без этого нога не попадала в
+      // purchase pool → uncovered → M6 оценивал её sync-ценой входа
+      // (testakk Artur: WBTC-нога $1 941 вместо унаследованных $1 624.55).
+      const linkedHash = (op as { linkedHash?: string }).linkedHash;
+      if (receiptOuts.length > 0 && underlyingIns.length === 0 && linkedHash) {
+        const linked = opByHash.get(linkedHash);
+        if (linked) {
+          legsOp = linked;
+          underlyingIns = linked.movement.filter(
+            (m) =>
+              m.direction === "in" &&
+              !m.isProtocolToken &&
+              !m.isStable &&
+              m.amount > 0 &&
+              !(m.symbol === "ETH" && m.amount < 0.001), // keeper-fee dust
+          );
+        }
+      }
       if (receiptOuts.length > 0) {
         // 1) Consume receipt-токены, accumulate их total cost basis.
         let totalReceiptCost = 0;
@@ -424,24 +447,33 @@ export function getPositionLotCostBasis(
           });
           totalReceiptCost += r.totalCostUsd;
         }
+        // 1b) Owner-правило: стейбл-нога забирает свою долю ПО НОМИНАЛУ
+        // (деньги «вернулись»), волатильным ногам достаётся ОСТАТОК.
+        const stableLegFace = legsOp.movement
+          .filter((m) => m.direction === "in" && m.isStable && m.amount > 0)
+          .reduce((s, m) => s + m.amount, 0);
+        const residualCost = Math.max(
+          0,
+          totalReceiptCost - Math.min(stableLegFace, totalReceiptCost),
+        );
         // 2) Acquire underlying IN с распределённым cost basis.
         const totalUnderlyingIn = underlyingIns.reduce(
           (s, m) => s + m.amount,
           0,
         );
-        if (totalReceiptCost > 0 && totalUnderlyingIn > 0) {
+        if (residualCost > 0 && totalUnderlyingIn > 0) {
           for (const m of underlyingIns) {
-            const share = totalReceiptCost * (m.amount / totalUnderlyingIn);
+            const share = residualCost * (m.amount / totalUnderlyingIn);
             tracker.acquire({
               walletId: args.walletId,
               symbol: m.symbol,
               amount: m.amount,
               costPerUnitUsd: share / m.amount,
               tokenId: m.tokenId,
-              chain: op.chain,
-              acquiredAt: op.time,
+              chain: legsOp.chain,
+              acquiredAt: legsOp.time,
               acquiredVia: "lp_close",
-              sourceHash: op.hash,
+              sourceHash: legsOp.hash,
             });
           }
         }

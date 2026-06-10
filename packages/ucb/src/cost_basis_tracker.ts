@@ -397,10 +397,20 @@ function attributeLpCloses(
     return `${op.protocol.id}|${op.chain}`;
   }
 
+  // ── Owner-методика 2026-06-10: receipt-bearing рынки (GMX V2 GM/GLV и
+  // подобные) считаются ОТДЕЛЬНО ОТ legacy-пулинга — последовательная WAC по
+  // КОНКРЕТНОМУ receipt-токену (tokenId), продажа списывает по WAC на момент,
+  // стейбл-нога по номиналу, остаток — волатильной ноге. Legacy (protocol,
+  // chain) pro-rata остаётся ТОЛЬКО для V3-style закрытий без receipt-токена
+  // (их семантика locked аудитом lex POS-001 2026-05-25).
+  const receiptAttribution = attributeReceiptCloses(sortedOps, histPrices);
+  const receiptHandledOps = receiptAttribution.handledOps;
+
   // Первый проход: собираем deposit USD и closes по группам.
   for (const op of sortedOps) {
     if (op.status === "failed") continue;
     if (isJunkOp(op)) continue;
+    if (receiptHandledOps.has(op.hash)) continue; // не смешиваем с legacy-пулом
 
     if (op.type === "lp_add") {
       const key = keyForOp(op);
@@ -442,6 +452,10 @@ function attributeLpCloses(
 
   // Второй проход: для каждого close распределяем долю от depositUsd.
   const out = new Map<string, Map<string, LpCloseAttribution>>();
+  // Receipt-рынки уже посчитаны последовательной WAC — кладём их атрибуции.
+  for (const [hash, perSymbol] of receiptAttribution.attribution) {
+    out.set(hash, perSymbol);
+  }
   for (const g of groups.values()) {
     if (g.depositUsd <= 0 || g.closes.length === 0) continue;
     const sumCloseUsd = g.closes.reduce((s, c) => s + c.totalUsd, 0);
@@ -469,4 +483,166 @@ function attributeLpCloses(
     }
   }
   return out;
+}
+
+/**
+ * Owner-методика 2026-06-10 (testakk Artur GMX rebalance) — атрибуция
+ * закрытий receipt-bearing рынков (GM/GLV/…):
+ *
+ *   1. Покупка: цена GM = уплаченный стейбл (номинал) / полученные GM —
+ *      по КОНКРЕТНОМУ receipt-токену (tokenId), рынки не смешиваются.
+ *      Оплата живёт в этой же tx ИЛИ в async-паре (op.linkedHash от
+ *      `async_deposit_linker`). Нестейбл-оплата — по hist-цене.
+ *   2. Продажа (burn): списание по WAC, действующей НА МОМЕНТ продажи.
+ *   3. Ноги (приходят в paired executeWithdrawal): стейбл по номиналу
+ *      (cap = списанная стоимость), ОСТАТОК — волатильным ногам по
+ *      USD-долям. Σ(стоимость ног) = списанная стоимость (деньги сходятся).
+ *
+ * Возвращает атрибуции, ключованные hash'ем НОГ-операции (как legacy), и
+ * множество всех задействованных op-hash'ей (исключаются из legacy-пула).
+ */
+function attributeReceiptCloses(
+  sortedOps: ClassifiedOp[],
+  histPrices: Map<string, number>,
+): {
+  attribution: Map<string, Map<string, LpCloseAttribution>>;
+  handledOps: Set<string>;
+} {
+  const attribution = new Map<string, Map<string, LpCloseAttribution>>();
+  const handledOps = new Set<string>();
+  const byHash = new Map(sortedOps.map((o) => [o.hash, o]));
+
+  interface Ev {
+    time: number;
+    kind: "buy" | "burn";
+    amount: number;
+    costUsd?: number; // для buy
+    burnOp?: ClassifiedOp; // для burn (его linkedHash → ноги)
+  }
+  /** receipt tokenId → события. */
+  const markets = new Map<string, Ev[]>();
+  const seenEv = new Set<string>(); // `${tokenId}|${hash}` дедуп
+
+  const receiptOf = (op: ClassifiedOp, dir: "in" | "out"): TokenMovement | undefined =>
+    op.movement.find(
+      (m) =>
+        m.direction === dir &&
+        m.amount > 0 &&
+        isReceiptOfProtocol(m.symbol, op.protocol?.id ?? "", m.tokenId),
+    );
+
+  const paymentUsd = (ops: (ClassifiedOp | undefined)[], receiptTokenId: string): number => {
+    let usd = 0;
+    const seen = new Set<string>();
+    for (const o of ops) {
+      if (!o || seen.has(o.hash)) continue;
+      seen.add(o.hash);
+      for (const m of o.movement) {
+        if (m.direction !== "out" || m.amount <= 0) continue;
+        if (m.tokenId === receiptTokenId) continue;
+        // газ-пыль ETH (execution fee GMX)
+        if ((m.symbol === "ETH" || m.symbol === "WETH") && m.amount < 0.01) continue;
+        usd += isStableSymbol(m.symbol) ? m.amount : movementUsd(m, o.chain, o.time, histPrices);
+      }
+    }
+    return usd;
+  };
+
+  for (const op of sortedOps) {
+    if (op.status === "failed" || isJunkOp(op)) continue;
+    if (op.type !== "lp_add" && op.type !== "lp_remove") continue;
+
+    if (op.type === "lp_add") {
+      const rIn = receiptOf(op, "in");
+      if (!rIn) continue;
+      const evKey = `${rIn.tokenId}|${op.hash}`;
+      if (seenEv.has(evKey)) continue;
+      seenEv.add(evKey);
+      const linked = (op as { linkedHash?: string }).linkedHash;
+      const pay = linked ? byHash.get(linked) : undefined;
+      const cost = paymentUsd([op, pay], rIn.tokenId);
+      const evs = markets.get(rIn.tokenId) ?? [];
+      evs.push({ time: op.time, kind: "buy", amount: rIn.amount, costUsd: cost });
+      markets.set(rIn.tokenId, evs);
+      handledOps.add(op.hash);
+      if (pay) handledOps.add(pay.hash);
+      continue;
+    }
+
+    // lp_remove: burn-op (receipt OUT)
+    const rOut = receiptOf(op, "out");
+    if (!rOut) continue;
+    const evKey = `${rOut.tokenId}|${op.hash}`;
+    if (seenEv.has(evKey)) continue;
+    seenEv.add(evKey);
+    const evs = markets.get(rOut.tokenId) ?? [];
+    evs.push({ time: op.time, kind: "burn", amount: rOut.amount, burnOp: op });
+    markets.set(rOut.tokenId, evs);
+    handledOps.add(op.hash);
+    const linked = (op as { linkedHash?: string }).linkedHash;
+    if (linked) handledOps.add(linked);
+  }
+
+  // Последовательная WAC per market.
+  for (const evs of markets.values()) {
+    evs.sort((a, b) => a.time - b.time);
+    let qty = 0;
+    let basis = 0;
+    for (const e of evs) {
+      if (e.kind === "buy") {
+        if (!(e.costUsd! > 0)) continue; // неоценимая покупка — пропуск (как legacy null)
+        qty += e.amount;
+        basis += e.costUsd!;
+        continue;
+      }
+      // burn
+      if (qty <= 0) continue;
+      const wac = basis / qty;
+      const take = Math.min(e.amount, qty);
+      const consumed = take * wac;
+      qty -= take;
+      basis -= consumed;
+
+      const burnOp = e.burnOp!;
+      const linked = (burnOp as { linkedHash?: string }).linkedHash;
+      const legsOp = linked ? byHash.get(linked) : undefined;
+      const legsSrc = legsOp ?? burnOp;
+      const legs = legsSrc.movement.filter(
+        (m) =>
+          m.direction === "in" &&
+          m.amount > 0 &&
+          !(m.symbol === "ETH" && m.amount < 0.001), // keeper fee refund dust
+      );
+      if (legs.length === 0) continue;
+
+      const stables = legs.filter((m) => isStableSymbol(m.symbol));
+      const vols = legs.filter((m) => !isStableSymbol(m.symbol));
+      const stableFace = stables.reduce((s, m) => s + m.amount, 0);
+      const stableCost = Math.min(stableFace, consumed);
+      const residual = Math.max(0, consumed - stableCost);
+      const volUsd = vols.reduce(
+        (s, m) => s + movementUsd(m, legsSrc.chain, legsSrc.time, histPrices),
+        0,
+      );
+
+      const perSymbol = new Map<string, LpCloseAttribution>();
+      const put = (sym: string, amount: number, costUsd: number) => {
+        const key = normalizeSymbol(sym);
+        const prev = perSymbol.get(key);
+        if (prev) perSymbol.set(key, { amount: prev.amount + amount, costUsd: prev.costUsd + costUsd });
+        else perSymbol.set(key, { amount, costUsd });
+      };
+      for (const m of stables) {
+        put(m.symbol, m.amount, stableFace > 0 ? stableCost * (m.amount / stableFace) : 0);
+      }
+      for (const m of vols) {
+        const mUsd = movementUsd(m, legsSrc.chain, legsSrc.time, histPrices);
+        const share = volUsd > 0 ? mUsd / volUsd : 1 / Math.max(1, vols.length);
+        put(m.symbol, m.amount, residual * share);
+      }
+      attribution.set(legsSrc.hash, perSymbol);
+    }
+  }
+
+  return { attribution, handledOps };
 }

@@ -14,7 +14,7 @@
  *   - resolveOpenerBlocksFromAlchemy   → Alchemy transfers (only `blockNumber`,
  *     timestamp resolved separately by the caller via eth_getBlockByNumber)
  */
-import { startUsdFromStableOut } from "./non_lp_cost_basis.js";
+import { isUsdStable, startUsdFromStableOut } from "./non_lp_cost_basis.js";
 import type { NonLpOpener, OpenedInToken } from "./non_lp_opener.js";
 
 /**
@@ -71,6 +71,60 @@ interface AsyncPairLeg {
   contractAddress: string;
   /** Ordering key: timeStamp (Etherscan) or blockNumber (Alchemy). */
   order: number;
+}
+
+/**
+ * Owner-методика 2026-06-10 — ПОСЛЕДОВАТЕЛЬНАЯ WAC по конкретному
+ * receipt-токену (testakk Artur GMX rebalance):
+ *   - покупка: цена = уплаченный стейбл (номинал) / полученный receipt;
+ *     WAC пересчитывается после каждой покупки;
+ *   - продажа: списание по WAC, действующей НА МОМЕНТ продажи;
+ *   - startUsd = остаток basis после всей истории.
+ *
+ * Это НЕ эквивалентно «gross × netFraction»: gross-вариант смешивает лоты
+ * задним числом и нарушает сохранение денег (вложено ≠ списано + остаток),
+ * на testakk 0x70d9 даёт +$166.80.
+ *
+ * Возвращает null если хоть одна покупка неоценима в стейблах (нестейбловая
+ * оплата → Stage 2b исторические цены, как и раньше).
+ */
+export interface ReceiptFlowEvent {
+  /** Ordering key: timeStamp (Etherscan) или blockNumber (Alchemy). */
+  order: number;
+  /** Receipt-токен пришёл на кошелёк в этой tx (mint/возврат). */
+  receiptIn: number;
+  /** Receipt-токен ушёл с кошелька (запрос на вывод/сжигание). */
+  receiptOut: number;
+  /** Σ стейблов, уплаченных в этой tx + её async-request паре (номинал). */
+  stablePaid: number;
+  /** В оплате есть нестейбл (ETH/WBTC/…) → последовательная оценка невозможна. */
+  hasUnpriceablePayment: boolean;
+}
+
+export function sequentialReceiptStartUsd(
+  events: readonly ReceiptFlowEvent[],
+): number | null {
+  const sorted = [...events].sort((a, b) => a.order - b.order);
+  let qty = 0;
+  let basis = 0;
+  let sawBuy = false;
+  for (const e of sorted) {
+    // Сначала расход (для tx где есть и in и out — консервативно).
+    if (e.receiptOut > 0 && qty > 0) {
+      const take = Math.min(e.receiptOut, qty);
+      const wac = basis / qty;
+      qty -= take;
+      basis -= take * wac;
+    }
+    if (e.receiptIn > 0) {
+      if (e.hasUnpriceablePayment || !(e.stablePaid > 0)) return null;
+      qty += e.receiptIn;
+      basis += e.stablePaid;
+      sawBuy = true;
+    }
+  }
+  if (!sawBuy) return null;
+  return basis > 0 ? basis : 0;
 }
 
 /**
@@ -137,12 +191,12 @@ function collectDepositHashes(
  * non-receipt token, received nothing — request signature, excludes swaps) tx
  * within the window. Its hash → deposit-hashes.
  */
-function collectAsyncRequestHashes(
+function collectAsyncRequestPairs(
   legs: readonly AsyncPairLeg[],
   lp: string,
   walletLower: string,
   windowSpan: number,
-): Set<string> {
+): Map<string, string> {
   const hashesWithWalletIn = new Set<string>();
   const hashesWithWalletOut = new Set<string>();
   for (const t of legs) {
@@ -152,7 +206,8 @@ function collectAsyncRequestHashes(
     }
   }
 
-  const out = new Set<string>();
+  /** mint(fill)-tx hash → request-tx hash. */
+  const pairs = new Map<string, string>();
   for (const mint of legs) {
     const isFreshMint =
       mint.contractAddress === lp &&
@@ -175,8 +230,20 @@ function collectAsyncRequestHashes(
         bestHash = t.hash;
       }
     }
-    if (bestHash) out.add(bestHash);
+    if (bestHash) pairs.set(mint.hash, bestHash);
   }
+  return pairs;
+}
+
+function collectAsyncRequestHashes(
+  legs: readonly AsyncPairLeg[],
+  lp: string,
+  walletLower: string,
+  windowSpan: number,
+): Set<string> {
+  const out = new Set(
+    collectAsyncRequestPairs(legs, lp, walletLower, windowSpan).values(),
+  );
   return out;
 }
 
@@ -229,14 +296,15 @@ export function resolveOpenersFromTransfers(
     );
     if (!hit) continue;
     const depositHashes = collectDepositHashes(sorted, lp, walletLower);
-    // async request/fill (GMX V2 GLV/GM): add request-tx hashes where the
-    // underlying went to the deposit vault in a tx separate from the mint.
-    for (const h of collectAsyncRequestHashes(
+    // async request/fill (GMX V2 GLV/GM): request-tx hashes + per-mint пары,
+    // чтобы стоимость каждой покупки легла на СВОЙ mint (sequential WAC).
+    const requestPairs = collectAsyncRequestPairs(
       sorted.map((t) => ({ ...t, order: t.timeStamp })),
       lp,
       walletLower,
       ASYNC_DEPOSIT_WINDOW_SEC,
-    )) {
+    );
+    for (const h of requestPairs.values()) {
       depositHashes.add(h);
     }
     const openedInTokens = extractOpenedInTokens(
@@ -246,14 +314,58 @@ export function resolveOpenersFromTransfers(
       lp,
     );
     const frac = receiptNetFraction(sorted, lp, walletLower);
-    const grossStartUsd = startUsdFromStableOut(openedInTokens);
+
+    // Owner-методика 2026-06-10: последовательная per-token WAC вместо
+    // «gross × netFraction» (gross смешивает лоты задним числом; testakk
+    // 0x70d9: $6 075.55 вместо корректных $5 908.92).
+    const byTx = new Map<string, ReceiptFlowEvent>();
+    const txOf = (h: string, order: number): ReceiptFlowEvent => {
+      let e = byTx.get(h);
+      if (!e) {
+        e = { order, receiptIn: 0, receiptOut: 0, stablePaid: 0, hasUnpriceablePayment: false };
+        byTx.set(h, e);
+      }
+      return e;
+    };
+    const paymentOf = (hash: string): { stable: number; unpriceable: boolean } => {
+      let stable = 0;
+      let unpriceable = false;
+      for (const t of sorted) {
+        if (t.hash !== hash || t.from !== walletLower) continue;
+        if (t.contractAddress === lp) continue; // receipt не «расход»
+        const amt = Number(t.value) / 10 ** t.tokenDecimal;
+        if (!(amt > 0)) continue;
+        if (isUsdStable(t.tokenSymbol)) stable += amt;
+        else unpriceable = true; // нестейбл-оплата → Stage 2b
+      }
+      return { stable, unpriceable };
+    };
+    for (const t of sorted) {
+      if (t.contractAddress !== lp) continue;
+      const amt = Number(t.value) / 10 ** t.tokenDecimal;
+      if (!(amt > 0)) continue;
+      if (t.to === walletLower) {
+        const e = txOf(t.hash, t.timeStamp);
+        e.receiptIn += amt;
+        const own = paymentOf(t.hash);
+        const req = requestPairs.has(t.hash)
+          ? paymentOf(requestPairs.get(t.hash)!)
+          : { stable: 0, unpriceable: false };
+        e.stablePaid = own.stable + req.stable;
+        e.hasUnpriceablePayment = own.unpriceable || req.unpriceable;
+      } else if (t.from === walletLower) {
+        txOf(t.hash, t.timeStamp).receiptOut += amt;
+      }
+    }
+    const seqStartUsd = sequentialReceiptStartUsd([...byTx.values()]);
+
     out.set(lp, {
       openedAt: hit.timeStamp,
       openBlock: hit.blockNumber,
       txHash: hit.hash,
       receiptAmount: Number(hit.value) / 10 ** hit.tokenDecimal,
       openedInTokens,
-      startUsd: grossStartUsd != null ? grossStartUsd * frac : null,
+      startUsd: seqStartUsd,
       receiptNetFraction: frac,
     });
   }
