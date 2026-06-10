@@ -28,7 +28,6 @@ import {
   type FiatCurrency,
   type FiatPurchaseAnnotation,
 } from "@/lib/portfolio/manual_annotations";
-import { useUsdRub } from "@/lib/dashboard/fxRate";
 import { isStableSymbol, tokenFamily } from "@/lib/portfolio/protocols";
 import { looksLikeSpam } from "@/lib/portfolio/spl_tokens";
 import type { ClassifiedOp } from "@/lib/portfolio/types";
@@ -83,7 +82,6 @@ function BulkMarkerDialog({
   onClose: () => void;
 }) {
   const { locale } = useI18n();
-  const { rate: usdRubRate } = useUsdRub();
   const [annotations, setAnnotations] = useOpAnnotations();
 
   const [hideSpam, setHideSpam] = useState(true);
@@ -151,23 +149,10 @@ function BulkMarkerDialog({
   const totalFiat = Number(totalFiatStr.replace(/\s/g, "").replace(",", "."));
   const validFiat = Number.isFinite(totalFiat) && totalFiat > 0;
 
-  // Курс фиат/$ для фиксации стартового капитала в долларах. По умолчанию —
-  // текущий курс ЦБ, пользователь может поправить. Для USD не нужен.
+  // Owner-решение 2026-06-10: курс ₽/$ вручную НЕ нужен. Стартовый капитал в $
+  // = СТОИМОСТЬ полученного: стейбл → номинал ($1/токен), USD-фиат → сама
+  // сумма. Курс ЦБ давал курсовую фикцию (см. одиночный диалог).
   const isUsd = currency === "USD";
-  const [usdRateStr, setUsdRateStr] = useState("");
-  const [rateTouched, setRateTouched] = useState(false);
-  useEffect(() => {
-    if (rateTouched) return;
-    setUsdRateStr(usdRubRate > 0 ? usdRubRate.toFixed(2) : "");
-  }, [usdRubRate, rateTouched]);
-  const parsedUsdRate = Number(usdRateStr.replace(/\s/g, "").replace(",", "."));
-  const effectiveUsdRate =
-    Number.isFinite(parsedUsdRate) && parsedUsdRate > 0 ? parsedUsdRate : 0;
-  const totalUsd = isUsd
-    ? totalFiat
-    : effectiveUsdRate > 0
-      ? totalFiat / effectiveUsdRate
-      : 0;
 
   // Ключ ops для multi-select.
   const opKey = (u: UnmarkedOp) => `${u.walletId}|${u.chain}|${u.hash}`;
@@ -187,6 +172,18 @@ function BulkMarkerDialog({
     validFiat && selectedTotalTokenAmount > 0
       ? totalFiat / selectedTotalTokenAmount
       : 0;
+
+  // $-стоимость выбранного (стартовый капитал): USD-фиат → сама сумма;
+  // иначе → Σ номиналов стейблов ($1/токен). Non-stable в $ не оценивается.
+  const selectedStableAmount = selectedOps.reduce(
+    (s, o) => s + (o.isStable ? o.amount : 0),
+    0,
+  );
+  const hasNonStableSelected = selectedOps.some((o) => !o.isStable);
+  const totalUsd = isUsd ? totalFiat : selectedStableAmount;
+  // Подразумеваемый курс фиат/$ — для прозрачности (Σ фиата / $-стоимость).
+  const impliedUsdRate =
+    !isUsd && totalUsd > 0 && validFiat ? totalFiat / totalUsd : 0;
 
   // Сбрасываем selected когда меняются фильтры (отбрасываем ops которые
   // больше не видны).
@@ -215,10 +212,8 @@ function BulkMarkerDialog({
   const selectAll = () => setSelected(new Set(unmarked.map(opKey)));
   const clearAll = () => setSelected(new Set());
 
-  const validRate = isUsd || effectiveUsdRate > 0;
-
   const apply = () => {
-    if (!validFiat || !validRate || selectedOps.length === 0) return;
+    if (!validFiat || selectedOps.length === 0) return;
     setAnnotations((prev) => {
       const next = { ...prev };
       for (const u of selectedOps) {
@@ -234,12 +229,14 @@ function BulkMarkerDialog({
           fiatAmount: fiatAmt,
           fiatCurrency: currency,
         };
-        // Фиксируем $-эквивалент (стартовый капитал в долларах).
+        // $-эквивалент (стартовый капитал) = стоимость полученного:
+        // USD-фиат → fiatAmt; стейбл → номинал ($1/токен); non-stable → не
+        // пишем (metrics-фолбэк). Курс ₽/$ больше не спрашиваем.
         if (isUsd) {
           fp.usdAmount = fiatAmt;
-        } else if (effectiveUsdRate > 0) {
-          fp.usdAmount = fiatAmt / effectiveUsdRate;
-          fp.usdRate = effectiveUsdRate;
+        } else if (u.isStable) {
+          fp.usdAmount = u.amount;
+          if (u.amount > 0) fp.usdRate = fiatAmt / u.amount;
         }
         next[k] = {
           ...(next[k] ?? {}),
@@ -269,7 +266,7 @@ function BulkMarkerDialog({
             Отмена
           </Button>
           <Button
-            disabled={!validFiat || !validRate || selectedTotalCount === 0}
+            disabled={!validFiat || selectedTotalCount === 0}
             onClick={apply}
           >
             Применить ({selectedTotalCount} опер.)
@@ -428,33 +425,6 @@ function BulkMarkerDialog({
               </div>
             </div>
 
-            {/* Курс фиат/$ — фиксирует стартовый капитал в долларах. */}
-            {!isUsd && (
-              <div>
-                <Label htmlFor="bm-rate">
-                  Курс {fiatSymbol(currency)}/$
-                  <span className="ml-1 text-[10px] text-muted-foreground">
-                    (фиксирует стартовый капитал в $)
-                  </span>
-                </Label>
-                <Input
-                  id="bm-rate"
-                  inputMode="decimal"
-                  value={usdRateStr}
-                  onChange={(e) => {
-                    setRateTouched(true);
-                    setUsdRateStr(e.target.value);
-                  }}
-                  placeholder={usdRubRate > 0 ? usdRubRate.toFixed(2) : "90"}
-                />
-                <p className="mt-1 text-[10px] text-muted-foreground">
-                  {rateTouched
-                    ? "зафиксирован вручную"
-                    : `по умолчанию — текущий курс ЦБ (${formatNumber(usdRubRate, locale, 2)} ₽/$)`}
-                </p>
-              </div>
-            )}
-
             {/* Превью */}
             {validFiat && selectedTotalCount > 0 && (
               <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs">
@@ -485,9 +455,16 @@ function BulkMarkerDialog({
                       ${formatNumber(totalUsd, locale, 2)}
                     </span>{" "}
                     <span className="text-[10px]">
-                      (по курсу {formatNumber(effectiveUsdRate, locale, 2)}{" "}
+                      (номинал стейблов · курс{" "}
+                      {formatNumber(impliedUsdRate, locale, 2)}{" "}
                       {fiatSymbol(currency)}/$)
                     </span>
+                  </div>
+                )}
+                {hasNonStableSelected && !isUsd && (
+                  <div className="mt-1 text-[10px] text-warning">
+                    В выборе есть не-стейбл токены — их $-стоимость здесь не
+                    фиксируется (только стейблы идут по номиналу).
                   </div>
                 )}
               </div>
