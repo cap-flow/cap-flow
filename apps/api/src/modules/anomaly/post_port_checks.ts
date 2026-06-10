@@ -100,9 +100,15 @@ export function matchCanonical(
     if (p.walletId !== g.walletId) return false;
     if (p.chain !== g.chain || p.protocol.id !== g.protocolId) return false;
     if (g.marketKey) {
-      return (
-        eqKey(p.matchedV3TokenId, g.marketKey) || eqKey(p.lpTokenId, g.marketKey)
-      );
+      const mkOk =
+        eqKey(p.matchedV3TokenId, g.marketKey) || eqKey(p.lpTokenId, g.marketKey);
+      if (!mkOk) return false;
+      // 2026-06-10 (testakk Fluid): два инстанса одного рынка (ETH-vault и
+      // WBTC-vault делят lpTokenId 0x324c…) — marketKey-only матч брал первый
+      // попавшийся → WBTC-golden дрейфовал против ETH-позиции. Если у эталона
+      // есть openHash — он обязан совпасть.
+      if (g.openHash) return eqKey(p.openHash, g.openHash);
+      return true;
     }
     if (g.openHash) return eqKey(p.openHash, g.openHash);
     return true; // chain+protocol only (rare; e.g. single-position protocol)
