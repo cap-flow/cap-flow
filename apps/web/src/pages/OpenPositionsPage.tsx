@@ -3657,7 +3657,18 @@ function V3InfoButton({
             <V3RangeBlock
               key={pos.tokenId.toString()}
               pos={pos}
-              depositUsd={v3?.depositUsd ?? 0}
+              // 2026-06-10 (egorov POS-003 audit): безубыток обязан считаться
+              // от ТОГО ЖЕ депозита, что и «Стартовая $» в листе (p.startUsd —
+              // post-override: Krystal/opener, deposit-time цены). Внутренний
+              // v3.depositUsd на ETH-ноге падал в m.usd (sync-цена DeBank
+              // $1620/ETH) → безубыток $1736 вместо $2187. Для карточки с
+              // несколькими NFT p.startUsd покрывает все — оставляем
+              // per-NFT v3.depositUsd (та же семантика, что была).
+              depositUsd={
+                onChain.length === 1 && p.startUsd > 0
+                  ? p.startUsd
+                  : (v3?.depositUsd ?? 0)
+              }
               depositTokens={v3?.depositTokens ?? []}
             />
           ))
