@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch --env-file=../../.env src/server.ts",
+    "dev": "pnpm run \"/^dev:(server|worker)$/\"",
+    "dev:server": "tsx watch --env-file=../../.env src/server.ts",
     "dev:worker": "tsx watch --env-file=../../.env src/worker.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",

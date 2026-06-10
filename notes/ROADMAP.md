@@ -5,6 +5,16 @@ updated: 2026-05-21 (Design System v1 brief — переход на брендб
 
 # ROADMAP
 
+## 🧮 UCB: последовательная per-token WAC — owner-методика (2026-06-10)
+
+Locked на живом кейсе testakk/Artur (ребаланс GMX 09.06). Движок приведён к
+методике во всех слоях (canonical lots, opener, lending walker, атрибуция ног,
+rewards@market, классификатор withdrawCollateral≠borrow). Эталоны POS-101…105,
+golden_case_drift 0/5. Попутно: фикс фиче-флагов фронта (api.get без schema →
+все public-флаги false, B6-адопция не включалась), opener-кэш v6/24h,
+`pnpm dev` в apps/api поднимает server+worker. Детали:
+`notes/decisions/ucb-sequential-wac-2026-06-10.md`.
+
 ## 🎨 Design System v1 — переход на брендбук Capflow (2026-05-21)
 
 **Контекст**: брендбук Capflow v1.0 готов как редакторский документ. Текущее
