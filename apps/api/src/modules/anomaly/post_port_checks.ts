@@ -465,11 +465,38 @@ export function checkTrackerDivergence(
   positions: readonly CanonicalPosition[],
 ): AnomalyFinding[] {
   const out: AnomalyFinding[] = [];
+
+  // 2026-06-10 (testakk Fluid): сравнение НА УРОВНЕ АКТИВА. SoT-сторона
+  // (costBasisTrackerUsd) теперь = сумма всех корзин трекера по
+  // (wallet, protocol, asset) — см. ucb.service. Симметрично display-сторона
+  // группируется по тому же ключу: два волта одного актива сравниваются как
+  // Σ display vs SoT, а не каждый против общей суммы (иначе оба бы флагались).
+  interface Group {
+    positions: CanonicalPosition[];
+    displaySum: number;
+    trackerUsd: number;
+  }
+  const groups = new Map<string, Group>();
   for (const p of positions) {
     const tracker = p.costBasisTrackerUsd;
     if (tracker == null || !Number.isFinite(tracker)) continue;
-    const diff = Math.abs(p.startUsd - tracker);
-    const ref = Math.max(Math.abs(p.startUsd), Math.abs(tracker));
+    const assetKey = p.supplyTokens?.[0]?.symbol?.toUpperCase() ?? "?";
+    const key = `${p.walletId}|${p.protocol.id}|${p.chain}|${assetKey}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = { positions: [], displaySum: 0, trackerUsd: tracker };
+      groups.set(key, g);
+    }
+    g.positions.push(p);
+    g.displaySum += p.startUsd;
+    // costBasisTrackerUsd идентичен внутри группы (asset-level сумма) —
+    // берём максимум на случай старых shadow-строк со значением первой корзины.
+    g.trackerUsd = Math.max(g.trackerUsd, tracker);
+  }
+
+  for (const g of groups.values()) {
+    const diff = Math.abs(g.displaySum - g.trackerUsd);
+    const ref = Math.max(Math.abs(g.displaySum), Math.abs(g.trackerUsd));
     if (ref <= 0) continue;
     const overFloor = diff >= POST_PORT_THRESHOLDS.trackerDivergenceFloorUsd;
     const overPct = diff / ref >= POST_PORT_THRESHOLDS.trackerDivergencePct;
@@ -479,23 +506,26 @@ export function checkTrackerDivergence(
       diff / ref >= POST_PORT_THRESHOLDS.divergenceErrorPct
         ? "error"
         : "warn";
+    // Флаг вешаем на крупнейшую позицию группы (стабильный якорь для upsert).
+    const anchor = [...g.positions].sort((a, b) => b.startUsd - a.startUsd)[0]!;
     out.push({
       checkId: "tracker_divergence",
       anomalyType: "cost_basis",
       severity,
       phase: "post",
-      observedValue: p.startUsd,
-      expectedValue: tracker,
-      positionId: p.id,
-      walletId: p.walletId,
-      chain: p.chain,
-      protocolId: p.protocol.id,
-      marketKey: marketKeyOf(p),
+      observedValue: g.displaySum,
+      expectedValue: g.trackerUsd,
+      positionId: anchor.id,
+      walletId: anchor.walletId,
+      chain: anchor.chain,
+      protocolId: anchor.protocol.id,
+      marketKey: marketKeyOf(anchor),
       detail: {
-        reason: `display startUsd $${p.startUsd.toFixed(2)} расходится с cross_protocol SoT $${tracker.toFixed(2)} (Δ $${diff.toFixed(2)}) — параллельный трекер разошёлся (класс aida token→token)`,
-        startUsd: p.startUsd,
-        costBasisTrackerUsd: tracker,
-        deltaUsd: p.startUsd - tracker,
+        reason: `display startUsd Σ$${g.displaySum.toFixed(2)} (${g.positions.length} поз.) расходится с cross_protocol SoT $${g.trackerUsd.toFixed(2)} (Δ $${diff.toFixed(2)}) — параллельный трекер разошёлся (класс aida token→token)`,
+        startUsd: g.displaySum,
+        costBasisTrackerUsd: g.trackerUsd,
+        deltaUsd: g.displaySum - g.trackerUsd,
+        groupSize: g.positions.length,
       },
     });
   }

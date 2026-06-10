@@ -431,4 +431,58 @@ describe("checkTrackerDivergence (display vs cross_protocol SoT)", () => {
       checkTrackerDivergence([pos({ startUsd: 5000, costBasisTrackerUsd: null })]),
     ).toHaveLength(0);
   });
+
+  // 2026-06-10 (testakk Fluid): asset-level сравнение. SoT — сумма всех корзин
+  // трекера по (wallet, proto, asset); display-сторона группируется так же.
+  it("receipt-less волт: display == asset-level SoT (сумма корзин) → 0 findings", () => {
+    // testakk Fluid WBTC: 3 завода = 2 корзины трекера; SoT = $31624.68 (сумма).
+    expect(
+      checkTrackerDivergence([
+        pos({
+          protocol: { id: "arb_fluid" },
+          startUsd: 31624.68,
+          costBasisTrackerUsd: 31624.68,
+        }),
+      ]),
+    ).toHaveLength(0);
+  });
+
+  it("два волта одного актива: Σ display vs SoT — один групповой finding при дрейфе", () => {
+    const out = checkTrackerDivergence([
+      pos({
+        id: "POS-A",
+        protocol: { id: "arb_fluid" },
+        startUsd: 20000,
+        costBasisTrackerUsd: 35000, // asset-level сумма (одинакова в группе)
+      }),
+      pos({
+        id: "POS-B",
+        protocol: { id: "arb_fluid" },
+        startUsd: 10000,
+        costBasisTrackerUsd: 35000,
+      }),
+    ]);
+    // Σ display = 30000 vs SoT 35000 → ОДИН групповой флаг (не два).
+    expect(out).toHaveLength(1);
+    expect(out[0]!.observedValue).toBeCloseTo(30000, 2);
+    expect(out[0]!.expectedValue).toBeCloseTo(35000, 2);
+    expect(out[0]!.positionId).toBe("POS-A"); // якорь — крупнейшая позиция
+  });
+
+  it("два волта одного актива: Σ display == SoT → 0 findings (раньше флагались оба)", () => {
+    expect(
+      checkTrackerDivergence([
+        pos({
+          protocol: { id: "arb_fluid" },
+          startUsd: 20000,
+          costBasisTrackerUsd: 30000,
+        }),
+        pos({
+          protocol: { id: "arb_fluid" },
+          startUsd: 10000,
+          costBasisTrackerUsd: 30000,
+        }),
+      ]),
+    ).toHaveLength(0);
+  });
 });

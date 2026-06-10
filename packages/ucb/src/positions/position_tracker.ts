@@ -124,6 +124,27 @@ export class PositionTracker {
     return null;
   }
 
+  /**
+   * ВСЕ позиции с данным collateral (wallet+protocol). Для receipt-less
+   * протоколов (Fluid/Morpho Blue) supplies одного волта раскладываются по
+   * РАЗНЫМ ключам (волт-ключ от receipt-маркера + synthetic:proto:chain:SYMBOL)
+   * — testakk Artur: 3 завода WBTC во Fluid легли в 2 корзины. Asset-level
+   * SoT = СУММА по всем корзинам; `findByCollateral` (первая корзина)
+   * недосчитывал и давал ложный tracker_divergence.
+   */
+  findAllByCollateral(
+    walletId: string,
+    protocolId: string,
+    collateralSymbol: string,
+  ): Position[] {
+    const out: Position[] = [];
+    for (const p of this.positions.values()) {
+      if (p.walletId !== walletId || p.protocolId !== protocolId) continue;
+      if (p.collateralSymbols.includes(collateralSymbol)) out.push(p);
+    }
+    return out;
+  }
+
   // ─── Private ─────────────────────────────────────────────────────────
 
   private deltaCostBasis(event: PositionEvent): number {

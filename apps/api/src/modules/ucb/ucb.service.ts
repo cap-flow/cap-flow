@@ -308,13 +308,22 @@ export async function computePositions(
     if (p.kind !== "lending") return p;
     const tracker = trackersByWallet.get(p.walletId);
     if (!tracker) return p;
-    let entry = null;
+    // 2026-06-10 (testakk Fluid): asset-level SoT = СУММА всех корзин трекера
+    // с этим collateral. Receipt-less протоколы раскладывают supplies одного
+    // волта по разным market-ключам (волт-ключ + synthetic) — первая корзина
+    // недосчитывала ($20k из $31.6k) → ложный tracker_divergence. Чек на своей
+    // стороне группирует display-позиции по тому же (wallet, proto, asset).
     for (const t of p.supplyTokens) {
-      entry = tracker.findByCollateral(p.walletId, p.protocol.id, t.symbol);
-      if (entry) break;
+      const entries = tracker.findAllByCollateral(
+        p.walletId,
+        p.protocol.id,
+        t.symbol,
+      );
+      if (entries.length === 0) continue;
+      const sum = entries.reduce((s, e) => s + e.currentCostBasisUsd, 0);
+      return { ...p, costBasisTrackerUsd: sum };
     }
-    if (!entry) return p;
-    return { ...p, costBasisTrackerUsd: entry.currentCostBasisUsd };
+    return p;
   });
 
   // V3 cost-basis (B3 step6/7) remains a guarded no-op here.
