@@ -34,8 +34,14 @@ import { keyOf, nonLpOpenerKey } from "@cap-flow/ucb/non_lp_opener";
 // v5 (2026-06-01): partial-withdrawal netting (receiptNetFraction) — startUsd
 // receipt-токен позиций с частичным выводом изменился (POS-007 GMX $7122→$5268).
 // Bump инвалидирует stale v4 cost-basis у всех клиентов.
-const CACHE_KEY = "capflow.cache.nonlp.opener.v5";
-const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// v6 (2026-06-10): owner-методика — последовательная per-token WAC вместо
+// gross×netFraction (testakk 0x70d9: $6 075.55 → $5 908.92). Все v5-кэши
+// считаны старой формулой → bump. TTL срезан 7d→24h: openedAt — константа,
+// но startUsd/receiptNetFraction меняются КАЖДОЙ операцией юзера по позиции
+// (инцидент testakk: ребаланс 09.06 не отражался неделю — кэш держал
+// до-ребалансные $9 000 с frac=1).
+const CACHE_KEY = "capflow.cache.nonlp.opener.v6";
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface NonLpOpenerTarget {
   /** Уникальный ключ позиции — для матча обратно в OpenPosition. */
