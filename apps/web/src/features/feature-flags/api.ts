@@ -39,7 +39,11 @@ export const publicFeatureFlagsApi = {
       keys: keys.join(","),
     });
     if (accountId) params.set("accountId", accountId);
-    const res = await api.get(`/v1/me/feature-flags?${params.toString()}`);
-    return responseSchema.parse(res);
+    // ⚠ Фикс 2026-06-10: api.get ТРЕБУЕТ schema вторым аргументом (он сам
+    // делает schema.parse). Вызов без неё падал ПОСЛЕ fetch'а
+    // («Cannot read properties of undefined (reading 'parse')») → query
+    // вечно в error → ВСЕ публичные фиче-флаги резолвились в false на
+    // фронте (B6-адопция serverCanonical никогда не включалась).
+    return api.get(`/v1/me/feature-flags?${params.toString()}`, responseSchema);
   },
 };
