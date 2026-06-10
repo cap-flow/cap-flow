@@ -11,7 +11,7 @@
  * соответствующем типе показывается зелёный/жёлтый бейдж.
  */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Banknote,
   Landmark,
@@ -33,7 +33,7 @@ import {
   type FiatPurchaseAnnotation,
   type CreditAssetAnnotation,
 } from "@/lib/portfolio/manual_annotations";
-import { useUsdRub } from "@/lib/dashboard/fxRate";
+import { isStableSymbol } from "@/lib/portfolio/protocols";
 import { formatNumber } from "@/i18n/format";
 import { useI18n } from "@/i18n/I18nProvider";
 import { cn } from "@/lib/utils";
@@ -252,7 +252,6 @@ function FiatPurchaseDialog({
   onSave: (p: FiatPurchaseAnnotation) => void;
 }) {
   const { locale } = useI18n();
-  const { rate: usdRubRate } = useUsdRub();
   const [fiatAmount, setFiatAmount] = useState(
     initial ? String(initial.fiatAmount) : "",
   );
@@ -283,37 +282,29 @@ function FiatPurchaseDialog({
       : null;
 
   // --- Зафиксированный $-эквивалент (стартовый капитал в долларах) ---
-  // Для USD сумма уже в долларах. Для другого фиата — редактируемое поле:
-  // по умолчанию подставляем текущий курс ЦБ, пользователь может поправить
-  // на курс, по которому реально купил доллары. Значение сохраняется и НЕ
-  // пересчитывается потом по текущему курсу.
+  // Owner-решение 2026-06-10: НЕ спрашиваем $ вручную и НЕ конвертируем рубли
+  // по курсу ЦБ (это давало курсовую фикцию: 50 000 ₽ / 71.73 = $697 вместо
+  // реально полученных $665). Купили крипту за фиат → стартовый капитал в $ =
+  // СТОИМОСТЬ полученного актива:
+  //   • фиат уже в USD            → сама сумма;
+  //   • получен стейбл (USD₮0/…)  → номинал полученного ($1 за токен);
+  //   • иначе (волатильный актив) → $ неизвестен из этого диалога → не пишем
+  //     usdAmount (metrics.ts фолбэк), такие случаи размечаются отдельно.
   const isUsd = effectiveCurrency === "USD";
-  const [usdStr, setUsdStr] = useState(
-    initial?.usdAmount != null ? String(initial.usdAmount) : "",
-  );
-  // Поле тронуто вручную? Тогда не перетираем авто-подстановкой по курсу.
-  const [usdTouched, setUsdTouched] = useState(initial?.usdAmount != null);
-  const autoUsd =
-    validAmount && usdRubRate > 0 ? parsedAmount / usdRubRate : null;
-  useEffect(() => {
-    if (isUsd || usdTouched) return;
-    setUsdStr(autoUsd != null ? autoUsd.toFixed(2) : "");
-  }, [autoUsd, isUsd, usdTouched]);
-  const parsedUsd = Number(usdStr.replace(/\s/g, "").replace(",", "."));
-  // Итоговый $-эквивалент: USD → сама сумма; иначе → значение поля.
+  const primaryIsStable =
+    primaryToken != null && isStableSymbol(primaryToken.symbol);
   const usdAmountFinal = isUsd
     ? parsedAmount
-    : Number.isFinite(parsedUsd) && parsedUsd >= 0
-      ? parsedUsd
+    : primaryIsStable && primaryToken != null && primaryToken.amount > 0
+      ? primaryToken.amount
       : null;
-  // Подразумеваемый курс фиат/$ для отображения и аудита.
+  // Подразумеваемый курс фиат/$ для прозрачности/аудита.
   const usdRateImplied =
     !isUsd && usdAmountFinal != null && usdAmountFinal > 0
       ? parsedAmount / usdAmountFinal
       : null;
 
-  const valid =
-    validAmount && validCurrency && (isUsd || usdAmountFinal != null);
+  const valid = validAmount && validCurrency;
 
   return (
     <Dialog
@@ -428,41 +419,29 @@ function FiatPurchaseDialog({
             </div>
           </div>
         )}
-        {/* $-эквивалент — фиксируется в стартовый капитал. Для USD не нужен. */}
-        {!isUsd && (
-          <div>
-            <Label htmlFor="fp-usd">
-              Эквивалент в $
-              <span className="ml-1 text-[10px] text-muted-foreground">
-                (фиксируется в стартовый капитал)
-              </span>
-            </Label>
-            <div className="flex items-center gap-1.5">
-              <span className="text-sm text-muted-foreground">$</span>
-              <Input
-                id="fp-usd"
-                inputMode="decimal"
-                value={usdStr}
-                onChange={(e) => {
-                  setUsdTouched(true);
-                  setUsdStr(e.target.value);
-                }}
-                placeholder="0.00"
-              />
-            </div>
-            <p className="mt-1 text-[10px] text-muted-foreground">
-              {usdRateImplied != null ? (
-                <>
-                  Курс {formatNumber(usdRateImplied, locale, 2)}{" "}
-                  {fiatSymbol(effectiveCurrency)}/$ ·{" "}
-                </>
-              ) : null}
-              {usdTouched
-                ? "зафиксирован вручную"
-                : `по текущему курсу ЦБ (${formatNumber(usdRubRate, locale, 2)} ₽/$)`}
-            </p>
-          </div>
-        )}
+        {/* Что зафиксируется в стартовый капитал ($). Поле ручного ввода
+            убрано — для стейбла берём номинал полученного, для USD-фиата
+            саму сумму (owner 2026-06-10). */}
+        {usdAmountFinal != null ? (
+          <p className="text-[11px] text-muted-foreground">
+            В стартовый капитал:{" "}
+            <span className="font-semibold text-foreground tabular-nums">
+              ${formatNumber(usdAmountFinal, locale, 2)}
+            </span>
+            {usdRateImplied != null && !isUsd ? (
+              <>
+                {" "}
+                · курс {formatNumber(usdRateImplied, locale, 2)}{" "}
+                {fiatSymbol(effectiveCurrency)}/$
+              </>
+            ) : null}
+          </p>
+        ) : !isUsd && primaryToken != null ? (
+          <p className="text-[11px] text-warning">
+            {primaryToken.symbol} — не стейбл: $-эквивалент не зафиксируется
+            здесь (разметьте стоимость отдельно).
+          </p>
+        ) : null}
         <div>
           <Label htmlFor="fp-note">
             Заметка{" "}
