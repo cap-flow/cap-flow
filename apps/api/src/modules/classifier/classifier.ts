@@ -495,6 +495,15 @@ function classifyLending(
   // Receipt-less protocols (Morpho Blue, …): no receipt in wallet, use
   // direction + asset-type heuristics on underlyings.
   if (!sends.length && receives.length) {
+    // Owner-методика 2026-06-10 (testakk Artur, Morpho withdrawCollateral):
+    // receives-only НЕ всегда borrow. Симметрично sends-ветке ниже:
+    // стейбл — типичная заёмная валюта → borrow; non-stable (WBTC/ETH/GLV) —
+    // типичный возврат залога → lend_withdraw. (Зеркало фикса в
+    // apps/web/src/lib/portfolio/classifier.ts — держать в синхроне!)
+    const allNonStable = receives.every((r) => !r.isStable);
+    if (allNonStable) {
+      return base(it, seq, "lend_withdraw", protocol, movement, status);
+    }
     return base(it, seq, "borrow", protocol, movement, status);
   }
   if (sends.length && !receives.length) {

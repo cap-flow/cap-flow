@@ -551,6 +551,20 @@ function classifyLending(
   //     с note "compound-supply-borrow". Reducer Phase 4+ разнесёт это в
   //     compound events; пока трактуем как supply.
   if (!sends.length && receives.length) {
+    // Owner-методика 2026-06-10 (testakk Artur, Morpho withdrawCollateral):
+    // receives-only из receipt-less lending НЕ всегда borrow. Симметрично
+    // sends-ветке ниже: стейбл — типичная ЗАЁМНАЯ валюта → borrow;
+    // non-stable (WBTC/ETH/GLV) — типичный ВОЗВРАТ ЗАЛОГА → lend_withdraw
+    // (Artur 06.12.2025: внёс 0.226 WBTC в Morpho, через 8 мин вынул те же
+    // 0.226 WBTC — классифицировалось как «займ», которого не было; лот
+    // получал чужую цену, в реестре отображался фантомный заём).
+    // Trade-off: займ волатильного актива (шорт) теперь тоже lend_withdraw —
+    // встречается сильно реже и cost-wise эквивалентен (strict-0 vs strict-0,
+    // selfLoop-наследование работает в обоих типах событий).
+    const allNonStable = receives.every((r) => !r.isStable);
+    if (allNonStable) {
+      return base(it, seq, "lend_withdraw", protocol, movement, status);
+    }
     return base(it, seq, "borrow", protocol, movement, status);
   }
   if (sends.length && !receives.length) {
