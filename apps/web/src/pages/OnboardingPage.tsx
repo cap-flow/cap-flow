@@ -20,7 +20,6 @@ import {
   CheckCircle2,
   Wallet as WalletIcon,
   Building2,
-  Globe,
   ArrowRight,
   Sparkles,
   Loader2,
@@ -32,11 +31,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import {
-  JURISDICTIONS,
-  getJurisdictionConfig,
-  type Jurisdiction,
-} from "@/lib/portfolio/tax_jurisdictions";
 import { useWallets, type WalletChain } from "@/lib/wallets";
 import { useLoadedWallets } from "@/components/data/LoadedWalletsProvider";
 import { isLikelyEvmAddress } from "@/lib/debank";
@@ -49,7 +43,6 @@ import { CexApiKeyInstructionsCard } from "@/components/cex/CexApiKeyInstruction
 import { verifyAllPositionsProvenance } from "@/lib/portfolio/position_provenance";
 
 const ONBOARDING_DONE_KEY = "capflow.onboarding.completed.v1";
-const ONBOARDING_JURISDICTION_KEY = "capflow.preferences.jurisdiction";
 
 export function isOnboardingDone(): boolean {
   try {
@@ -67,17 +60,8 @@ function setOnboardingDone(): void {
   }
 }
 
-function setPreferredJurisdiction(j: Jurisdiction): void {
-  try {
-    localStorage.setItem(ONBOARDING_JURISDICTION_KEY, j);
-  } catch {
-    /* ignore */
-  }
-}
-
 type WizardStep =
   | "welcome"
-  | "jurisdiction"
   | "wallet-add"
   | "wallet-report"
   | "cex-choose"
@@ -87,15 +71,13 @@ type WizardStep =
 export function OnboardingPage(): JSX.Element {
   const navigate = useNavigate();
   const [step, setStep] = useState<WizardStep>("welcome");
-  const [jurisdiction, setJurisdiction] = useState<Jurisdiction>("US");
   const [walletsAdded, setWalletsAdded] = useState<string[]>([]);
   const [chosenExchange, setChosenExchange] = useState<ExchangeId | null>(null);
 
   const wallets = useWallets();
-  const { load, loadedById } = useLoadedWallets();
+  const { load, loadedById, progress, error: loadError } = useLoadedWallets();
 
   const finish = (): void => {
-    setPreferredJurisdiction(jurisdiction);
     setOnboardingDone();
     navigate("/performance");
   };
@@ -105,16 +87,15 @@ export function OnboardingPage(): JSX.Element {
     navigate("/");
   };
 
-  // Progress dots — 6 шагов в основной flow.
+  // Progress dots — 5 шагов в основной flow (юрисдикция убрана).
   const stepIndex = (
     {
       welcome: 0,
-      jurisdiction: 1,
-      "wallet-add": 2,
-      "wallet-report": 3,
-      "cex-choose": 4,
-      "cex-instructions": 4,
-      done: 5,
+      "wallet-add": 1,
+      "wallet-report": 2,
+      "cex-choose": 3,
+      "cex-instructions": 3,
+      done: 4,
     } as Record<WizardStep, number>
   )[step];
 
@@ -123,7 +104,7 @@ export function OnboardingPage(): JSX.Element {
       <div className="w-full max-w-3xl space-y-6">
         {/* Progress dots */}
         <div className="flex justify-center gap-2">
-          {[0, 1, 2, 3, 4, 5].map((n) => (
+          {[0, 1, 2, 3, 4].map((n) => (
             <span
               key={n}
               className={
@@ -139,21 +120,14 @@ export function OnboardingPage(): JSX.Element {
         </div>
 
         {step === "welcome" && (
-          <WelcomeStep onNext={() => setStep("jurisdiction")} onSkip={skip} />
-        )}
-
-        {step === "jurisdiction" && (
-          <JurisdictionStep
-            value={jurisdiction}
-            onChange={setJurisdiction}
-            onNext={() => setStep("wallet-add")}
-            onBack={() => setStep("welcome")}
-          />
+          <WelcomeStep onNext={() => setStep("wallet-add")} onSkip={skip} />
         )}
 
         {step === "wallet-add" && (
           <AddWalletStep
             existingCount={walletsAdded.length}
+            progress={progress}
+            loadError={loadError}
             onWalletAdded={async (input) => {
               const added = wallets.add(input);
               const result = await load(added);
@@ -164,7 +138,7 @@ export function OnboardingPage(): JSX.Element {
               return result;
             }}
             onSkip={() => setStep("cex-choose")}
-            onBack={() => setStep("jurisdiction")}
+            onBack={() => setStep("welcome")}
           />
         )}
 
@@ -263,81 +237,17 @@ function WelcomeStep({
   );
 }
 
-function JurisdictionStep({
-  value,
-  onChange,
-  onNext,
-  onBack,
-}: {
-  value: Jurisdiction;
-  onChange: (j: Jurisdiction) => void;
-  onNext: () => void;
-  onBack: () => void;
-}): JSX.Element {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-2xl flex items-center gap-2">
-          <Globe className="h-6 w-6 text-brand-cyan" />
-          Налоговая юрисдикция
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4 text-sm">
-        <p>
-          Выбери страну — определит правила расчёта налогов: holding period,
-          разрешённые методики (FIFO/HIFO/WAC), token-to-token treatment.
-        </p>
-        <div className="space-y-2 max-h-72 overflow-y-auto">
-          {JURISDICTIONS.map((j) => {
-            const cfg = getJurisdictionConfig(j);
-            return (
-              <label
-                key={j}
-                className={
-                  "flex items-start gap-3 rounded border p-3 cursor-pointer transition " +
-                  (value === j
-                    ? "border-brand-cyan bg-brand-cyan/5"
-                    : "border-border hover:bg-accent/30")
-                }
-              >
-                <input
-                  type="radio"
-                  name="jurisdiction"
-                  value={j}
-                  checked={value === j}
-                  onChange={() => onChange(j)}
-                  className="mt-1"
-                />
-                <div className="flex-1">
-                  <div className="font-medium">{cfg.name}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {cfg.shortDescription ?? "—"}
-                  </div>
-                </div>
-              </label>
-            );
-          })}
-        </div>
-        <div className="flex justify-between pt-2">
-          <Button variant="ghost" onClick={onBack}>
-            Назад
-          </Button>
-          <Button onClick={onNext}>
-            Далее <ArrowRight className="ml-2 h-4 w-4" />
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function AddWalletStep({
   existingCount,
+  progress,
+  loadError,
   onWalletAdded,
   onSkip,
   onBack,
 }: {
   existingCount: number;
+  progress: { walletId: string; pages: number; loaded: number } | null;
+  loadError: string | null;
   onWalletAdded: (input: {
     name: string;
     address: string;
@@ -363,11 +273,23 @@ function AddWalletStep({
     }
     setLoading(true);
     try {
-      await onWalletAdded({
+      const result = await onWalletAdded({
         name: name.trim() || `Wallet ${existingCount + 1}`,
         address: address.trim(),
         chain: "evm",
       });
+      // Защита от зависания: load() может вернуть null БЕЗ исключения
+      // (нет API-ключа, fetch-ошибка) — тогда родитель не переключит шаг.
+      // Сбрасываем loading и показываем причину, чтобы форма не висела
+      // вечно на «Загружаем историю…».
+      if (!result) {
+        setError(
+          loadError ??
+            "Не удалось загрузить историю кошелька. Проверь адрес и API-ключи (DeBank/Alchemy) в Настройках и попробуй ещё раз.",
+        );
+        setLoading(false);
+      }
+      // Если result есть — родитель уже переключил шаг, компонент размонтируется.
     } catch (err) {
       setError((err as Error).message);
       setLoading(false);
@@ -395,6 +317,32 @@ function AddWalletStep({
           <div className="rounded border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs">
             ✓ После добавления мы найдём связи с предыдущими кошельками (bridge,
             internal transfer) и пробросим cost basis между ними.
+          </div>
+        )}
+
+        {loading && (
+          <div className="rounded-lg border border-brand-cyan/40 bg-brand-cyan/5 p-4">
+            <div className="flex items-center gap-3">
+              <Loader2 className="h-5 w-5 animate-spin text-brand-cyan flex-shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-foreground">
+                  Загружаем историю операций…
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {progress
+                    ? `Получено ${progress.loaded.toLocaleString("ru")} операций · страниц: ${progress.pages}`
+                    : "Подключаемся к кошельку…"}
+                </div>
+              </div>
+            </div>
+            {/* Индетерминированный прогресс-бар: показывает, что идёт работа. */}
+            <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-brand-cyan/10">
+              <div className="h-full w-1/3 animate-onboarding-indeterminate rounded-full bg-brand-cyan" />
+            </div>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              Тянем swap / lending / staking / bridges и строим cost basis.
+              Большой кошелёк может занять до минуты — не закрывай страницу.
+            </p>
           </div>
         )}
 
