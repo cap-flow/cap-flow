@@ -5,7 +5,8 @@
  * the pure `shouldAdoptServerPositions` so `useComputedPositions` can compare
  * against its just-computed client positions.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useActiveAccount } from "@/features/accounts/hooks";
 import { useResolvedFeatureFlag } from "@/features/feature-flags/hooks";
@@ -48,4 +49,40 @@ export function useServerCanonicalQuery(): {
   });
 
   return { flagEnabled, serverOnly, data: query.data };
+}
+
+/**
+ * Server-only UX: при рассинхроне (методика тогла ≠ серверной / расчёт
+ * устарел) сервер пересчитывает аккаунт МГНОВЕННО, не дожидаясь
+ * worker-refresh. Гард от циклов: один запуск на (accountId, методика,
+ * причина); неудача не ретраится автоматически (бейдж остаётся честным).
+ */
+export function useServerRecomputeOnMismatch(args: {
+  active: boolean;
+  reason: string;
+  lotMethodology: string;
+}): void {
+  const account = useActiveAccount();
+  const accountId = account?.id ?? null;
+  const queryClient = useQueryClient();
+  const firedFor = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!args.active || !accountId) return;
+    if (args.reason !== "methodology_mismatch" && args.reason !== "stale")
+      return;
+    const key = `${accountId}|${args.lotMethodology}|${args.reason}`;
+    if (firedFor.current === key) return;
+    firedFor.current = key;
+    void ucbApi
+      .recomputeServerPositions(accountId)
+      .then(() =>
+        queryClient.invalidateQueries({
+          queryKey: ["ucb-server-positions", accountId],
+        }),
+      )
+      .catch(() => {
+        /* fail-soft: бейдж продолжает показывать причину */
+      });
+  }, [args.active, args.reason, args.lotMethodology, accountId, queryClient]);
 }

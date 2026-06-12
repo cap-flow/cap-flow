@@ -50,7 +50,10 @@ import {
 } from "@/lib/nonlp/use_opener_detector";
 import { applyNonLpOpenerOverride } from "@/lib/nonlp/apply_opener_override";
 import { useLotMethodology } from "@/lib/lot_methodology";
-import { useServerCanonicalQuery } from "@/features/ucb/hooks";
+import {
+  useServerCanonicalQuery,
+  useServerRecomputeOnMismatch,
+} from "@/features/ucb/hooks";
 import {
   describeAdoption,
   type AdoptionVerdict,
@@ -597,6 +600,14 @@ export function useComputedPositions(): ComputedPositions {
       clientPositions,
     ],
   );
+
+  // Server-only UX: рассинхрон методики/устаревший расчёт → мгновенный
+  // серверный пересчёт (вместо ожидания worker-refresh с пустой таблицей).
+  useServerRecomputeOnMismatch({
+    active: serverCanonical.serverOnly,
+    reason: adoption.reason,
+    lotMethodology,
+  });
 
   const positions = useMemo<OpenPosition[]>(() => {
     if (adoption.source === "server" && serverCanonical.data?.positions) {

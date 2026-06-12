@@ -54,14 +54,19 @@ export function useLotMethodology(): readonly [
       });
   }, [setLocal, userId]);
 
+  const isViewImpersonation = user?.impersonation?.mode === "view";
   const setM = useCallback(
     (val: LotMethodology) => {
       setLocal(val); // instant UX
+      // View-mode impersonation = read-only: НЕ перезаписываем сохранённую
+      // методику юзера (инцидент melody789789 2026-06-12: тогл под
+      // impersonation увёл WAC→FIFO). Сервер дублирует запрет 403-ом.
+      if (isViewImpersonation) return;
       api.put("/v1/me/lot-methodology", { methodology: val }, schema).catch(() => {
         /* persisted best-effort; localStorage already updated */
       });
     },
-    [setLocal],
+    [setLocal, isViewImpersonation],
   );
 
   return [m, setM] as const;

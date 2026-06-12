@@ -18,6 +18,11 @@ export const servePositionsSchema = z.object({
 
 export type ServePositionsDto = z.infer<typeof servePositionsSchema>;
 
+const recomputeSchema = z.object({
+  positionCount: z.number().nullable(),
+  error: z.string().nullable(),
+});
+
 export const ucbApi = {
   getServerPositions: (accountId: string, signal?: AbortSignal) =>
     api.get(
@@ -25,4 +30,7 @@ export const ucbApi = {
       servePositionsSchema,
       signal,
     ),
+  /** Server-only UX: пересчитать аккаунт на сервере (после смены методики). */
+  recomputeServerPositions: (accountId: string) =>
+    api.post(`/v1/accounts/${accountId}/ucb/recompute`, {}, recomputeSchema),
 };

@@ -716,11 +716,14 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
         prefix: "/chain-ops",
       });
       // UCB B5: shadow-diff observability surface (account-scoped).
+      // db+env — для POST /:id/ucb/recompute (server-only UX, 2026-06-12).
       await api.register(ucbRoutes, {
         accounts: accountsService,
         shadowRepo: new UcbShadowRepository(app.db),
         featureFlags: featureFlagsService,
         portfolioRepo,
+        db: app.db,
+        env,
         prefix: "/accounts",
       });
       await api.register(annotationsRoutes, {

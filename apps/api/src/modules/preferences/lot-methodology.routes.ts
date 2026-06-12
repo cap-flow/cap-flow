@@ -7,7 +7,7 @@ import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { UnauthorizedError } from "../../core/errors.js";
+import { ForbiddenError, UnauthorizedError } from "../../core/errors.js";
 import { coerceMethodology, type LotMethodologyRepository } from "./lot-methodology.repository.js";
 
 const methodologyEnum = z.enum(["FIFO", "LIFO", "WAC", "HIFO"]);
@@ -38,6 +38,13 @@ export async function lotMethodologyRoutes(
     async (req) => {
       const u = req.user;
       if (!u) throw new UnauthorizedError("auth required");
+      // View-mode impersonation = read-only: админ, «смотрящий глазами» юзера,
+      // не должен молча перезаписывать его сохранённую методику (инцидент
+      // melody789789 2026-06-12: тогл под impersonation увёл WAC→FIFO).
+      if (u.impersonation?.mode === "view")
+        throw new ForbiddenError(
+          "view-mode impersonation is read-only: lot methodology не изменена",
+        );
       await opts.repo.set(u.id, req.body.methodology);
       return { methodology: req.body.methodology };
     },
