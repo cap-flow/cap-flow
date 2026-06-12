@@ -89,6 +89,8 @@ export class UcbShadowService {
       /** B3: Krystal V3 summaries + per-NFT transactions (built by the runner). */
       krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
       krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
+      /** Krystal CLOSED-ключи (`owner|chain|pool`) для dust-фильтра. */
+      krystalClosedPoolKeys?: ReadonlySet<string>;
       /** Pipeline trace (runner кладёт сюда этапы sources.*); absent → новый. */
       trace?: PipelineTrace;
     },
@@ -138,6 +140,9 @@ export class UcbShadowService {
         }),
         ...(opts.krystalTxByTokenId !== undefined && {
           krystalTxByTokenId: opts.krystalTxByTokenId,
+        }),
+        ...(opts.krystalClosedPoolKeys !== undefined && {
+          krystalClosedPoolKeys: opts.krystalClosedPoolKeys,
         }),
       });
       const { id } = await this.deps.shadowRepo.insertResult({

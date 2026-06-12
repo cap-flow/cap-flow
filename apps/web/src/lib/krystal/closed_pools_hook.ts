@@ -263,64 +263,9 @@ export function useKrystalV3ClosedPools(
 }
 
 /**
- * Filter helper: применяется к computed open positions. Удаляет dust-фантомы
- * (V3 LP позиции в пулах где Krystal знает что NFT уже закрыт).
- *
- * Защитные guards (всё одновременно — иначе НЕ фильтруем):
- *   1. position попадает только если `isV3LpProtocol(protocol.name) === true`
- *   2. У position нет matchedV3TokenId (= наша pipeline нашла активный NFT —
- *      значит позиция точно живая, не трогаем)
- *   3. `lpTokenId` (pool address) присутствует на position
- *   4. `currentUsd < $50` — dust threshold (защита от случайного скрытия
- *      реальных позиций если Krystal вернул ложный CLOSED)
- *   5. Ключ `${wallet}|${chainCode}|${poolAddress}` есть в closedKeys
- *
- * Если closedKeys пустой (fetch не сработал) — функция возвращает input
- * без изменений (fail-soft).
+ * Filter helper перенесён в `@cap-flow/ucb/krystal/closed_dust_filter` (порт
+ * V3-операций в серверный движок, 2026-06-12) — здесь остаётся re-export,
+ * чтобы не плодить параллельные реализации. Поведение идентично (console.log
+ * заменён на возвращаемый `dropped` в расширенном варианте).
  */
-export function filterClosedDustPositions<
-  P extends {
-    walletId: string;
-    chain: string;
-    protocol: { name: string };
-    matchedV3TokenId?: string;
-    lpTokenId?: string;
-    currentUsd: number;
-  },
->(
-  positions: readonly P[],
-  walletAddressById: ReadonlyMap<string, string>,
-  closedKeys: ReadonlySet<string>,
-  isV3LpProtocol: (name: string) => boolean,
-  dustThresholdUsd = 50,
-): P[] {
-  if (closedKeys.size === 0) return positions.slice();
-  const out: P[] = [];
-  for (const p of positions) {
-    if (!isV3LpProtocol(p.protocol.name) || p.matchedV3TokenId || !p.lpTokenId) {
-      out.push(p);
-      continue;
-    }
-    if (p.currentUsd >= dustThresholdUsd) {
-      out.push(p);
-      continue;
-    }
-    const wallet = walletAddressById.get(p.walletId);
-    if (!wallet) {
-      out.push(p);
-      continue;
-    }
-    const key = `${wallet.toLowerCase()}|${p.chain.toLowerCase()}|${p.lpTokenId.toLowerCase()}`;
-    if (closedKeys.has(key)) {
-      if (typeof window !== "undefined") {
-        console.log(
-          `[Krystal CLOSED filter] dropping dust phantom: ` +
-            `${p.protocol.name} ${p.chain} pool ${p.lpTokenId} ($${p.currentUsd.toFixed(2)})`,
-        );
-      }
-      continue;
-    }
-    out.push(p);
-  }
-  return out;
-}
+export { filterClosedDustPositions } from "@cap-flow/ucb/krystal/closed_dust_filter";

@@ -30,6 +30,12 @@ export interface EvmAddressSource {
 export interface KrystalV3Result {
   krystalV3ByTokenId: Map<string, KrystalV3Summary>;
   krystalTxByTokenId: Map<string, KrystalTransactionsSummary>;
+  /**
+   * `${owner}|${chainCode}|${poolAddress}` (lowercased) для каждого CLOSED
+   * NFT юзера — вход dust-фильтра (`filterClosedDustPositions`). Зеркало
+   * web `useKrystalV3ClosedPools`. Пустой при отсутствии кредитов/ключа.
+   */
+  closedPoolKeys: Set<string>;
 }
 
 /** `{NPM}-{tokenId}` → NPM address (the part before the last `-`). */
@@ -38,12 +44,26 @@ function npmFromId(id: string): string | null {
   return i > 0 ? id.slice(0, i) : null;
 }
 
+/**
+ * Сети для CLOSED-обхода (зеркало web SUPPORTED_CHAINS_FOR_CLOSED): Krystal
+ * без явного chainIds отдаёт только самую активную сеть → итерируем per chain.
+ */
+const CLOSED_CHAINS: { chainId: number; code: string }[] = [
+  { chainId: 1, code: "eth" },
+  { chainId: 42161, code: "arb" },
+  { chainId: 8453, code: "base" },
+  { chainId: 10, code: "op" },
+  { chainId: 137, code: "matic" },
+  { chainId: 56, code: "bsc" },
+  { chainId: 43114, code: "avax" },
+];
+
 export class KrystalV3Source {
   constructor(
     private readonly deps: {
       client: Pick<
         KrystalClient,
-        "openUniswapV3Positions" | "positionTransactions"
+        "openUniswapV3Positions" | "positionTransactions" | "closedUniswapV3Positions"
       >;
       walletSource: EvmAddressSource;
     },
@@ -83,6 +103,29 @@ export class KrystalV3Source {
       }
     }
 
-    return { krystalV3ByTokenId, krystalTxByTokenId };
+    // CLOSED NFTs → ключи dust-фильтра (fail-soft per wallet×chain). Зеркало
+    // web useKrystalV3ClosedPools: ОБЯЗАТЕЛЬНО per-chain (см. CLOSED_CHAINS).
+    const closedPoolKeys = new Set<string>();
+    const chainCodeById = new Map(CLOSED_CHAINS.map((c) => [c.chainId, c.code]));
+    for (const addr of addresses) {
+      for (const { chainId } of CLOSED_CHAINS) {
+        try {
+          const closed = await this.deps.client.closedUniswapV3Positions(
+            addr,
+            chainId,
+          );
+          for (const p of closed) {
+            const code = chainCodeById.get(p.chain?.id ?? -1);
+            const pool = p.pool?.poolAddress;
+            if (!code || !pool || !p.tokenId) continue;
+            closedPoolKeys.add(`${addr}|${code}|${pool.toLowerCase()}`);
+          }
+        } catch {
+          /* fail-soft per wallet×chain */
+        }
+      }
+    }
+
+    return { krystalV3ByTokenId, krystalTxByTokenId, closedPoolKeys };
   }
 }

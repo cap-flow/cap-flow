@@ -60,6 +60,7 @@ export interface ShadowServiceLike {
       cexCostBasisByHash?: ReadonlyMap<string, CexCostBasisMatch>;
       krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
       krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
+      krystalClosedPoolKeys?: ReadonlySet<string>;
       trace?: PipelineTrace;
     },
   ): Promise<RunShadowResult>;
@@ -77,6 +78,8 @@ export interface KrystalV3SourceLike {
   forAccount(accountId: string): Promise<{
     krystalV3ByTokenId: ReadonlyMap<string, KrystalV3Summary>;
     krystalTxByTokenId: ReadonlyMap<string, KrystalTransactionsSummary>;
+    /** CLOSED-ключи для dust-фильтра; отсутствие поля = пусто (старые стабы). */
+    closedPoolKeys?: ReadonlySet<string>;
   }>;
 }
 
@@ -137,11 +140,13 @@ export class UcbShadowRunner {
     let krystalTxByTokenId:
       | ReadonlyMap<string, KrystalTransactionsSummary>
       | undefined;
+    let krystalClosedPoolKeys: ReadonlySet<string> | undefined;
     if (this.deps.krystalSource) {
       const k = await trace.run("sources.krystal", async (h) => {
         try {
           const out = await this.deps.krystalSource!.forAccount(accountId);
           h.metric("v3Summaries", out.krystalV3ByTokenId.size);
+          h.metric("closedPools", out.closedPoolKeys?.size ?? 0);
           if (out.krystalV3ByTokenId.size === 0)
             h.warn("Krystal не вернул ни одной LP-позиции (нет ключа / нет кредитов / нет LP?)");
           return out;
@@ -154,6 +159,7 @@ export class UcbShadowRunner {
       });
       krystalV3ByTokenId = k?.krystalV3ByTokenId;
       krystalTxByTokenId = k?.krystalTxByTokenId;
+      krystalClosedPoolKeys = k?.closedPoolKeys;
     } else trace.skip("sources.krystal", "нет krystalSource");
 
     const liveByWalletId = await trace.run("sources.live", async (h) => {
@@ -189,6 +195,7 @@ export class UcbShadowRunner {
       ...(cexCostBasisByHash !== undefined && { cexCostBasisByHash }),
       ...(krystalV3ByTokenId !== undefined && { krystalV3ByTokenId }),
       ...(krystalTxByTokenId !== undefined && { krystalTxByTokenId }),
+      ...(krystalClosedPoolKeys !== undefined && { krystalClosedPoolKeys }),
     });
   }
 }

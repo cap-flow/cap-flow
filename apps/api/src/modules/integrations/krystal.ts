@@ -51,6 +51,31 @@ export class KrystalClient {
   }
 
   /**
+   * CLOSED Uniswap V3/V4 LP positions for an EVM wallet on ONE chain.
+   * Krystal без явного chainIds возвращает только самую активную сеть —
+   * поэтому вызывающий итерирует per chain (зеркало web closed_pools_hook).
+   * [] on any non-200 (fail-soft).
+   */
+  async closedUniswapV3Positions(
+    wallet: string,
+    chainId: number,
+  ): Promise<KrystalPosition[]> {
+    const res = await this.proxy.forward({
+      provider: "krystal",
+      method: "GET",
+      path: "v1/positions",
+      query: {
+        wallet,
+        positionStatus: "CLOSED",
+        protocols: "uniswap",
+        chainIds: String(chainId),
+      },
+    });
+    if (res.status !== 200) return [];
+    return parseJsonArray<KrystalPosition>(res.body);
+  }
+
+  /**
    * Per-NFT transaction history (DEPOSIT/WITHDRAW/COLLECT_FEE). The override's V4
    * trust gate uses Σ DEPOSIT from here as authoritative cost basis. [] on non-200.
    */

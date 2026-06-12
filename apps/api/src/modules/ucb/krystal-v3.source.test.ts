@@ -25,16 +25,25 @@ const depositTx = (): any => ({
   transactions: [{ token: { symbol: "WETH" }, tokenAmount: "1", amountUsd: 240 }],
 });
 
-function makeSource(over: { positionTransactions?: KrystalClient["positionTransactions"] } = {}) {
+function makeSource(
+  over: {
+    positionTransactions?: KrystalClient["positionTransactions"];
+    closedUniswapV3Positions?: KrystalClient["closedUniswapV3Positions"];
+  } = {},
+) {
   const openUniswapV3Positions = vi.fn(async () => [pos("5417064", 240.83), pos("5417054", 146.86)]);
   const positionTransactions =
     over.positionTransactions ?? (vi.fn(async () => [depositTx()]) as KrystalClient["positionTransactions"]);
-  const client = { openUniswapV3Positions, positionTransactions };
+  const closedUniswapV3Positions =
+    over.closedUniswapV3Positions ??
+    (vi.fn(async () => []) as KrystalClient["closedUniswapV3Positions"]);
+  const client = { openUniswapV3Positions, positionTransactions, closedUniswapV3Positions };
   const walletSource = { evmWalletsForAccount: async () => [{ address: "0xWALLET" }] };
   return {
     source: new KrystalV3Source({ client, walletSource }),
     openUniswapV3Positions,
     positionTransactions,
+    closedUniswapV3Positions,
   };
 }
 
@@ -61,5 +70,38 @@ describe("KrystalV3Source.forAccount", () => {
     // both summaries present (positions fetched fine); one tx map entry dropped
     expect(r.krystalV3ByTokenId.size).toBe(2);
     expect(r.krystalTxByTokenId.size).toBe(1);
+  });
+});
+
+describe("KrystalV3Source — CLOSED pool keys (dust-фильтр)", () => {
+  it("собирает closedPoolKeys `owner|chain|pool` (lowercased) из CLOSED NFT", async () => {
+    const closed = vi.fn(async (_w: string, chainId: number) =>
+      chainId === 8453
+        ? [{ chain: { id: 8453 }, pool: { poolAddress: "0xPOOLBASE" }, tokenId: "777" }]
+        : [],
+    );
+    const { source } = makeSource({
+      closedUniswapV3Positions: closed as unknown as KrystalClient["closedUniswapV3Positions"],
+    });
+    const r = await source.forAccount("acc");
+    expect(r.closedPoolKeys.has("0xwallet|base|0xpoolbase")).toBe(true);
+    expect(r.closedPoolKeys.size).toBe(1);
+    // per-chain обход: 7 сетей × 1 адрес
+    expect(closed).toHaveBeenCalledTimes(7);
+  });
+
+  it("fail-soft: throw на одной сети не валит остальные и не ломает forAccount", async () => {
+    const closed = vi.fn(async (_w: string, chainId: number) => {
+      if (chainId === 1) throw new Error("krystal down");
+      return chainId === 42161
+        ? [{ chain: { id: 42161 }, pool: { poolAddress: "0xARBPOOL" }, tokenId: "1" }]
+        : [];
+    });
+    const { source } = makeSource({
+      closedUniswapV3Positions: closed as unknown as KrystalClient["closedUniswapV3Positions"],
+    });
+    const r = await source.forAccount("acc");
+    expect(r.closedPoolKeys.has("0xwallet|arb|0xarbpool")).toBe(true);
+    expect(r.krystalV3ByTokenId.size).toBe(2);
   });
 });

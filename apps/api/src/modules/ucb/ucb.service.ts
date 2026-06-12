@@ -39,6 +39,14 @@ import {
 import { applyKrystalV3Override } from "@cap-flow/ucb/krystal/override";
 import { applyNonLpOpenerOverride } from "@cap-flow/ucb/apply_opener_override";
 import { applyV3CostBasisOverride } from "@cap-flow/ucb/v3_cost_basis_override";
+import { applyV3ClaimedFeesSplit } from "@cap-flow/ucb/v3_claimed_fees_split";
+import { dedupeMatchedV3TokenIds } from "@cap-flow/ucb/v3_dedupe_matched";
+import { filterClosedDustPositionsWithDropped } from "@cap-flow/ucb/krystal/closed_dust_filter";
+import {
+  buildKrystalOpenIndex,
+  filterKrystalAbsentV3Phantoms,
+} from "@cap-flow/ucb/krystal/phantom_filter";
+import { isV3LpProtocol } from "@cap-flow/ucb/open_positions";
 import type {
   V3CostBasisResult,
   V3Position,
@@ -99,6 +107,11 @@ export interface UcbComputeDeps {
    */
   krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
   krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
+  /**
+   * Krystal CLOSED NFT-ключи `${owner}|${chainCode}|${pool}` (lowercased) —
+   * вход dust-фильтра (Step 4.75). Пусто → guarded no-op.
+   */
+  krystalClosedPoolKeys?: ReadonlySet<string>;
   /**
    * B4: non-LP opener source — given the built positions, fetches the
    * Etherscan/Alchemy receipt-token openers (+ OUT-side cost basis) and returns
@@ -263,19 +276,27 @@ export async function computePositions(
   // basis from on-chain IncreaseLiquidity events + slot0 pricing (Velodrome gauge
   // etc.). Guarded: no source / empty maps → no-op. Krystal-covered V3 still gets
   // its authoritative startUsd from the Krystal step below.
+  // Карты v3PositionMap/v3CostBasis сохраняем — они нужны ниже и для
+  // claimed-fees split (порт V3-операций 2026-06-12).
+  let v3Maps: {
+    v3PositionMap: Map<string, V3Position[]>;
+    v3CostBasis: Map<string, V3CostBasisResult>;
+  } | null = null;
   let v3Overridden: readonly OpenPosition[] = positionsRaw;
   if (deps.v3EnrichmentSource) {
     v3Overridden = await trace.run("override.v3", async (h) => {
-      const { v3PositionMap, v3CostBasis } =
-        await deps.v3EnrichmentSource!.forPositions(positionsRaw, walletAddressById);
-      if (v3PositionMap.size === 0 || v3CostBasis.size === 0) {
+      v3Maps = await deps.v3EnrichmentSource!.forPositions(
+        positionsRaw,
+        walletAddressById,
+      );
+      if (v3Maps.v3PositionMap.size === 0 || v3Maps.v3CostBasis.size === 0) {
         h.metric("changed", 0);
         return positionsRaw;
       }
       const out = applyV3CostBasisOverride(
         positionsRaw,
-        v3PositionMap,
-        v3CostBasis,
+        v3Maps.v3PositionMap,
+        v3Maps.v3CostBasis,
         (chain, name) => deps.v3EnrichmentSource!.resolveDeploymentIds(chain, name),
       ).positions;
       diffStartUsd(positionsRaw, out, h);
@@ -316,6 +337,47 @@ export async function computePositions(
     });
   } else trace.skip("override.cex", "нет CEX cost basis matches");
 
+  // ── Step 4.5: V3 claimed-fees split (порт web PR-2, 2026-06-12) ──
+  // multicall(decreaseLiquidity, collect), помеченный классификатором как
+  // claim_rewards, раздувает claimed fee principal'ом. Split по
+  // DecreaseLiquidity-событиям (withdrawalsByTxHash) + drop pre-mint entries.
+  // Mirrors client: ПЕРЕД dedupe/Krystal (Krystal authoritative перепишет — ok).
+  if (deps.v3EnrichmentSource && v3Maps !== null) {
+    const maps = v3Maps as {
+      v3PositionMap: Map<string, V3Position[]>;
+      v3CostBasis: Map<string, V3CostBasisResult>;
+    };
+    if (maps.v3PositionMap.size > 0 && maps.v3CostBasis.size > 0) {
+      working = await trace.run("override.v3fees", async (h) => {
+        const before = working;
+        const out = applyV3ClaimedFeesSplit(
+          before,
+          maps.v3PositionMap,
+          maps.v3CostBasis,
+          (chain, name) =>
+            deps.v3EnrichmentSource!.resolveDeploymentIds(chain, name),
+        );
+        const changed = out.filter(
+          (p, i) => p.feesClaimedUsd !== before[i]?.feesClaimedUsd,
+        ).length;
+        h.metric("positions", out.length);
+        h.metric("changed", changed);
+        return out;
+      });
+    } else trace.skip("override.v3fees", "нет V3-событий");
+  } else trace.skip("override.v3fees", "нет v3EnrichmentSource");
+
+  // ── Step 4.6: dedupe matchedV3TokenId (порт web PR-K29, 2026-06-12) ──
+  // 2+ позиции с одним NFT → реассайн extras на sibling NFT из Krystal Map.
+  if (deps.krystalV3ByTokenId && deps.krystalV3ByTokenId.size > 0) {
+    working = await trace.run("dedupe.v3", async (h) => {
+      const r = dedupeMatchedV3TokenIds(working, deps.krystalV3ByTokenId!);
+      h.metric("reassigned", r.reassignedCount);
+      for (const w of r.warnings) h.warn(w);
+      return r.positions;
+    });
+  } else trace.skip("dedupe.v3", "нет Krystal-данных");
+
   // ── Step 4.7: Krystal V3 override (B3) ──
   // AUTHORITATIVE startUsd for covered V3 LP (Krystal Σ DEPOSIT) + sets
   // matchedV3TokenId. Guarded: empty map → slice no-op. The V3 cost-basis
@@ -333,6 +395,46 @@ export async function computePositions(
       return out;
     });
   } else trace.skip("override.krystal", "нет Krystal-данных (источник пуст/недоступен)");
+
+  // ── Step 4.75: dust-фантомы закрытых NFT (порт web Option B', 2026-06-12) ──
+  // DeBank показывает $0.5–$5 остатков в пулах, где Krystal знает CLOSED NFT
+  // (liquidity=0) → строки с −90% PnL. Guards внутри (V3-only, no-NFT, <$50).
+  if (deps.krystalClosedPoolKeys && deps.krystalClosedPoolKeys.size > 0) {
+    working = await trace.run("filter.dust", async (h) => {
+      const r = filterClosedDustPositionsWithDropped(
+        working,
+        walletAddressById,
+        deps.krystalClosedPoolKeys!,
+        isV3LpProtocol,
+      );
+      h.metric("dropped", r.dropped.length);
+      for (const d of r.dropped)
+        h.warn(
+          `dust phantom: ${d.protocol.name} ${d.chain} pool ${d.lpTokenId} ($${d.currentUsd.toFixed(2)})`,
+        );
+      return r.positions;
+    });
+  } else trace.skip("filter.dust", "нет Krystal CLOSED-данных");
+
+  // ── Step 4.77: Krystal-absent фантомы (порт web 2026-06-01, 2026-06-12) ──
+  // V3 LP без matchedV3TokenId, которых Krystal НЕ числит открытыми на покрытой
+  // сети при активном кошельке — CLOSED-residual либо DeBank-only. Fail-soft.
+  if (deps.krystalV3ByTokenId && deps.krystalV3ByTokenId.size > 0) {
+    working = await trace.run("filter.phantom", async (h) => {
+      const r = filterKrystalAbsentV3Phantoms(
+        working,
+        walletAddressById,
+        buildKrystalOpenIndex(deps.krystalV3ByTokenId!.values()),
+        isV3LpProtocol,
+      );
+      h.metric("dropped", r.dropped.length);
+      for (const d of r.dropped)
+        h.warn(
+          `Krystal-absent phantom: ${d.protocol.name} ${d.chain} pool ${d.lpTokenId} ($${d.currentUsd.toFixed(2)})`,
+        );
+      return r.positions;
+    });
+  } else trace.skip("filter.phantom", "нет Krystal-данных");
 
   // ── Step 4.8: non-LP opener override (B4) ──
   // Mirrors the tail of useComputedPositions: for non-V3-LP positions, fetch the
