@@ -46,3 +46,22 @@ sources.cex → sources.krystal → sources.live → load.ops → link → ledge
 включая sequential-WAC `d2f7187`). Сама `condescending-fermi` заморожена на 08.06 —
 там НЕТ последовательной WAC (давала 498.76 вместо 469.26 на melody GMX 0x70d9).
 Worktree-папка называется `condescending-fermi-99f0ac`, но ветка в ней — capital-summary.
+
+## 2026-06-12 (вечер): паритет достигнут — порт 4 V3-операций (commit `2a3b245`)
+
+Директива owner: «всё переносим на движок, браузер не считает». Последние
+4 browser-only операции перенесены в `@cap-flow/ucb` (web = re-export'ы):
+claimed-fees split, dedupe matchedV3TokenId, dust-фильтр CLOSED NFT (+
+серверный per-chain CLOSED fetch у KrystalV3Source → closedPoolKeys),
+Krystal-absent phantom-фильтр. Новые этапы: `override.v3fees → dedupe.v3 →
+(krystal) → filter.dust → filter.phantom`, все guarded no-op.
+
+Также ранее в этот день (commit `da1061f`): сервер — источник позиций для
+фронта; гидрация методики per-user (ломалась на impersonation → guard
+методики молча отвергал серверный результат); бейдж «расчёт: сервер/браузер
+(причина)». Проверено live: melody WAC → «расчёт: сервер», числа байт-в-байт.
+
+Состояние: серверный конвейер ⊇ браузерный. Браузерный расчёт остаётся
+ТОЛЬКО как fallback (R16) с видимой причиной. Остаток до «браузер никогда
+не считает»: server-recompute по переключению методики (сейчас до
+следующего refresh) + мёрж в main.
