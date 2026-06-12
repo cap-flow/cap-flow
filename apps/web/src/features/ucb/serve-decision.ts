@@ -92,6 +92,13 @@ export interface AdoptDecisionArgs {
   clientLotMethodology: string;
   /** The client's just-computed positions (fallback + wallet-set reference). */
   clientPositions: readonly { walletId: string }[];
+  /**
+   * `capflow.feature.ucbServerOnly`: браузер НЕ считает вообще (директива
+   * owner 2026-06-12). В этом режиме clientPositions пуст по построению →
+   * wallet-set guard пропускается; при не-served позиции НЕ пересчитываются
+   * клиентом, а остаются пустыми с видимой причиной.
+   */
+  serverOnly?: boolean;
 }
 
 export function shouldAdoptServerPositions(args: AdoptDecisionArgs): boolean {
@@ -128,7 +135,8 @@ export interface AdoptionVerdict {
  * «опираемся на сервер — он и должен выводить, не браузер»).
  */
 export function describeAdoption(args: AdoptDecisionArgs): AdoptionVerdict {
-  const { flagEnabled, resp, clientLotMethodology, clientPositions } = args;
+  const { flagEnabled, resp, clientLotMethodology, clientPositions, serverOnly } =
+    args;
   if (!flagEnabled) return { source: "client", reason: "flag_off" };
   if (!resp) return { source: "client", reason: "loading" };
   if (!resp.serve || !resp.positions) {
@@ -143,7 +151,9 @@ export function describeAdoption(args: AdoptDecisionArgs): AdoptionVerdict {
     return { source: "client", reason: "methodology_mismatch" };
   if (!serverPositionsValid(resp.positions))
     return { source: "client", reason: "invalid_payload" };
-  if (!walletSetsEqual(clientPositions, resp.positions))
+  // server-only: clientPositions пуст по построению (браузер не считал) —
+  // wallet-set сверять не с чем, guard пропускается.
+  if (!serverOnly && !walletSetsEqual(clientPositions, resp.positions))
     return { source: "client", reason: "wallet_set_mismatch" };
   return { source: "server", reason: "served" };
 }

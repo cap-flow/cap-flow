@@ -136,3 +136,28 @@ describe("describeAdoption — источник расчёта + причина 
     ).toEqual({ source: "client", reason: "wallet_set_mismatch" });
   });
 });
+
+describe("describeAdoption — serverOnly (браузер не считает)", () => {
+  const base = { clientLotMethodology: "LIFO", clientPositions: [] as { walletId: string }[], serverOnly: true };
+
+  it("served → server, wallet-set guard пропущен (клиент не считал, сверять не с чем)", () => {
+    expect(describeAdoption({ ...base, flagEnabled: true, resp: resp() })).toEqual({
+      source: "server",
+      reason: "served",
+    });
+  });
+  it("не served (no_shadow) → client/[] с причиной, БЕЗ пересчёта", () => {
+    expect(
+      describeAdoption({
+        ...base,
+        flagEnabled: true,
+        resp: resp({ serve: false, positions: null, reason: "no_shadow" }),
+      }),
+    ).toEqual({ source: "client", reason: "no_shadow" });
+  });
+  it("методика всё ещё проверяется и в serverOnly", () => {
+    expect(
+      describeAdoption({ ...base, clientLotMethodology: "FIFO", flagEnabled: true, resp: resp() }),
+    ).toEqual({ source: "client", reason: "methodology_mismatch" });
+  });
+});

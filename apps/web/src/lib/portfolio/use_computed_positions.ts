@@ -387,6 +387,11 @@ export function useComputedPositions(): ComputedPositions {
   const serverCanonical = useServerCanonicalQuery();
 
   const clientPositions = useMemo(() => {
+    // Server-only режим (ucbServerOnly): браузер НЕ выполняет цепочку
+    // overrides вообще — вся стоимость расчёта на сервере. Возврат [] до
+    // запуска цепочки; при не-served список остаётся пустым с причиной в
+    // бейдже (никакого тихого пересчёта).
+    if (serverCanonical.serverOnly) return [];
     let working: OpenPosition[] = positionsRaw.slice();
     if (v3CostBasisHook.data.size > 0 && v3.data.size > 0) {
       const v3Result = applyV3CostBasisOverride(
@@ -543,6 +548,7 @@ export function useComputedPositions(): ComputedPositions {
     }
     return working;
   }, [
+    serverCanonical.serverOnly,
     positionsRaw,
     v3.data,
     v3CostBasisHook.data,
@@ -581,8 +587,15 @@ export function useComputedPositions(): ComputedPositions {
         resp: serverCanonical.data ?? null,
         clientLotMethodology: lotMethodology,
         clientPositions,
+        serverOnly: serverCanonical.serverOnly,
       }),
-    [serverCanonical.flagEnabled, serverCanonical.data, lotMethodology, clientPositions],
+    [
+      serverCanonical.flagEnabled,
+      serverCanonical.serverOnly,
+      serverCanonical.data,
+      lotMethodology,
+      clientPositions,
+    ],
   );
 
   const positions = useMemo<OpenPosition[]>(() => {
