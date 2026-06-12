@@ -179,6 +179,26 @@ export async function computePositions(
     return out;
   });
 
+  // ── Step 1a: histPrices from the B1 op-token-price cache ──
+  // ПОРЯДОК (фикс F1, аудит melody789789 2026-06-11): цены загружаются ДО
+  // ledger и передаются в runUcbPipelineForWallet. Раньше LotTracker строился
+  // БЕЗ histPrices → волатильный transfer_in ценился fallback'ом m.usd =
+  // DeBank-спот на момент СИНКА (вся история по сегодняшней цене) → lending
+  // startUsd занижен (−27% Aave arb) и «плыл» с рынком между прогонами.
+  // Методика locked 2026-06-10: transfer_in волатильного = рынок на момент
+  // получения (hist-цена), не спот синка.
+  const allOps: ClassifiedOp[] = linkedWallets.flatMap((w) => w.ops);
+  const { histPrices } = await trace.run("price", async (h) => {
+    const out = await deps.opPricingService.priceMapForOps(allOps);
+    h.metric("ops", allOps.length);
+    h.metric("priced", out.histPrices.size);
+    // «83 missing → 0 filled» класса melody789789: пропуски исторических цен
+    // раньше умирали в console.log — теперь это warn-статус этапа.
+    if (out.missing.length > 0)
+      h.warn(`${out.missing.length} ops без исторической цены (fallback на спот/face)`);
+    return out;
+  });
+
   // ── Step 1: per-wallet UCB pipeline → lot tracker (= newTrackers) ──
   const lotsByWallet = new Map<string, LotTracker>();
   // cross_protocol PositionTracker (SoT) per wallet — для tracker_divergence guard.
@@ -192,6 +212,7 @@ export async function computePositions(
         ops: w.ops,
         annotationsByKey: deps.annotationsByKey ?? new Map(),
         costBasisOverrideByHash,
+        histPrices,
         ...(deps.resolvedAnnotations !== undefined && {
           resolvedAnnotations: deps.resolvedAnnotations,
         }),
@@ -201,19 +222,6 @@ export async function computePositions(
       if (result.positionTracker)
         trackersByWallet.set(w.wallet.id, result.positionTracker);
     }
-  });
-
-  // ── Step 1b: histPrices from the B1 op-token-price cache ──
-  const allOps: ClassifiedOp[] = linkedWallets.flatMap((w) => w.ops);
-  const { histPrices } = await trace.run("price", async (h) => {
-    const out = await deps.opPricingService.priceMapForOps(allOps);
-    h.metric("ops", allOps.length);
-    h.metric("priced", out.histPrices.size);
-    // «83 missing → 0 filled» класса melody789789: пропуски исторических цен
-    // раньше умирали в console.log — теперь это warn-статус этапа.
-    if (out.missing.length > 0)
-      h.warn(`${out.missing.length} ops без исторической цены (fallback на спот/face)`);
-    return out;
   });
 
   // ── Step 2: buildOpenPositions ──
