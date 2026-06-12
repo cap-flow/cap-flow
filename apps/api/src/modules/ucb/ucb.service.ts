@@ -57,6 +57,8 @@ import type { LotMethodology } from "@cap-flow/ucb/lots/types";
 import type { LotTracker } from "@cap-flow/ucb/lots/lot_tracker";
 import type { PositionTracker } from "@cap-flow/ucb/positions/position_tracker";
 
+import { PipelineTrace, diffStartUsd } from "./pipeline-trace.js";
+
 /**
  * Per-wallet engine input. `ops` mirror `chain_operations.raw` with
  * `status === "failed"` already filtered out (R13) by the caller.
@@ -113,6 +115,12 @@ export interface UcbComputeDeps {
   v3EnrichmentSource?: V3EnrichmentSourceLike;
   /** FIFO/LIFO/WAC/HIFO — defaults to the client default. */
   lotMethodology?: LotMethodology;
+  /**
+   * Pipeline observability (pipeline-trace.ts): этапы пишут статус/метрики/
+   * warnings сюда. Absent → локальный экземпляр (записи отбрасываются).
+   * Инвариант: НЕ влияет на расчёт — positions байт-в-байт одинаковы с/без.
+   */
+  trace?: PipelineTrace;
 }
 
 /** Slice of `NonLpOpenerSource` the engine needs (injectable / stubable). */
@@ -149,6 +157,7 @@ export async function computePositions(
   const costBasisOverrideByHash =
     deps.costBasisOverrideByHash ?? new Map<string, number>();
   const lotMethodology: LotMethodology = deps.lotMethodology ?? "FIFO";
+  const trace = deps.trace ?? new PipelineTrace();
 
   // ── Step 0: link async-deposit pairs (GMX V2 GLV/GM, Adrena, GMSOL, Flash) ──
   // GMX-style deposits execute in TWO txs: Tx A (user sends USDC/ETH) + Tx B
@@ -160,42 +169,59 @@ export async function computePositions(
   // writes `linkedCostBasisUsd` (= Σ Tx A outgoing) onto Tx B; the shared engine
   // already reads it (position_lot_cost_basis / cross_protocol). Per-wallet, like
   // the client. Pure + immutable (returns new ops arrays).
-  const linkedWallets = wallets.map((w) => ({
-    ...w,
-    ops: linkAsyncDeposits(w.ops),
-  }));
+  const linkedWallets = await trace.run("link", (h) => {
+    const out = wallets.map((w) => ({
+      ...w,
+      ops: linkAsyncDeposits(w.ops),
+    }));
+    h.metric("wallets", out.length);
+    h.metric("ops", out.reduce((s, w) => s + w.ops.length, 0));
+    return out;
+  });
 
   // ── Step 1: per-wallet UCB pipeline → lot tracker (= newTrackers) ──
   const lotsByWallet = new Map<string, LotTracker>();
   // cross_protocol PositionTracker (SoT) per wallet — для tracker_divergence guard.
   const trackersByWallet = new Map<string, PositionTracker>();
-  const walletNameById = new Map<string, string>();
-  for (const w of linkedWallets) walletNameById.set(w.wallet.id, w.wallet.name);
-  for (const w of linkedWallets) {
-    const result = runUcbPipelineForWallet({
-      walletId: w.wallet.id,
-      ops: w.ops,
-      annotationsByKey: deps.annotationsByKey ?? new Map(),
-      costBasisOverrideByHash,
-      ...(deps.resolvedAnnotations !== undefined && {
-        resolvedAnnotations: deps.resolvedAnnotations,
-      }),
-      walletNameById,
-    });
-    lotsByWallet.set(w.wallet.id, result.lotTracker);
-    if (result.positionTracker)
-      trackersByWallet.set(w.wallet.id, result.positionTracker);
-  }
+  await trace.run("ledger", () => {
+    const walletNameById = new Map<string, string>();
+    for (const w of linkedWallets) walletNameById.set(w.wallet.id, w.wallet.name);
+    for (const w of linkedWallets) {
+      const result = runUcbPipelineForWallet({
+        walletId: w.wallet.id,
+        ops: w.ops,
+        annotationsByKey: deps.annotationsByKey ?? new Map(),
+        costBasisOverrideByHash,
+        ...(deps.resolvedAnnotations !== undefined && {
+          resolvedAnnotations: deps.resolvedAnnotations,
+        }),
+        walletNameById,
+      });
+      lotsByWallet.set(w.wallet.id, result.lotTracker);
+      if (result.positionTracker)
+        trackersByWallet.set(w.wallet.id, result.positionTracker);
+    }
+  });
 
   // ── Step 1b: histPrices from the B1 op-token-price cache ──
   const allOps: ClassifiedOp[] = linkedWallets.flatMap((w) => w.ops);
-  const { histPrices } = await deps.opPricingService.priceMapForOps(allOps);
+  const { histPrices } = await trace.run("price", async (h) => {
+    const out = await deps.opPricingService.priceMapForOps(allOps);
+    h.metric("ops", allOps.length);
+    h.metric("priced", out.histPrices.size);
+    // «83 missing → 0 filled» класса melody789789: пропуски исторических цен
+    // раньше умирали в console.log — теперь это warn-статус этапа.
+    if (out.missing.length > 0)
+      h.warn(`${out.missing.length} ops без исторической цены (fallback на спот/face)`);
+    return out;
+  });
 
   // ── Step 2: buildOpenPositions ──
   // NB: buildOpenPositions' `histPrices` arg is the V3-lp-add-OUT-token map
   // (empty until B3); the main histPrices feeds the lending override below —
   // exactly as the client wires it (use_computed_positions.ts).
-  const positionsRaw = buildOpenPositions(
+  const positionsRaw = await trace.run("build", async (h) => {
+    const out = buildOpenPositions(
     linkedWallets.map((w) => ({
       wallet: w.wallet,
       ops: w.ops,
@@ -214,7 +240,10 @@ export async function computePositions(
       // cost_basis result, so the methodology MUST reach buildSupplyToken to matter.
       methodology: lotMethodology,
     },
-  );
+    );
+    h.metric("positions", out.length);
+    return out;
+  });
 
   const walletAddressById = new Map<string, string>(
     wallets.map((w) => [w.wallet.id, w.wallet.address]),
@@ -228,54 +257,74 @@ export async function computePositions(
   // its authoritative startUsd from the Krystal step below.
   let v3Overridden: readonly OpenPosition[] = positionsRaw;
   if (deps.v3EnrichmentSource) {
-    const { v3PositionMap, v3CostBasis } =
-      await deps.v3EnrichmentSource.forPositions(positionsRaw, walletAddressById);
-    if (v3PositionMap.size > 0 && v3CostBasis.size > 0) {
-      v3Overridden = applyV3CostBasisOverride(
+    v3Overridden = await trace.run("override.v3", async (h) => {
+      const { v3PositionMap, v3CostBasis } =
+        await deps.v3EnrichmentSource!.forPositions(positionsRaw, walletAddressById);
+      if (v3PositionMap.size === 0 || v3CostBasis.size === 0) {
+        h.metric("changed", 0);
+        return positionsRaw;
+      }
+      const out = applyV3CostBasisOverride(
         positionsRaw,
         v3PositionMap,
         v3CostBasis,
         (chain, name) => deps.v3EnrichmentSource!.resolveDeploymentIds(chain, name),
       ).positions;
-    }
-  }
+      diffStartUsd(positionsRaw, out, h);
+      return out;
+    });
+  } else trace.skip("override.v3", "нет v3EnrichmentSource");
 
   // ── Step 3: lending cost basis override (FIFO/LIFO/WAC) ──
   const opsByWallet = new Map<string, ClassifiedOp[]>();
   for (const w of linkedWallets) opsByWallet.set(w.wallet.id, w.ops);
-  const lendingResult = applyLendingCostBasisOverride(
-    v3Overridden,
-    opsByWallet,
-    histPrices,
-    lotMethodology,
-    costBasisOverrideByHash,
-  );
+  const lendingResult = await trace.run("override.lending", async (h) => {
+    const out = applyLendingCostBasisOverride(
+      v3Overridden,
+      opsByWallet,
+      histPrices,
+      lotMethodology,
+      costBasisOverrideByHash,
+    );
+    diffStartUsd(v3Overridden, out.positions, h);
+    return out;
+  });
 
   // ── Step 4: CEX inheritance override (B2) ──
   // Positions whose supplied asset arrived from a CEX inherit the exchange-side
   // cost basis. Guarded: empty map → no-op (the override itself early-returns).
   let working = lendingResult.positions;
   if (deps.cexCostBasisByHash && deps.cexCostBasisByHash.size > 0) {
-    working = applyCexInheritanceCostBasisOverride(
-      working,
-      opsByWallet,
-      deps.cexCostBasisByHash,
-      histPrices,
-    ).positions;
-  }
+    working = await trace.run("override.cex", async (h) => {
+      const before = working;
+      const out = applyCexInheritanceCostBasisOverride(
+        before,
+        opsByWallet,
+        deps.cexCostBasisByHash!,
+        histPrices,
+      ).positions;
+      diffStartUsd(before, out, h);
+      return out;
+    });
+  } else trace.skip("override.cex", "нет CEX cost basis matches");
 
   // ── Step 4.7: Krystal V3 override (B3) ──
   // AUTHORITATIVE startUsd for covered V3 LP (Krystal Σ DEPOSIT) + sets
   // matchedV3TokenId. Guarded: empty map → slice no-op. The V3 cost-basis
   // override (slot0/Etherscan) stays deferred (needs v3PositionMap from B3 step6).
   if (deps.krystalV3ByTokenId && deps.krystalV3ByTokenId.size > 0) {
-    working = applyKrystalV3Override(
-      working,
-      deps.krystalV3ByTokenId,
-      walletAddressById,
-      deps.krystalTxByTokenId,
-    );
-  }
+    working = await trace.run("override.krystal", async (h) => {
+      const before = working;
+      const out = applyKrystalV3Override(
+        before,
+        deps.krystalV3ByTokenId!,
+        walletAddressById,
+        deps.krystalTxByTokenId,
+      );
+      diffStartUsd(before, out, h);
+      return out;
+    });
+  } else trace.skip("override.krystal", "нет Krystal-данных (источник пуст/недоступен)");
 
   // ── Step 4.8: non-LP opener override (B4) ──
   // Mirrors the tail of useComputedPositions: for non-V3-LP positions, fetch the
@@ -285,18 +334,28 @@ export async function computePositions(
   // positions, but chain/lpTokenId/walletId are override-invariant so the target
   // set matches the client's `positionsRaw`-derived targets.
   if (deps.nonLpOpenerSource) {
-    const openerByKey = await deps.nonLpOpenerSource.forPositions(
-      working,
-      walletAddressById,
-    );
-    if (openerByKey.size > 0) {
-      working = applyNonLpOpenerOverride(
-        working,
+    working = await trace.run("override.opener", async (h) => {
+      const before = working;
+      const openerByKey = await deps.nonLpOpenerSource!.forPositions(
+        before,
+        walletAddressById,
+      );
+      h.metric("openers", openerByKey.size);
+      if (openerByKey.size === 0) {
+        h.metric("changed", 0);
+        return before;
+      }
+      const out = applyNonLpOpenerOverride(
+        before,
         openerByKey,
         walletAddressById,
       ).positions;
-    }
-  }
+      // Аудит melody789789 F2: именно этот слой подменял верный face-cost на
+      // spot (0x7c11) и клеил чужой рынок (0x450b) — дельты теперь видимы.
+      diffStartUsd(before, out, h);
+      return out;
+    });
+  } else trace.skip("override.opener", "нет nonLpOpenerSource");
 
   // ── tracker_divergence guard ──
   // Для lending позиций проставляем cost basis по cross_protocol PositionTracker
@@ -304,7 +363,9 @@ export async function computePositions(
   // они разойдутся — детектор поднимет `tracker_divergence` (класс aida POS-001:
   // display падал в market-спот, SoT держал уплаченное). Только lending —
   // lot-traced, без внешнего Krystal/V3-override → без ложных срабатываний на LP.
-  const enriched = working.map((p) => {
+  const enriched = await trace.run("verify.tracker", async (h) => {
+    let divergent = 0;
+    const out = working.map((p) => {
     if (p.kind !== "lending") return p;
     const tracker = trackersByWallet.get(p.walletId);
     if (!tracker) return p;
@@ -321,9 +382,22 @@ export async function computePositions(
       );
       if (entries.length === 0) continue;
       const sum = entries.reduce((s, e) => s + e.currentCostBasisUsd, 0);
+      if (
+        p.startUsd != null &&
+        sum > 0 &&
+        Math.abs(p.startUsd - sum) / Math.max(p.startUsd, sum) > 0.05
+      )
+        divergent++;
       return { ...p, costBasisTrackerUsd: sum };
     }
     return p;
+    });
+    h.metric("positions", out.length);
+    // Класс aida/melody F1: display startUsd ≠ SoT-трекер. Сам флаг поднимает
+    // детектор (tracker_divergence); здесь — только видимость на конвейере.
+    if (divergent > 0)
+      h.warn(`${divergent} lending-позиций расходятся с SoT-трекером >5%`);
+    return out;
   });
 
   // V3 cost-basis (B3 step6/7) remains a guarded no-op here.

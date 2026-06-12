@@ -54,6 +54,8 @@ export const ucbShadowResults = pgTable(
     diffSummary: jsonb("diff_summary"),
     /** Fail-soft: non-null when the shadow compute errored (positions = []). */
     error: text("error"),
+    /** StageRecord[] — per-stage trace конвейера (pipeline-trace.ts). */
+    stages: jsonb("stages"),
   },
   (table) => [
     index("ucb_shadow_results_account_computed_idx").on(

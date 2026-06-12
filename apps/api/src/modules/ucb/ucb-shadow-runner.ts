@@ -31,6 +31,7 @@ import {
   type RunShadowResult,
 } from "./ucb-shadow.service.js";
 import type { UcbShadowTrigger } from "./ucb-shadow.repository.js";
+import { PipelineTrace } from "./pipeline-trace.js";
 
 /** Raw DeBank endpoints (the adapter's input) — implemented by the DeBank client. */
 export interface DeBankRawSource {
@@ -59,6 +60,7 @@ export interface ShadowServiceLike {
       cexCostBasisByHash?: ReadonlyMap<string, CexCostBasisMatch>;
       krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
       krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
+      trace?: PipelineTrace;
     },
   ): Promise<RunShadowResult>;
 }
@@ -107,58 +109,83 @@ export class UcbShadowRunner {
     });
     if (!on) return { skipped: true };
 
+    const trace = new PipelineTrace();
+
     // B2: CEX withdrawal cost basis (fail-soft — CEX errors must not block the
-    // shadow; positions just won't inherit exchange cost basis).
+    // shadow; positions just won't inherit exchange cost basis). Раньше catch
+    // был молчаливым — теперь сбой источника виден как warn-этап.
     let cexCostBasisByHash: ReadonlyMap<string, CexCostBasisMatch> | undefined;
     if (this.deps.cexSource) {
-      try {
-        cexCostBasisByHash = await this.deps.cexSource.byHashForAccount(accountId);
-      } catch {
-        cexCostBasisByHash = undefined;
-      }
-    }
+      cexCostBasisByHash = await trace.run("sources.cex", async (h) => {
+        try {
+          const out = await this.deps.cexSource!.byHashForAccount(accountId);
+          h.metric("matches", out.size);
+          return out;
+        } catch (e) {
+          h.warn(
+            `CEX cost basis недоступен: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          return undefined;
+        }
+      });
+    } else trace.skip("sources.cex", "нет cexSource");
 
     // B3: Krystal V3 enrichment (fail-soft — Krystal outage must not block).
+    // Кейс melody789789 F5: Krystal 402 «No credit left» выключал LP-авторитет
+    // молча — теперь это warn-этап с текстом ошибки.
     let krystalV3ByTokenId: ReadonlyMap<string, KrystalV3Summary> | undefined;
     let krystalTxByTokenId:
       | ReadonlyMap<string, KrystalTransactionsSummary>
       | undefined;
     if (this.deps.krystalSource) {
-      try {
-        const k = await this.deps.krystalSource.forAccount(accountId);
-        krystalV3ByTokenId = k.krystalV3ByTokenId;
-        krystalTxByTokenId = k.krystalTxByTokenId;
-      } catch {
-        krystalV3ByTokenId = undefined;
-        krystalTxByTokenId = undefined;
-      }
-    }
-
-    const wallets = await this.deps.walletSource.evmWalletsForAccount(accountId);
-    const liveByWalletId = new Map<string, LiveSnapshot>();
-    for (const w of wallets) {
-      const [protocols, tokens, total] = await Promise.all([
-        this.deps.debank.complexProtocolList(w.address),
-        this.deps.debank.allTokens(w.address),
-        this.deps.debank.totalBalance(w.address),
-      ]);
-      const live = adaptDeBankLive({
-        wallet: {
-          id: w.id,
-          name: w.name,
-          address: w.address,
-          chain: "evm",
-          createdAt: w.createdAt.getTime(),
-        },
-        tokens,
-        protocols,
-        totalUsd: total.total_usd_value,
+      const k = await trace.run("sources.krystal", async (h) => {
+        try {
+          const out = await this.deps.krystalSource!.forAccount(accountId);
+          h.metric("v3Summaries", out.krystalV3ByTokenId.size);
+          if (out.krystalV3ByTokenId.size === 0)
+            h.warn("Krystal не вернул ни одной LP-позиции (нет ключа / нет кредитов / нет LP?)");
+          return out;
+        } catch (e) {
+          h.warn(
+            `Krystal недоступен: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          return undefined;
+        }
       });
-      liveByWalletId.set(w.id, live);
-    }
+      krystalV3ByTokenId = k?.krystalV3ByTokenId;
+      krystalTxByTokenId = k?.krystalTxByTokenId;
+    } else trace.skip("sources.krystal", "нет krystalSource");
+
+    const liveByWalletId = await trace.run("sources.live", async (h) => {
+      const wallets = await this.deps.walletSource.evmWalletsForAccount(accountId);
+      const map = new Map<string, LiveSnapshot>();
+      for (const w of wallets) {
+        const [protocols, tokens, total] = await Promise.all([
+          this.deps.debank.complexProtocolList(w.address),
+          this.deps.debank.allTokens(w.address),
+          this.deps.debank.totalBalance(w.address),
+        ]);
+        const live = adaptDeBankLive({
+          wallet: {
+            id: w.id,
+            name: w.name,
+            address: w.address,
+            chain: "evm",
+            createdAt: w.createdAt.getTime(),
+          },
+          tokens,
+          protocols,
+          totalUsd: total.total_usd_value,
+        });
+        map.set(w.id, live);
+      }
+      h.metric("wallets", map.size);
+      return map;
+    });
     return this.deps.shadowService.runForAccount(accountId, {
       trigger,
       liveByWalletId,
+      trace,
       ...(cexCostBasisByHash !== undefined && { cexCostBasisByHash }),
       ...(krystalV3ByTokenId !== undefined && { krystalV3ByTokenId }),
       ...(krystalTxByTokenId !== undefined && { krystalTxByTokenId }),

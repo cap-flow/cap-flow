@@ -120,6 +120,32 @@ async function main() {
       console.log("  " + cols.join(""));
     });
     console.log("");
+
+    // Конвейер: per-stage статусы (pipeline-trace.ts → ucb_shadow_results.stages)
+    const stages = (latest as unknown as { stages?: { stage: string; status: string; ms: number; metrics?: Record<string, unknown>; warnings?: string[] }[] | null }).stages;
+    if (stages && stages.length > 0) {
+      console.log("  pipeline:");
+      const icon: Record<string, string> = { ok: "✓", warn: "⚠", fail: "✗", skipped: "·" };
+      for (const s of stages) {
+        const m = s.metrics
+          ? Object.entries(s.metrics)
+              .filter(([k]) => k !== "deltas")
+              .map(([k, v]) => `${k}=${v}`)
+              .join(" ")
+          : "";
+        const w = s.warnings?.length ? `  ⚠ ${s.warnings.join(" | ")}` : "";
+        console.log(
+          `    ${icon[s.status] ?? "?"} ${s.stage.padEnd(18)} ${String(s.ms + "ms").padEnd(8)} ${m}${w}`,
+        );
+        const deltas = s.metrics?.["deltas"];
+        if (typeof deltas === "string") {
+          try {
+            for (const d of JSON.parse(deltas) as string[]) console.log(`        Δ ${d}`);
+          } catch { /* raw */ }
+        }
+      }
+      console.log("");
+    }
   }
   await dbClient.close();
 }

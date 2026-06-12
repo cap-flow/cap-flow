@@ -29,6 +29,7 @@ import type {
   UcbShadowRepository,
   UcbShadowTrigger,
 } from "./ucb-shadow.repository.js";
+import { PipelineTrace } from "./pipeline-trace.js";
 
 export const UCB_SERVER_SHADOW_FLAG = "capflow.feature.ucbServerShadow";
 
@@ -88,6 +89,8 @@ export class UcbShadowService {
       /** B3: Krystal V3 summaries + per-NFT transactions (built by the runner). */
       krystalV3ByTokenId?: ReadonlyMap<string, KrystalV3Summary>;
       krystalTxByTokenId?: ReadonlyMap<string, KrystalTransactionsSummary>;
+      /** Pipeline trace (runner кладёт сюда этапы sources.*); absent → новый. */
+      trace?: PipelineTrace;
     },
   ): Promise<RunShadowResult> {
     const on = await this.deps.flags.enabled(UCB_SERVER_SHADOW_FLAG, {
@@ -95,19 +98,32 @@ export class UcbShadowService {
     });
     if (!on) return { skipped: true };
 
+    const trace = opts.trace ?? new PipelineTrace();
     const lotMethodology: LotMethodology = this.deps.methodologyResolver
       ? await this.deps.methodologyResolver.forAccount(accountId)
       : this.deps.lotMethodology ?? "FIFO";
     try {
-      const loaded =
-        await this.deps.opsRepo.loadComputeWalletsForAccount(accountId);
-      const wallets: UcbComputeWallet[] = loaded.map((w) => {
-        const live = opts.liveByWalletId?.get(w.wallet.id);
-        return live ? { ...w, live } : w;
-      });
+      const wallets: UcbComputeWallet[] = await trace.run(
+        "load.ops",
+        async (h) => {
+          const loaded =
+            await this.deps.opsRepo.loadComputeWalletsForAccount(accountId);
+          const out = loaded.map((w) => {
+            const live = opts.liveByWalletId?.get(w.wallet.id);
+            return live ? { ...w, live } : w;
+          });
+          h.metric("wallets", out.length);
+          h.metric("ops", out.reduce((s, w) => s + w.ops.length, 0));
+          const withoutLive = out.filter((w) => !w.live).length;
+          if (withoutLive > 0)
+            h.warn(`${withoutLive} кошельков без live-снапшота`);
+          return out;
+        },
+      );
       const positions = await computePositions(wallets, {
         opPricingService: this.deps.opPricingService,
         lotMethodology,
+        trace,
         ...(this.deps.nonLpOpenerSource !== undefined && {
           nonLpOpenerSource: this.deps.nonLpOpenerSource,
         }),
@@ -130,11 +146,13 @@ export class UcbShadowService {
         lotMethodology,
         positions,
         engineVersion: this.deps.engineVersion,
+        stages: trace.records,
       });
       return { skipped: false, id, positionCount: positions.length };
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       // fail-soft: persist the failure (positions []), never throw into refresh.
+      // trace.records включают упавший этап (status=fail) — видно, ГДЕ упало.
       try {
         await this.deps.shadowRepo.insertResult({
           accountId,
@@ -143,6 +161,7 @@ export class UcbShadowService {
           positions: [],
           engineVersion: this.deps.engineVersion,
           error,
+          stages: trace.records,
         });
       } catch {
         /* swallow — shadow must never break refresh */

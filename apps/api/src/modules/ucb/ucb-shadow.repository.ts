@@ -13,6 +13,7 @@ import { desc, eq } from "drizzle-orm";
 import type { OpenPosition } from "@cap-flow/ucb/open_positions";
 
 import type { ShadowDiffSummary } from "./shadow-diff.js";
+import type { StageRecord } from "./pipeline-trace.js";
 
 export type UcbShadowTrigger = "refresh" | "manual" | "shadow_diff";
 
@@ -25,6 +26,8 @@ export interface UcbShadowWriteInput {
   /** Fail-soft: when the shadow compute threw (positions then []). */
   error?: string | null;
   diffSummary?: ShadowDiffSummary | null;
+  /** Per-stage trace конвейера (pipeline-trace.ts); null у старых строк. */
+  stages?: readonly StageRecord[] | null;
 }
 
 export interface UcbShadowResult {
@@ -38,6 +41,8 @@ export interface UcbShadowResult {
   engineVersion: string;
   diffSummary: ShadowDiffSummary | null;
   error: string | null;
+  /** Optional — старые строки и тест-фикстуры без trace его не несут. */
+  stages?: StageRecord[] | null;
 }
 
 type Row = typeof schema.ucbShadowResults.$inferSelect;
@@ -54,6 +59,7 @@ export function toInsertValues(input: UcbShadowWriteInput): InsertValues {
     engineVersion: input.engineVersion,
     diffSummary: input.diffSummary ?? null,
     error: input.error ?? null,
+    stages: input.stages ?? null,
   };
 }
 
@@ -70,6 +76,7 @@ export function rowToShadowResult(row: Row): UcbShadowResult {
     engineVersion: row.engineVersion,
     diffSummary: (row.diffSummary ?? null) as ShadowDiffSummary | null,
     error: row.error ?? null,
+    stages: (row.stages ?? null) as StageRecord[] | null,
   };
 }
 
