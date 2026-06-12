@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   shouldAdoptServerPositions,
+  describeAdoption,
   walletSetsEqual,
   serverPositionsValid,
   type ServePositionsResponse,
@@ -86,5 +87,52 @@ describe("shouldAdoptServerPositions", () => {
   });
   it("all guards pass → adopt", () => {
     expect(shouldAdoptServerPositions({ ...base, flagEnabled: true, resp: resp() })).toBe(true);
+  });
+});
+
+describe("describeAdoption — источник расчёта + причина (для UI-бейджа)", () => {
+  const base = { clientLotMethodology: "LIFO", clientPositions: [cPos("w1")] };
+
+  it("все guard'ы прошли → source=server, reason=served", () => {
+    expect(describeAdoption({ ...base, flagEnabled: true, resp: resp() })).toEqual({
+      source: "server",
+      reason: "served",
+    });
+  });
+  it("рассинхрон методики (melody: сервер LIFO, тогл FIFO) → client/methodology_mismatch", () => {
+    expect(
+      describeAdoption({ ...base, clientLotMethodology: "FIFO", flagEnabled: true, resp: resp() }),
+    ).toEqual({ source: "client", reason: "methodology_mismatch" });
+  });
+  it("флаг выключен → client/flag_off", () => {
+    expect(describeAdoption({ ...base, flagEnabled: false, resp: resp() })).toEqual({
+      source: "client",
+      reason: "flag_off",
+    });
+  });
+  it("ответа сервера ещё нет → client/loading", () => {
+    expect(describeAdoption({ ...base, flagEnabled: true, resp: undefined })).toEqual({
+      source: "client",
+      reason: "loading",
+    });
+  });
+  it("сервер отказал по своей причине (no_shadow) → пробрасываем её", () => {
+    expect(
+      describeAdoption({
+        ...base,
+        flagEnabled: true,
+        resp: resp({ serve: false, positions: null, reason: "no_shadow" }),
+      }),
+    ).toEqual({ source: "client", reason: "no_shadow" });
+  });
+  it("набор кошельков расходится → client/wallet_set_mismatch", () => {
+    expect(
+      describeAdoption({
+        ...base,
+        clientPositions: [cPos("w1"), cPos("w2")],
+        flagEnabled: true,
+        resp: resp({ positions: [sPos("w1")] }),
+      }),
+    ).toEqual({ source: "client", reason: "wallet_set_mismatch" });
   });
 });

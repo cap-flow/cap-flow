@@ -103,3 +103,47 @@ export function shouldAdoptServerPositions(args: AdoptDecisionArgs): boolean {
   if (!serverPositionsValid(resp.positions)) return false;
   return walletSetsEqual(clientPositions, resp.positions);
 }
+
+/** Откуда взяты показанные позиции + человекочитаемая причина (для UI-бейджа). */
+export interface AdoptionVerdict {
+  source: "server" | "client";
+  /** Машинный код причины (для бейджа/телеметрии). */
+  reason:
+    | "served"
+    | "flag_off"
+    | "loading"
+    | "methodology_mismatch"
+    | "wallet_set_mismatch"
+    | "invalid_payload"
+    | "no_shadow"
+    | "shadow_error"
+    | "stale"
+    | "not_served";
+}
+
+/**
+ * Та же логика, что `shouldAdoptServerPositions`, но возвращает ПРИЧИНУ —
+ * чтобы UI показывал «расчёт: сервер» / «расчёт: браузер (почему)» и тихий
+ * клиентский пересчёт перестал быть невидимым (директива owner 2026-06-12:
+ * «опираемся на сервер — он и должен выводить, не браузер»).
+ */
+export function describeAdoption(args: AdoptDecisionArgs): AdoptionVerdict {
+  const { flagEnabled, resp, clientLotMethodology, clientPositions } = args;
+  if (!flagEnabled) return { source: "client", reason: "flag_off" };
+  if (!resp) return { source: "client", reason: "loading" };
+  if (!resp.serve || !resp.positions) {
+    // Сервер сам отказался отдавать — пробрасываем его причину, если она из
+    // известного набора (ServeReason), иначе generic.
+    const r = resp.reason;
+    if (r === "no_shadow" || r === "shadow_error" || r === "stale")
+      return { source: "client", reason: r };
+    return { source: "client", reason: "not_served" };
+  }
+  if (resp.lotMethodology !== clientLotMethodology)
+    return { source: "client", reason: "methodology_mismatch" };
+  if (!serverPositionsValid(resp.positions))
+    return { source: "client", reason: "invalid_payload" };
+  if (!walletSetsEqual(clientPositions, resp.positions))
+    return { source: "client", reason: "wallet_set_mismatch" };
+  return { source: "server", reason: "served" };
+}

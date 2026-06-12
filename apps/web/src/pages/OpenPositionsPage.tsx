@@ -153,6 +153,52 @@ type ColumnId = (typeof COLUMN_DEFS)[number]["id"];
 
 import { V3OverrideErrorBoundary } from "@/components/util/V3OverrideErrorBoundary";
 
+/**
+ * Бейдж источника расчёта позиций: «сервер» (UCB-движок отдал готовые числа)
+ * vs «браузер» (клиентский fallback пересчитал сам — с причиной). Делает
+ * молчаливый fallback видимым: раньше при рассинхроне методики FIFO/LIFO
+ * браузер тихо показывал свои числа вместо серверных (аудит melody789789).
+ */
+const REASON_LABEL: Record<string, string> = {
+  served: "сервер",
+  flag_off: "браузер · серверный расчёт выключен",
+  loading: "браузер · жду сервер…",
+  methodology_mismatch: "браузер · методика лотов ≠ серверной",
+  wallet_set_mismatch: "браузер · набор кошельков ≠ серверному",
+  invalid_payload: "браузер · сервер вернул неполные данные",
+  no_shadow: "браузер · сервер ещё не считал этот аккаунт",
+  shadow_error: "браузер · сервер упал при расчёте",
+  stale: "браузер · серверный расчёт устарел",
+  not_served: "браузер · сервер не отдал результат",
+};
+
+function ComputeSourceBadge({
+  source,
+  reason,
+}: {
+  source: "server" | "client";
+  reason: string;
+}): JSX.Element {
+  const isServer = source === "server";
+  return (
+    <span
+      className={cn(
+        "rounded-md border px-2 py-1 text-[11px] font-medium",
+        isServer
+          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+          : "border-amber-500/30 bg-amber-500/10 text-amber-400",
+      )}
+      title={
+        isServer
+          ? "Показаны позиции, посчитанные серверным UCB-движком."
+          : "Серверный результат не принят — браузер пересчитал сам. Причина в тексте бейджа."
+      }
+    >
+      расчёт: {REASON_LABEL[reason] ?? (isServer ? "сервер" : "браузер")}
+    </span>
+  );
+}
+
 export function OpenPositionsPage(): JSX.Element {
   return (
     <V3OverrideErrorBoundary>
@@ -817,6 +863,12 @@ function OpenPositionsPageInner(): JSX.Element {
                 ?
               </button>
             </div>
+            {/* Источник расчёта: сервер (UCB-движок) vs браузерный fallback.
+                Делает тихий клиентский пересчёт видимым (аудит melody789789). */}
+            <ComputeSourceBadge
+              source={computed.positionsSource}
+              reason={computed.positionsServeReason}
+            />
             <a
               href="/closed"
               className="inline-flex items-center gap-1 rounded-md border border-border bg-secondary/40 px-2 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-brand-cyan/40 hover:text-foreground"

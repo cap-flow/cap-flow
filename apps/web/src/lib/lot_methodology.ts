@@ -11,6 +11,8 @@
 import { useCallback, useEffect } from "react";
 import { z } from "zod";
 
+import { useAuth } from "@/features/auth/AuthProvider";
+
 import { api } from "./api/client";
 import { useLocalStorage } from "./useLocalStorage";
 import type { LotMethodology } from "./portfolio/lots/types";
@@ -18,28 +20,39 @@ import type { LotMethodology } from "./portfolio/lots/types";
 const KEY = "capflow.lot_methodology";
 const schema = z.object({ methodology: z.enum(["FIFO", "LIFO", "WAC", "HIFO"]) });
 
-// Module-level guard: pull the server value once per session (the hook mounts in
-// many places — PurchaseHistoryPopup, lending override — but should GET once).
-let hydrated = false;
+// Module-level guard: трекаем, для КАКОГО пользователя уже гидрировали методику
+// с сервера. Раньше это был булев `hydrated` (once-per-session) — и он НЕ
+// сбрасывался при impersonation: админ гидрировал свой FIFO первым, затем
+// заходил под melody (saved=LIFO), но повторной гидрации не было → toggle
+// оставался FIFO → серверный (LIFO) результат отвергался guard'ом методики и
+// браузер тихо пересчитывал свои числа (аудит melody789789, 2026-06-12).
+// Теперь гидрация повторяется при смене текущего пользователя (вход/impersonation).
+let hydratedForUserId: string | null = null;
 
 export function useLotMethodology(): readonly [
   LotMethodology,
   (m: LotMethodology) => void,
 ] {
   const [m, setLocal] = useLocalStorage<LotMethodology>(KEY, "FIFO");
+  const { user } = useAuth();
+  const userId = user?.id ?? null;
 
-  // One-time hydration from the server (cross-device source of truth). setLocal
-  // propagates to all mounted hook instances via the in-tab storage event.
+  // Гидрация с сервера (cross-device + impersonation source of truth). Повторно
+  // тянет при смене userId. setLocal распространяет значение на все смонтированные
+  // инстансы хука через storage-событие в той же вкладке.
   useEffect(() => {
-    if (hydrated) return;
-    hydrated = true;
+    if (!userId) return;
+    if (hydratedForUserId === userId) return;
+    hydratedForUserId = userId;
     api
       .get("/v1/me/lot-methodology", schema)
       .then((r) => setLocal(r.methodology))
       .catch(() => {
-        /* unauthenticated / transient — keep localStorage value */
+        // unauthenticated / transient — оставляем localStorage; разрешаем ретрай
+        // при следующем рендере (не залипаем на неудачной гидрации).
+        if (hydratedForUserId === userId) hydratedForUserId = null;
       });
-  }, [setLocal]);
+  }, [setLocal, userId]);
 
   const setM = useCallback(
     (val: LotMethodology) => {

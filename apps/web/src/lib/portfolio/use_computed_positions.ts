@@ -51,7 +51,10 @@ import {
 import { applyNonLpOpenerOverride } from "@/lib/nonlp/apply_opener_override";
 import { useLotMethodology } from "@/lib/lot_methodology";
 import { useServerCanonicalQuery } from "@/features/ucb/hooks";
-import { shouldAdoptServerPositions } from "@/features/ucb/serve-decision";
+import {
+  describeAdoption,
+  type AdoptionVerdict,
+} from "@/features/ucb/serve-decision";
 import { useWalletHistPrices } from "@/lib/portfolio/use_hist_prices";
 import { defillamaCoinKey, fetchHistoricalPrices } from "@/lib/defillama";
 import {
@@ -568,25 +571,26 @@ export function useComputedPositions(): ComputedPositions {
   // adopted positions can lack those fields until those stages land. This is
   // safe because the FLIP (enabling the flag) is gated on the shadow-diff showing
   // parity on those fields first (M5) — adoption code does not re-detect it.
-  const positions = useMemo<OpenPosition[]>(() => {
-    if (
-      shouldAdoptServerPositions({
+  // Один вердикт адопции: источник (server|client) + причина. Используется и
+  // для выбора массива, и для UI-бейджа «расчёт: сервер / браузер (почему)»,
+  // чтобы клиентский fallback перестал быть тихим.
+  const adoption = useMemo<AdoptionVerdict>(
+    () =>
+      describeAdoption({
         flagEnabled: serverCanonical.flagEnabled,
         resp: serverCanonical.data ?? null,
         clientLotMethodology: lotMethodology,
         clientPositions,
-      }) &&
-      serverCanonical.data?.positions
-    ) {
+      }),
+    [serverCanonical.flagEnabled, serverCanonical.data, lotMethodology, clientPositions],
+  );
+
+  const positions = useMemo<OpenPosition[]>(() => {
+    if (adoption.source === "server" && serverCanonical.data?.positions) {
       return serverCanonical.data.positions as OpenPosition[];
     }
     return clientPositions;
-  }, [
-    serverCanonical.flagEnabled,
-    serverCanonical.data,
-    lotMethodology,
-    clientPositions,
-  ]);
+  }, [adoption.source, serverCanonical.data, clientPositions]);
 
   // ── A3.2 dev-only golden capture ──────────────────────────────────────
   // Publish the EXACT assembled ReplayInput pieces the pipeline just consumed
@@ -653,6 +657,9 @@ export function useComputedPositions(): ComputedPositions {
 
   return {
     positions,
+    /** Источник показанных позиций (server|client) + причина — для UI-бейджа. */
+    positionsSource: adoption.source,
+    positionsServeReason: adoption.reason,
     positionsRaw,
     loadedList,
     opsByWallet,
