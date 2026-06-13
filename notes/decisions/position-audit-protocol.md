@@ -13,6 +13,25 @@
 источников (DeBank/Krystal/Etherscan/Alchemy) + эталонов. 6 слоёв проверки,
 per-column вердикт **OK / WARN / FAIL** + root cause + фикс.
 
+> **🔒 ЖЕЛЕЗНОЕ ПРАВИЛО (owner 2026-06-13): АУДИТ ВСЕГДА НА СЕРВЕРНОМ ДВИЖКЕ.**
+> Аудируемые значения позиций берём ИЗ СЕРВЕРНОГО движка (`@cap-flow/ucb` через
+> `computePositions`/`ucbShadowRunner`), НЕ из браузерного расчёта. Прод теперь
+> server-only (флаг `capflow.feature.ucbServerOnly`, браузер не считает) — аудит
+> обязан проверять то, что реально видит пользователь.
+> Канонический прогон (печатает позиции + таблицу этапов конвейера, пишет
+> `ucb_shadow_results`):
+> ```
+> cd .claude/worktrees/condescending-fermi-99f0ac/apps/api
+> npx tsx --env-file="<repo-root>/.env" scripts/ucb-compute.mts <email|accountId> [--fifo|--lifo|--wac]
+> ```
+> Методику брать как у юзера (`users.lot_methodology`, default FIFO). Трейс
+> конвейера (sources/price/build/override.*/filter.*/verify) — первая карта, где
+> искать баг: `⚠`-этапы (Krystal 402, «N ops без hist-цены», override-дельты,
+> tracker_divergence) = приоритетные цели. Ground truth (sequential WAC от
+> реестра + hist-цены DeFiLlama) считаем НЕЗАВИСИМО и сверяем с серверным
+> выводом — расхождение движок↔GT = находка. Браузер используем лишь чтобы
+> подтвердить «UI = сервер» (бейдж «расчёт: сервер»), не как источник чисел.
+
 **Железные правила (из опыта):**
 - Сверять с **реестром операций**, НЕ только с golden/клиентом — иначе пропустишь
   случай «server==client, но оба неверны» (Alice PT-плечо 2026-06-04).
