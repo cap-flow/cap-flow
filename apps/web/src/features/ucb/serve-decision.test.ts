@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   shouldAdoptServerPositions,
+  shouldServerRecompute,
   describeAdoption,
   walletSetsEqual,
   serverPositionsValid,
@@ -159,5 +160,25 @@ describe("describeAdoption — serverOnly (браузер не считает)",
     expect(
       describeAdoption({ ...base, clientLotMethodology: "FIFO", flagEnabled: true, resp: resp() }),
     ).toEqual({ source: "client", reason: "methodology_mismatch" });
+  });
+});
+
+describe("shouldServerRecompute — когда server-only дёргает пересчёт", () => {
+  it("no_shadow (новый аккаунт moximko) → пересчитываем", () => {
+    expect(shouldServerRecompute("no_shadow")).toBe(true);
+  });
+  it("not_served / methodology_mismatch / stale → пересчитываем", () => {
+    expect(shouldServerRecompute("not_served")).toBe(true);
+    expect(shouldServerRecompute("methodology_mismatch")).toBe(true);
+    expect(shouldServerRecompute("stale")).toBe(true);
+  });
+  it("served / loading / flag_off → НЕ пересчитываем (нет смысла или цикл)", () => {
+    expect(shouldServerRecompute("served")).toBe(false);
+    expect(shouldServerRecompute("loading")).toBe(false);
+    expect(shouldServerRecompute("flag_off")).toBe(false);
+  });
+  it("invalid_payload / shadow_error → НЕ зацикливаемся (нужен разбор)", () => {
+    expect(shouldServerRecompute("invalid_payload")).toBe(false);
+    expect(shouldServerRecompute("shadow_error")).toBe(false);
   });
 });

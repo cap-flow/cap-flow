@@ -157,3 +157,28 @@ export function describeAdoption(args: AdoptDecisionArgs): AdoptionVerdict {
     return { source: "client", reason: "wallet_set_mismatch" };
   return { source: "server", reason: "served" };
 }
+
+/**
+ * Причины адопции, при которых в server-only режиме клиент должен дёрнуть
+ * server-recompute (нет результата / он не подходит — но это ЧИНИТСЯ
+ * пересчётом):
+ *   - `no_shadow`   — НОВЫЙ аккаунт, воркер ещё не считал (инцидент moximko
+ *                     2026-06-12: server-only выключил браузерный fallback →
+ *                     пустая таблица навсегда без этого триггера);
+ *   - `not_served`  — сервер по иной причине не отдал;
+ *   - `methodology_mismatch` — тогл методики ≠ серверной;
+ *   - `stale`       — снапшот свежее последнего shadow.
+ * НЕ триггерим на `loading` (ответ ещё не пришёл), `flag_off`, `served`,
+ * `invalid_payload`/`shadow_error` (пересчёт под той же методикой не починит —
+ * нужен разбор, а не цикл).
+ */
+const RECOMPUTE_REASONS: ReadonlySet<string> = new Set([
+  "no_shadow",
+  "not_served",
+  "methodology_mismatch",
+  "stale",
+]);
+
+export function shouldServerRecompute(reason: string): boolean {
+  return RECOMPUTE_REASONS.has(reason);
+}

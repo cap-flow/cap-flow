@@ -12,6 +12,7 @@ import { useActiveAccount } from "@/features/accounts/hooks";
 import { useResolvedFeatureFlag } from "@/features/feature-flags/hooks";
 
 import { ucbApi, type ServePositionsDto } from "./api";
+import { shouldServerRecompute } from "./serve-decision";
 
 /** Per-user serving flag (default OFF). Mirrors the server route constant. */
 export const UCB_SERVER_CANONICAL_FLAG = "capflow.feature.ucbServerCanonical";
@@ -52,10 +53,16 @@ export function useServerCanonicalQuery(): {
 }
 
 /**
- * Server-only UX: при рассинхроне (методика тогла ≠ серверной / расчёт
- * устарел) сервер пересчитывает аккаунт МГНОВЕННО, не дожидаясь
- * worker-refresh. Гард от циклов: один запуск на (accountId, методика,
- * причина); неудача не ретраится автоматически (бейдж остаётся честным).
+ * Server-only UX: когда серверного результата нет или он не подходит, сервер
+ * пересчитывает аккаунт МГНОВЕННО, не дожидаясь worker-refresh. Покрывает:
+ *   - `no_shadow`     — НОВЫЙ аккаунт, воркер ещё не считал (инцидент moximko
+ *                       2026-06-12: подключил кошелёк → пустая таблица навсегда,
+ *                       т.к. server-only выключил браузерный fallback);
+ *   - `not_served`    — сервер по иной причине не отдал;
+ *   - `methodology_mismatch` — тогл методики ≠ серверной;
+ *   - `stale`         — снапшот свежее последнего shadow.
+ * Гард от циклов: один запуск на (accountId, методика, причина); неудача не
+ * ретраится автоматически (бейдж остаётся честным).
  */
 export function useServerRecomputeOnMismatch(args: {
   active: boolean;
@@ -69,8 +76,7 @@ export function useServerRecomputeOnMismatch(args: {
 
   useEffect(() => {
     if (!args.active || !accountId) return;
-    if (args.reason !== "methodology_mismatch" && args.reason !== "stale")
-      return;
+    if (!shouldServerRecompute(args.reason)) return;
     const key = `${accountId}|${args.lotMethodology}|${args.reason}`;
     if (firedFor.current === key) return;
     firedFor.current = key;
