@@ -696,6 +696,9 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
       });
       await api.register(walletsRoutes, {
         service: walletsService,
+        // Добавление адреса → немедленный + recurring refresh (новый аккаунт
+        // иначе не считался до рестарта воркера — инцидент moximko).
+        refresh: refreshQueue,
         prefix: "/accounts",
       });
       await api.register(operationsRoutes, {

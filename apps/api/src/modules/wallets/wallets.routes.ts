@@ -57,8 +57,35 @@ const addressResponse = z.object({
   createdAt: z.string().datetime(),
 });
 
+/**
+ * Очередь refresh — нужна, чтобы при добавлении адреса СРАЗУ посчитать аккаунт
+ * на сервере (снапшот → shadow), а не ждать периодического воркера. Recurring
+ * планируется только на буте воркера для уже существующих аккаунтов
+ * (worker.ts findAllActive) — НОВЫЙ аккаунт без этого не считался вообще
+ * (инцидент moximko 2026-06-12: подключил кошелёк → пусто). Опционально:
+ * тесты роутов могут не передавать.
+ */
+export interface WalletRefreshEnqueuer {
+  /** Идемпотентно назначить recurring-refresh аккаунту (для новых аккаунтов). */
+  scheduleRecurring(
+    accountId: string,
+    cfg: { everyMs: number; jitterMs: number },
+  ): Promise<void>;
+  /** Поставить немедленный одноразовый refresh. */
+  enqueueManual(
+    accountId: string,
+    actorUserId: string,
+    trigger: "admin" | "user",
+  ): Promise<string>;
+}
+
 interface WalletsRoutesOptions {
   readonly service: WalletsService;
+  /** Если задано — добавление адреса триггерит немедленный + recurring refresh. */
+  readonly refresh?: WalletRefreshEnqueuer;
+  /** Период recurring-refresh (зеркало worker REFRESH_EVERY_MS); дефолт 1ч. */
+  readonly refreshEveryMs?: number;
+  readonly refreshJitterMs?: number;
 }
 
 export async function walletsRoutes(
@@ -177,6 +204,24 @@ export async function walletsRoutes(
         },
         u
       );
+      // Свежий адрес → СРАЗУ считаем аккаунт на сервере (снапшот→shadow), не
+      // ждём периодического воркера. Назначаем recurring (новый аккаунт его не
+      // имел) + ставим немедленный refresh. Fail-soft: проблема постановки в
+      // очередь не должна валить ответ на добавление адреса.
+      if (opts.refresh) {
+        try {
+          await opts.refresh.scheduleRecurring(req.params.id, {
+            everyMs: opts.refreshEveryMs ?? 60 * 60 * 1000,
+            jitterMs: opts.refreshJitterMs ?? 60 * 60 * 1000,
+          });
+          await opts.refresh.enqueueManual(req.params.id, u.id, "user");
+        } catch (err) {
+          req.log.warn(
+            { err, accountId: req.params.id },
+            "[wallets] не удалось поставить refresh после добавления адреса",
+          );
+        }
+      }
       return reply.status(201).send(toAddressResponse(row));
     }
   );
